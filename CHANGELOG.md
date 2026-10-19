@@ -8,6 +8,20 @@ that gets used, and add an entry here.
 - **Minor** (1.8.0): new features.
 - **Patch** (1.8.1): fixes only.
 
+## 1.57.0 (2026-10-18)
+
+- **Its own plug-in ID and settings folder.** Griffin Amplification used the same plug-in IDs and the
+  same settings folder as the plug-in it was forked from, so a DAW couldn't tell the two VST3s apart
+  and the two standalone apps shared settings. It now has its own IDs (`GrAm` / `GrWj`) and keeps its
+  settings, presets, autosave and MIDI map in `%LOCALAPPDATA%\GriffinAmplification`.
+- **Your settings come with you.** On the first run, the old `%LOCALAPPDATA%\NeuralAmpModeler` folder is
+  copied across (only if it's this app's: it has `ui.ini`), and the old folder is left in place. Tested:
+  the copy is identical, an existing new folder is never overwritten, and the original app's folder
+  isn't touched.
+- **DAW users:** the VST3 is a new plug-in as far as a DAW is concerned, so a session saved with an
+  older version will show it as missing. Insert Griffin Amplification again and load your preset.
+  The standalone app isn't affected.
+
 ## 1.56.0 (2026-10-18)
 
 - **Griffin Amplification's own name throughout.** Settings > About now reads GRIFFIN AMPLIFICATION

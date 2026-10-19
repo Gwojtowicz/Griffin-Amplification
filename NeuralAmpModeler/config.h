@@ -1,18 +1,22 @@
 #define PLUG_NAME "Griffin Amplification"
 #define PLUG_MFR "Griffin Wojtowicz"
-#define PLUG_VERSION_HEX 0x00013800
-#define PLUG_VERSION_STR "1.56.0"
-#define PLUG_UNIQUE_ID '1YEo'
-#define PLUG_MFR_ID 'SDAa'
+#define PLUG_VERSION_HEX 0x00013900
+#define PLUG_VERSION_STR "1.57.0"
+// 1.57.0: Griffin Amplification's own IDs, so a DAW can tell it apart from the plug-in it was forked
+// from (the VST3 class IDs are made from these two).
+#define PLUG_UNIQUE_ID 'GrAm'
+#define PLUG_MFR_ID 'GrWj'
 #define PLUG_URL_STR "https://github.com/Gwojtowicz/Griffin-Amplification"
 #define PLUG_EMAIL_STR "spam@me.com"
 #define PLUG_COPYRIGHT_STR "Copyright 2022 Steven Atkinson; 2026 Griffin Wojtowicz"
 #define PLUG_CLASS_NAME NeuralAmpModeler
-#define BUNDLE_NAME "NeuralAmpModeler"
-#define BUNDLE_MFR "StevenAtkinson"
+// 1.57.0: also the settings folder (%LOCALAPPDATA%\GriffinAmplification) and the app's single-instance
+// name. The old NeuralAmpModeler folder is copied over on first run (see the top of NeuralAmpModeler.cpp).
+#define BUNDLE_NAME "GriffinAmplification"
+#define BUNDLE_MFR "GriffinWojtowicz"
 #define BUNDLE_DOMAIN "com"
 
-#define SHARED_RESOURCES_SUBPATH "NeuralAmpModeler"
+#define SHARED_RESOURCES_SUBPATH "GriffinAmplification"
 
 #ifdef APP_API
   #define PLUG_CHANNEL_IO "1-2"

@@ -15,7 +15,7 @@
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-f2a541">
   <img alt="Platform: Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-5cc8ff">
-  <img alt="Version 1.56.0" src="https://img.shields.io/badge/version-1.56.0-c49bff">
+  <img alt="Version 1.57.0" src="https://img.shields.io/badge/version-1.57.0-c49bff">
 </p>
 
 Most amp sims are black boxes: you turn a knob and something changes. Griffin Amplification

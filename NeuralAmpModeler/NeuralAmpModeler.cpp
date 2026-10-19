@@ -58,6 +58,24 @@ const double kDCBlockerFrequency = 5.0;
 
 // Styles. Built from the theme colours (Colors.h), so they're rebuilt by _RebuildStyles at the start
 // of every layout -- a theme change (1.48.0) then shows up everywhere once the UI is rebuilt.
+// 1.57.0: settings, presets, the autosave and the MIDI map moved from %LOCALAPPDATA%\NeuralAmpModeler to
+// %LOCALAPPDATA%\<BUNDLE_NAME>, so this app no longer shares a folder with the plug-in it was forked from.
+// On the first run the old folder is copied across, before the app reads settings.ini (a static
+// initializer runs before the app's main). Only a folder this app wrote is copied (it has ui.ini, which
+// only this app makes), and the old one is left in place.
+static const bool gSettingsFolderMigrated = []() {
+  namespace fs = std::filesystem;
+  const char* base = std::getenv("LOCALAPPDATA");
+  if (base == nullptr)
+    return false;
+  std::error_code ec;
+  const fs::path from = fs::u8path(base) / "NeuralAmpModeler", to = fs::u8path(base) / BUNDLE_NAME;
+  if (fs::exists(to, ec) || !fs::exists(from / "ui.ini", ec))
+    return false;
+  fs::copy(from, to, fs::copy_options::recursive, ec);
+  return !ec;
+}();
+
 static IVColorSpec _MakeColorSpec()
 {
   return IVColorSpec{
@@ -3821,7 +3839,7 @@ std::string NeuralAmpModeler::_MidiMapPath() const
   // Next to settings.ini and the autosave, shared by the app and the plug-in: it's your pedal's
   // layout, not part of a sound.
   const char* base = std::getenv("LOCALAPPDATA");
-  std::string dir = base ? std::string(base) + "\\NeuralAmpModeler" : std::string(".");
+  std::string dir = base ? std::string(base) + "\\" BUNDLE_NAME : std::string(".");
   std::error_code ec;
   std::filesystem::create_directories(std::filesystem::u8path(dir), ec);
   return dir + "\\midimap.txt";
@@ -4253,7 +4271,7 @@ void NeuralAmpModeler::_SetSpecStripShown(bool show)
 #ifdef APP_API
 void NeuralAmpModeler::_GetAutosavePath(WDL_String& path) const
 {
-  INIPath(path, BUNDLE_NAME); // Same folder as settings.ini: %LOCALAPPDATA%\NeuralAmpModeler (no trailing slash)
+  INIPath(path, BUNDLE_NAME); // Same folder as settings.ini: %LOCALAPPDATA%\GriffinAmplification (no trailing slash)
   std::filesystem::create_directories(path.Get());
   path.Append("\\autosave.namstate");
 }

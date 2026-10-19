@@ -727,7 +727,7 @@ doesn't model anything separately. Close it with the X in the corner.
   - **50 to 200 ms/div** scrolls (roll mode), for slow changes like sag and blocking recovery.
   - **FREEZE** holds the picture.
 - **CSV LOG** (bottom left): writes one row every 0.25 s to
-  `%LOCALAPPDATA%\NeuralAmpModeler\debug-logs\griffin-debug-<date>-<time>.csv`. **OPEN LOG FOLDER**
+  `%LOCALAPPDATA%\GriffinAmplification\debug-logs\griffin-debug-<date>-<time>.csv`. **OPEN LOG FOLDER**
   opens that folder. Each row has:
   - every Tube Lab setting, plus a `changes` column, for example `Drive 12.0 -> 18.0`
   - the measurements from the readout, the feel, and CPU
@@ -855,7 +855,7 @@ Settings has a **THEME** row: six palette swatches, **DARK / LIGHT**, and **SPEC
   drops to while they're open (`mSpecStripCtls` keeps both rects).
 - The analyzer (1.50.0) is multi-resolution: FFT sizes 8192 / 4096 / 2048 / 1024, split at 120, 400 and
   1400 Hz with half-octave cross-fades, each reading its newest N samples.
-- Stored in `%LOCALAPPDATA%\NeuralAmpModeler\ui.ini` (`theme=`, `light=`, `spectrum=`), shared by the
+- Stored in `%LOCALAPPDATA%\GriffinAmplification\ui.ini` (`theme=`, `light=`, `spectrum=`), shared by the
   app and the plug-in and kept out of presets.
 
 ## Audio buffer and your interface (1.51.0)
@@ -1153,7 +1153,7 @@ its mapping. The strip along the bottom lists every mapping and the last MIDI me
 **Where mappings live**
 
 Mappings belong to the app, not to a preset: your pedal does the same thing whatever sound you load.
-They're saved in `%LOCALAPPDATA%\NeuralAmpModeler\midimap.txt`, shared by the app and the plug-in.
+They're saved in `%LOCALAPPDATA%\GriffinAmplification\midimap.txt`, shared by the app and the plug-in.
 Without that file, the app starts from the original Rig Kontrol 3 layout: CC 76-79 = COMP, OD,
 CHORUS, DELAY; CC 80 = every REVERB; CC 81 = A/B; CC 82 = tuner; CC 83 = FX loop; CC 64 (toe
 switch) = Tube Lab; CC 1/4/7/11 = volume. Delete the file to go back to that layout.
@@ -1196,7 +1196,7 @@ params on load. After the capture-pedal paths come `###CabLabIRV1###` (CAB LAB's
 `###CabIRRightV1###` (the right-channel cab IR's path, or empty) and `###ABSlotsV1###` (the index
 of the A/B slot that isn't live, then its model, cab IR and right-channel IR paths; `ABSlot` is
 the live one). A state without a section clears what it holds. The autosave is in
-`%LOCALAPPDATA%\NeuralAmpModeler\autosave.namstate`.
+`%LOCALAPPDATA%\GriffinAmplification\autosave.namstate`.
 
 ## Credits
 
