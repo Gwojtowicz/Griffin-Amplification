@@ -1,0 +1,2 @@
+Griffin Amplification changelog
+https://github.com/Gwojtowicz/Griffin-Amplification/blob/main/CHANGELOG.md

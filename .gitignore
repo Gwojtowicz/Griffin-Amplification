@@ -1,0 +1,21 @@
+.DS_Store
+xcuserdata
+*.RPP-bak
+build-*
+.idea/
+
+*.ipch
+*.db
+*.suo
+*/.vs
+*.pem
+mkcert*
+
+NeuralAmpModeler/*.wav
+NeuralAmpModeler/peaks/
+
+# Griffin Amplification export
+NeuralAmpModeler/backup-*/
+*.vcxproj.user
+NeuralAmpModeler/resources/img_original_backup/
+tools/tone3000_fetch.py

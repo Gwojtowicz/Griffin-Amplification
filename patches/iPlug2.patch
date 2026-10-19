@@ -1,0 +1,527 @@
+diff --git a/Dependencies/IGraphics/NanoVG/src/nanovg_gl.h b/Dependencies/IGraphics/NanoVG/src/nanovg_gl.h
+index 798b2369a..a7f09ae47 100644
+--- a/Dependencies/IGraphics/NanoVG/src/nanovg_gl.h
++++ b/Dependencies/IGraphics/NanoVG/src/nanovg_gl.h
+@@ -270,9 +270,24 @@ struct GLNVGcontext {
+ 	#endif
+ 
+ 	int dummyTex;
++
++	// Griffin Amp: a hardware scissor (framebuffer pixels: on, x, y, w, h) for the next flushes. NanoVG's
++	// own scissor works in the fragment shader, so a path still rasterizes in full; with this on, the GPU
++	// skips everything outside the region being repainted.
++	int hwScissor[5];
+ };
+ typedef struct GLNVGcontext GLNVGcontext;
+ 
++static void nvglSetHardwareScissor(NVGcontext* ctx, int enabled, int x, int y, int w, int h)
++{
++	GLNVGcontext* gl = (GLNVGcontext*)nvgInternalParams(ctx)->userPtr;
++	gl->hwScissor[0] = enabled;
++	gl->hwScissor[1] = x;
++	gl->hwScissor[2] = y;
++	gl->hwScissor[3] = w;
++	gl->hwScissor[4] = h;
++}
++
+ static int glnvg__maxi(int a, int b) { return a > b ? a : b; }
+ 
+ #ifdef NANOVG_GLES2
+@@ -1191,7 +1206,12 @@ static void glnvg__renderFlush(void* uptr)
+ 		glFrontFace(GL_CCW);
+ 		glEnable(GL_BLEND);
+ 		glDisable(GL_DEPTH_TEST);
+-		glDisable(GL_SCISSOR_TEST);
++		if (gl->hwScissor[0]) {
++			glEnable(GL_SCISSOR_TEST);
++			glScissor(gl->hwScissor[1], gl->hwScissor[2], gl->hwScissor[3], gl->hwScissor[4]);
++		} else {
++			glDisable(GL_SCISSOR_TEST);
++		}
+ 		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+ 		glStencilMask(0xffffffff);
+ 		glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+diff --git a/Dependencies/IPlug/RTAudio/RtAudio.cpp b/Dependencies/IPlug/RTAudio/RtAudio.cpp
+index 0837d98ef..7476b0276 100755
+--- a/Dependencies/IPlug/RTAudio/RtAudio.cpp
++++ b/Dependencies/IPlug/RTAudio/RtAudio.cpp
+@@ -2772,6 +2772,15 @@ static ASIOCallbacks asioCallbacks;
+ static ASIODriverInfo driverInfo;
+ static CallbackInfo *asioCallbackInfo;
+ static bool asioXRun;
++// Griffin Amplification: a driver reset request (e.g. the buffer size was changed in the interface's
++// own control panel) is remembered here, so the app can restart its stream from the main thread.
++static volatile bool asioResetRequested = false;
++bool RtApiAsioConsumeResetRequest()
++{
++  const bool requested = asioResetRequested;
++  asioResetRequested = false;
++  return requested;
++}
+ 
+ struct AsioHandle {
+   int drainCounter;       // Tracks callback counts when draining
+@@ -3676,6 +3685,7 @@ static long asioMessages( long selector, long value, void* /*message*/, double*
+     // ASIODisposeBuffers(), Destruction Afterwards you initialize the
+     // driver again.
+     std::cerr << "\nRtApiAsio: driver reset requested!!!" << std::endl;
++    asioResetRequested = true;
+     ret = 1L;
+     break;
+   case kAsioResyncRequest:
+diff --git a/IGraphics/Drawing/IGraphicsNanoVG.cpp b/IGraphics/Drawing/IGraphicsNanoVG.cpp
+index fa557ff38..e22daf846 100644
+--- a/IGraphics/Drawing/IGraphicsNanoVG.cpp
++++ b/IGraphics/Drawing/IGraphicsNanoVG.cpp
+@@ -8,6 +8,7 @@
+  ==============================================================================
+ */
+ 
++#include <algorithm>
+ #include <cmath>
+ 
+ #include "IGraphicsNanoVG.h"
+@@ -70,6 +71,29 @@
+ using namespace iplug;
+ using namespace igraphics;
+ 
++// Griffin local edit (1.32.2): the main frame buffer and the GL viewport are whole device pixels
++// (WindowWidth() * screen scale, truncated), so NanoVG gets the view size that matches them exactly.
++// Passing WindowWidth() itself made one logical unit slightly less than screenScale device pixels
++// whenever that product wasn't whole (a 663-unit-tall window at 2.5x is 1657.5 px; the buffer is
++// 1657). Every pixel-aligned clip edge then fell mid-pixel, and NanoVG's anti-aliased scissor let
++// the controls under an opaque full-window page bleed through as faint lines along the edges of the
++// regions being redrawn.
++static int MainFramePixels(int windowSize, float screenScale)
++{
++  return static_cast<int>(static_cast<float>(windowSize) * screenScale);
++}
++
++static float MainFrameViewSize(int windowSize, float screenScale)
++{
++  return static_cast<float>(MainFramePixels(windowSize, screenScale)) / screenScale;
++}
++
++static void BeginMainNVGFrame(NVGcontext* pContext, int windowWidth, int windowHeight, float screenScale)
++{
++  nvgBeginFrame(pContext, MainFrameViewSize(windowWidth, screenScale), MainFrameViewSize(windowHeight, screenScale),
++                screenScale);
++}
++
+ #pragma mark - Private Classes and Structs
+ 
+ class IGraphicsNanoVG::Bitmap : public APIBitmap
+@@ -112,6 +136,7 @@ IGraphicsNanoVG::Bitmap::Bitmap(IGraphicsNanoVG* pGraphics, NVGcontext* pContext
+   mnvgClearWithColor(mVG, nvgRGBAf(0, 0, 0, 0));
+ #else
+   glViewport(0, 0, width, height);
++  glDisable(GL_SCISSOR_TEST); // a region's scissor may still be on (Griffin Amp): clear all of it
+   glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+ #endif
+@@ -382,7 +407,7 @@ APIBitmap* IGraphicsNanoVG::CreateAPIBitmap(int width, int height, float scale,
+   if (mInDraw)
+   {
+     nvgBindFramebuffer(mMainFrameBuffer); // begin main frame buffer update
+-    nvgBeginFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
++    BeginMainNVGFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
+   }
+   
+   return pAPIBitmap;
+@@ -507,22 +532,70 @@ void IGraphicsNanoVG::BeginFrame()
+ #endif
+   
+   nvgBindFramebuffer(mMainFrameBuffer); // begin main frame buffer update
+-  nvgBeginFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
++  BeginMainNVGFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
++}
++
++void IGraphicsNanoVG::_ApplyRegionScissor(bool toMainFrame)
++{
++#ifdef IGRAPHICS_GL
++  const int* r = mRegionScissor;
++  nvglSetHardwareScissor(mVG, toMainFrame && r[2] > 0, r[0], r[1], r[2], r[3]);
++#endif
++}
++
++void IGraphicsNanoVG::BeginDrawRegion(const IRECT& bounds, float scale)
++{
++#ifdef IGRAPHICS_GL
++  if (!mLayers.empty())
++    return;
++  nvgEndFrame(mVG); // flush what came before, unclipped
++  // GL's framebuffer rows count up from the bottom. A pixel of slack on each side.
++  const int fbH = MainFramePixels(WindowHeight(), GetScreenScale());
++  const int x0 = std::max(0, static_cast<int>(std::floor(bounds.L * scale)) - 1);
++  const int x1 = static_cast<int>(std::ceil(bounds.R * scale)) + 1;
++  const int y0 = std::max(0, fbH - static_cast<int>(std::ceil(bounds.B * scale)) - 1);
++  const int y1 = fbH - static_cast<int>(std::floor(bounds.T * scale)) + 1;
++  mRegionScissor[0] = x0;
++  mRegionScissor[1] = y0;
++  mRegionScissor[2] = std::max(0, x1 - x0);
++  mRegionScissor[3] = std::max(0, y1 - y0);
++  _ApplyRegionScissor(true);
++  nvgBindFramebuffer(mMainFrameBuffer);
++  BeginMainNVGFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
++#endif
++}
++
++void IGraphicsNanoVG::EndDrawRegion()
++{
++#ifdef IGRAPHICS_GL
++  if (mRegionScissor[2] == 0)
++    return;
++  nvgEndFrame(mVG); // flush the region, clipped
++  glDisable(GL_SCISSOR_TEST);
++  mRegionScissor[2] = mRegionScissor[3] = 0;
++  _ApplyRegionScissor(false);
++  nvgBindFramebuffer(mMainFrameBuffer);
++  BeginMainNVGFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
++#endif
+ }
+ 
+ void IGraphicsNanoVG::EndFrame()
+ {
++  mRegionScissor[2] = mRegionScissor[3] = 0;
++  _ApplyRegionScissor(false);
+   nvgEndFrame(mVG); // end main frame buffer update
+   nvgBindFramebuffer(nullptr);
+-  nvgBeginFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
++  BeginMainNVGFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
+   
+-  NVGpaint img = nvgImagePattern(mVG, 0, 0, WindowWidth(), WindowHeight(), 0, mMainFrameBuffer->image, 1.0f);
++  const float viewW = MainFrameViewSize(WindowWidth(), GetScreenScale());
++  const float viewH = MainFrameViewSize(WindowHeight(), GetScreenScale());
++  NVGpaint img = nvgImagePattern(mVG, 0, 0, viewW, viewH, 0, mMainFrameBuffer->image, 1.0f);
+ 
+   nvgSave(mVG);
+   nvgResetTransform(mVG);
+   nvgTranslate(mVG, mXTranslation, mYTranslation);
+   nvgBeginPath(mVG);
+-  nvgRect(mVG, 0, 0, WindowWidth(), WindowHeight());
++  nvgRect(mVG, 0, 0, viewW, viewH);
+   nvgFillPaint(mVG, img);
+   nvgFill(mVG);
+   nvgRestore(mVG);
+@@ -767,12 +840,14 @@ void IGraphicsNanoVG::UpdateLayer()
+ #ifdef IGRAPHICS_GL
+     glViewport(0, 0, WindowWidth() * GetScreenScale(), WindowHeight() * GetScreenScale());
+ #endif
++    _ApplyRegionScissor(true); // back on the main frame: clip to the region again
+     nvgBindFramebuffer(mMainFrameBuffer);
+-    nvgBeginFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
++    BeginMainNVGFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
+   }
+   else
+   {
+     nvgEndFrame(mVG);
++    _ApplyRegionScissor(false); // a layer has its own pixels
+ #ifdef IGRAPHICS_GL
+     const double scale = GetBackingPixelScale();
+     glViewport(0, 0, mLayers.top()->Bounds().W() * scale, mLayers.top()->Bounds().H() * scale);
+diff --git a/IGraphics/Drawing/IGraphicsNanoVG.h b/IGraphics/Drawing/IGraphicsNanoVG.h
+index d93a85fca..1b74f8b06 100644
+--- a/IGraphics/Drawing/IGraphicsNanoVG.h
++++ b/IGraphics/Drawing/IGraphicsNanoVG.h
+@@ -90,6 +90,8 @@ public:
+   const char* GetDrawingAPIStr() override;
+ 
+   void BeginFrame() override;
++  void BeginDrawRegion(const IRECT& bounds, float scale) override;
++  void EndDrawRegion() override;
+   void EndFrame() override;
+   void OnViewInitialized(void* pContext) override;
+   void OnViewDestroyed() override;
+@@ -160,6 +162,9 @@ private:
+   StaticStorage<APIBitmap> mBitmapCache; //not actually static (doesn't require retaining or releasing)
+   NVGcontext* mVG = nullptr;
+   NVGframebuffer* mMainFrameBuffer = nullptr;
++  // Griffin Amp: the region being repainted, in main framebuffer pixels (w = 0: none).
++  int mRegionScissor[4] = {0, 0, 0, 0};
++  void _ApplyRegionScissor(bool toMainFrame);
+   int mInitialFBO = 0;
+ };
+ 
+diff --git a/IGraphics/IControl.h b/IGraphics/IControl.h
+index 524115cd0..34ac5369f 100644
+--- a/IGraphics/IControl.h
++++ b/IGraphics/IControl.h
+@@ -402,6 +402,11 @@ public:
+   /* Set the control clean, i.e. Called by IGraphics draw loop after control has been drawn */
+   virtual void SetClean() { mDirty = false; }
+ 
++  /* Griffin Amp: set by the IGraphics draw loop once a hidden control's area has been repainted (erasing it),
++   * so a hidden control that keeps getting marked dirty doesn't keep repainting what's under it. */
++  bool GetHiddenErased() const { return mHiddenErased; }
++  void SetHiddenErased(bool erased) { mHiddenErased = erased; }
++
+   /* Called at each display refresh by the IGraphics draw loop, triggers the control's AnimationFunc if it is set */
+   void Animate();
+ 
+@@ -546,6 +551,7 @@ protected:
+   int mTextEntryLength = DEFAULT_TEXT_ENTRY_LEN;
+   bool mDirty = true;
+   bool mHide = false;
++  bool mHiddenErased = false;
+   bool mDisabled = false;
+   bool mDisablePrompt = true;
+   bool mDblAsSingleClick = false;
+@@ -884,26 +890,68 @@ public:
+     // NO-OP
+   }
+   
++  /** Griffin Amplification: draws single-line text so it fits `bounds`' width -- shrunk to as
++   * little as 70% of its size, then shortened in the middle with an ellipsis if it still doesn't fit. */
++  static void DrawTextFitted(IGraphics& g, const IText& text, const char* str, const IRECT& bounds, const IBlend* pBlend)
++  {
++    if (!str || !*str || strchr(str, '\n') || bounds.W() <= 2.f)
++    {
++      g.DrawText(text, str, bounds, pBlend);
++      return;
++    }
++    const float maxW = bounds.W() - 2.f;
++    IText fitted = text;
++    IRECT measured;
++    float w = g.MeasureText(fitted, str, measured);
++    // Shrink (text width isn't exactly proportional to size, so step down until it fits).
++    const float minSize = text.mSize * 0.7f;
++    if (w > maxW && w > 0.f)
++    {
++      fitted.mSize = std::max(minSize, text.mSize * maxW / w);
++      w = g.MeasureText(fitted, str, measured);
++      while (w > maxW && fitted.mSize > minSize)
++      {
++        fitted.mSize = std::max(minSize, fitted.mSize * 0.96f);
++        w = g.MeasureText(fitted, str, measured);
++      }
++    }
++    if (w <= maxW)
++    {
++      g.DrawText(fitted, str, bounds, pBlend);
++      return;
++    }
++    const std::string s(str);
++    std::string shortened = s;
++    for (size_t keep = s.size() - 1; keep >= 2; keep--)
++    {
++      const size_t head = (keep + 1) / 2, tail = keep / 2;
++      shortened = s.substr(0, head) + "..." + s.substr(s.size() - tail);
++      if (g.MeasureText(fitted, shortened.c_str(), measured) <= maxW)
++        break;
++    }
++    g.DrawText(fitted, shortened.c_str(), bounds, pBlend);
++  }
++
+   /** Draw the IVControl label text */
+   virtual void DrawLabel(IGraphics& g)
+   {
+     if (mLabelBounds.H() && mStyle.showLabel)
+     {
+       IBlend blend = mControl->GetBlend();
+-      g.DrawText(mStyle.labelText, mLabelStr.Get(), mLabelBounds, &blend);
++      DrawTextFitted(g, mStyle.labelText, mLabelStr.Get(), mLabelBounds, &blend);
+     }
+   }
+-  
++
+   /** Draw the IVControl value text */
+   virtual void DrawValue(IGraphics& g, bool mouseOver)
+   {
+     if(mouseOver)
+       g.FillRect(COLOR_TRANSLUCENT, mValueBounds);
+-    
++
+     if (mStyle.showValue)
+     {
+       IBlend blend = mControl->GetBlend();
+-      g.DrawText(mStyle.valueText, mValueStr.Get(), mValueBounds, &blend);
++      DrawTextFitted(g, mStyle.valueText, mValueStr.Get(), mValueBounds, &blend);
+     }
+   }
+   
+diff --git a/IGraphics/IGraphics.cpp b/IGraphics/IGraphics.cpp
+index 2be656bce..ef94dde35 100644
+--- a/IGraphics/IGraphics.cpp
++++ b/IGraphics/IGraphics.cpp
+@@ -813,8 +813,18 @@ bool IGraphics::IsDirty(IRECTList& rects)
+   bool dirty = false;
+     
+   auto func = [&dirty, &rects](IControl* pControl) {
++    // Griffin Amp: a hidden control's area only needs repainting once (to erase it). Hidden controls
++    // that still get marked dirty -- a tuner fed every tick, a switch animating behind a closed popup
++    // -- used to repaint everything under them every frame.
++    if (!pControl->IsHidden())
++      pControl->SetHiddenErased(false);
++    else if (pControl->GetHiddenErased())
++      return;
++
+     if (pControl->IsDirty())
+     {
++      if (pControl->IsHidden())
++        pControl->SetHiddenErased(true);
+       // N.B padding outlines for single line outlines
+       auto rectToAdd = pControl->GetRECT().GetPadded(0.75);
+       
+@@ -929,7 +939,9 @@ void IGraphics::Draw(IRECTList& rects)
+   {
+     IRECT r = rects.Bounds();
+     r.PixelAlign(scale);
++    BeginDrawRegion(r, scale);
+     Draw(r, scale);
++    EndDrawRegion();
+   }
+   else
+   {
+@@ -937,7 +949,11 @@ void IGraphics::Draw(IRECTList& rects)
+     rects.Optimize();
+ 
+     for (auto i = 0; i < rects.Size(); i++)
++    {
++      BeginDrawRegion(rects.Get(i), scale);
+       Draw(rects.Get(i), scale);
++      EndDrawRegion();
++    }
+   }
+   
+   EndFrame();
+@@ -968,7 +984,7 @@ void IGraphics::OnMouseDown(const std::vector<IMouseInfo>& points)
+     const IMouseMod& mod = point.ms;
+     
+     IControl* pCapturedControl = GetMouseControl(x, y, true, false, mod.touchID);
+-    
++
+     if (pCapturedControl)
+     {
+       int nVals = pCapturedControl->NVals();
+diff --git a/IGraphics/IGraphics.h b/IGraphics/IGraphics.h
+index cba296cf2..955dcb8d4 100644
+--- a/IGraphics/IGraphics.h
++++ b/IGraphics/IGraphics.h
+@@ -1208,6 +1208,11 @@ private:
+    * @param bounds \todo
+    * @param scale \todo */
+   void Draw(const IRECT& bounds, float scale);
++
++  /** Griffin Amp: called around each region Draw(const IRECT&, float) repaints, so a backend can clip
++   * the whole region in hardware. */
++  virtual void BeginDrawRegion(const IRECT& bounds, float scale) {}
++  virtual void EndDrawRegion() {}
+   
+   /** \todo
+    * @param pControl \todo
+diff --git a/IPlug/APP/IPlugAPP_dialog.cpp b/IPlug/APP/IPlugAPP_dialog.cpp
+index a6c0c0b14..720f883dc 100644
+--- a/IPlug/APP/IPlugAPP_dialog.cpp
++++ b/IPlug/APP/IPlugAPP_dialog.cpp
+@@ -28,6 +28,56 @@ using namespace iplug;
+ using namespace igraphics;
+ #endif
+ 
++#ifdef OS_WIN
++extern bool RtApiAsioConsumeResetRequest();
++
++void IPlugAPPHost::OpenDriverControlPanel()
++{
++  if (mState.mAudioDriverType == kDeviceASIO && mDAC && mDAC->isStreamOpen())
++  {
++    if (ASIOControlPanel() == ASE_OK)
++      return;
++  }
++  ShellExecuteA(gHWND, "open", "control.exe", "mmsys.cpl", nullptr, SW_SHOWNORMAL);
++}
++
++void IPlugAPPHost::OpenPreferencesDialog()
++{
++  // Posted, not sent: the dialog is modal, and the caller may be inside a UI callback.
++  if (gHWND)
++    PostMessage(gHWND, WM_COMMAND, ID_PREFERENCES, 0);
++}
++
++bool IPlugAPPHost::RestartAudioIfDriverAsked()
++{
++  bool restart = RtApiAsioConsumeResetRequest();
++  if (mState.mAudioDriverType != kDeviceASIO || !mDAC || !mDAC->isStreamOpen())
++    return false;
++  // Some drivers (Focusrite) don't ask for a reset when the size is changed in their panel: watch the
++  // size they prefer instead.
++  long minSize, maxSize, preferSize, granularity;
++  if (ASIOGetBufferSize(&minSize, &maxSize, &preferSize, &granularity) == ASE_OK)
++  {
++    if (mDriverPreferredBufferSize > 0 && preferSize != mDriverPreferredBufferSize)
++      restart = true;
++    mDriverPreferredBufferSize = preferSize;
++  }
++  if (!restart)
++    return false;
++  // Adopt the size now set in the driver's own panel: asked for 0, RtAudio opens with the driver's
++  // preferred size. Otherwise a driver that accepts any size would just get the old one again.
++  mState.mBufferSize = 0;
++  TryToChangeAudio();
++  if (mBufferSize > 0)
++  {
++    mState.mBufferSize = mBufferSize;
++    mActiveState.mBufferSize = mBufferSize;
++    UpdateINI();
++  }
++  return true;
++}
++#endif
++
+ #if defined OS_MAC
+ extern int GetTitleBarOffset();
+ #endif
+diff --git a/IPlug/APP/IPlugAPP_host.h b/IPlug/APP/IPlugAPP_host.h
+index 1503c6c49..ff9e327bb 100644
+--- a/IPlug/APP/IPlugAPP_host.h
++++ b/IPlug/APP/IPlugAPP_host.h
+@@ -69,8 +69,8 @@ extern HINSTANCE gHINSTANCE;
+ 
+ BEGIN_IPLUG_NAMESPACE
+ 
+-const int kNumBufferSizeOptions = 11;
+-const std::string kBufferSizeOptions[kNumBufferSizeOptions] = {"32", "64", "96", "128", "192", "256", "512", "1024", "2048", "4096", "8192" };
++const int kNumBufferSizeOptions = 13;
++const std::string kBufferSizeOptions[kNumBufferSizeOptions] = {"32", "48", "64", "96", "128", "192", "256", "384", "512", "1024", "2048", "4096", "8192" };
+ const int kDeviceDS = 0; const int kDeviceCoreAudio = 0; const int kDeviceAlsa = 0;
+ const int kDeviceASIO = 1; const int kDeviceJack = 1;
+ extern UINT gSCROLLMSG;
+@@ -177,6 +177,31 @@ public:
+   bool Init();
+   bool InitState();
+   void UpdateINI();
++
++  /** Griffin Amplification (1.31.0): change the audio buffer size from the plug-in's own Settings page.
++   * Saves it to the INI and restarts audio, as the Preferences dialog does. Call on the main thread. */
++  void SetBufferSize(uint32_t bufferSize)
++  {
++    mState.mBufferSize = bufferSize;
++    UpdateINI();
++    TryToChangeAudio();
++  }
++
++  /** Griffin Amplification (1.51.0): the buffer size the running stream actually got. A driver can
++   * refuse the requested size (many interfaces only run the size set in their own control panel). */
++  uint32_t GetStreamBufferSize() const { return (mDAC && mDAC->isStreamOpen()) ? mBufferSize : 0; }
++
++  /** Griffin Amplification (1.51.0): opens the audio interface's own control panel (ASIO), or the
++   * Windows sound settings for other driver types. Call on the main thread. */
++  void OpenDriverControlPanel();
++
++  /** Griffin Amplification (1.51.0): opens the Preferences dialog (device, sample rate, channels, MIDI). */
++  void OpenPreferencesDialog();
++
++  /** Griffin Amplification (1.51.0): if the ASIO driver asked to be reset, or the buffer size it prefers
++   * changed (set in its own control panel), restarts audio with that size (saved to the INI) and returns
++   * true. Queries the driver: call on the main thread, about once a second. */
++  bool RestartAudioIfDriverAsked();
+   
+   /** Returns the name of the audio device at idx
+    * @param idx The index RTAudio has given the audio device
+@@ -239,6 +264,7 @@ private:
+   uint32_t mSamplesElapsed = 0;
+   uint32_t mVecWait = 0;
+   uint32_t mBufferSize = 512;
++  long mDriverPreferredBufferSize = 0; // Griffin Amplification: last ASIO preferred size seen (0 = none yet)
+   uint32_t mBufIndex = 0; // index for signal vector, loops from 0 to mSigVS
+   bool mExiting = false;
+   bool mAudioEnding = false;

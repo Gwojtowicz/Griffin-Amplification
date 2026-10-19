@@ -1,0 +1,240 @@
+diff --git a/NAM/wavenet/a2_fast.cpp b/NAM/wavenet/a2_fast.cpp
+index 8fd8fc1..1a7bfc6 100644
+--- a/NAM/wavenet/a2_fast.cpp
++++ b/NAM/wavenet/a2_fast.cpp
+@@ -20,6 +20,7 @@
+   #include <sstream>
+   #include <stdexcept>
+   #include <string>
++  #include <type_traits>
+   #include <utility>
+   #include <vector>
+ 
+@@ -27,6 +28,23 @@
+ 
+   #include "../dsp.h"
+ 
++  // Griffin Amplification: hand-written SSE kernel for the 8-channel layers (see Sse8Accum).
++  #if !defined(NAM_A2_SSE) && (defined(_M_X64) || defined(__SSE2__))
++    #define NAM_A2_SSE 1
++  #endif
++  #if NAM_A2_SSE
++    #include <emmintrin.h>
++  #endif
++  // ...and an AVX2+FMA one, picked at run time on CPUs that have it (MSVC x64 only: its intrinsics
++  // need no /arch flag, so the rest of the plugin stays SSE2).
++  #if NAM_A2_SSE && defined(_MSC_VER) && defined(_M_X64)
++    #define NAM_A2_AVX2 1
++    #include <immintrin.h>
++    #include <intrin.h>
++  #else
++    #define NAM_A2_AVX2 0
++  #endif
++
+ namespace nam
+ {
+ namespace wavenet
+@@ -37,6 +55,66 @@ namespace a2_fast
+ namespace
+ {
+ 
++  #if NAM_A2_SSE
++// acc[t] += W * x_t for T frames (T <= 4) with an 8x8 column-major W: each weight column is loaded
++// once and applied to all T frames, the 4-frame tile kept in registers (lo/hi = channels 0-3/4-7).
++// About 2.5x faster than Eigen's general GEMM for these 8x8 x 8xN products, which spent much of
++// its time packing the input block on every call.
++template <int T>
++inline void Sse8Accum(const float* W, const float* const (&x)[4], __m128 (&lo)[4], __m128 (&hi)[4])
++{
++  for (int j = 0; j < 8; j++)
++  {
++    const __m128 wl = _mm_loadu_ps(W + j * 8), wh = _mm_loadu_ps(W + j * 8 + 4);
++    for (int t = 0; t < T; t++)
++    {
++      const __m128 b = _mm_set1_ps(x[t][j]);
++      lo[t] = _mm_add_ps(lo[t], _mm_mul_ps(wl, b));
++      hi[t] = _mm_add_ps(hi[t], _mm_mul_ps(wh, b));
++    }
++  }
++}
++
++inline __m128 Sse8Leaky(__m128 v, __m128 slope)
++{
++  const __m128 neg = _mm_cmplt_ps(v, _mm_setzero_ps());
++  return _mm_or_ps(_mm_and_ps(neg, _mm_mul_ps(v, slope)), _mm_andnot_ps(neg, v));
++}
++  #endif
++
++  #if NAM_A2_AVX2
++// AVX2 + FMA usable: the CPU has them and the OS saves the 256-bit registers.
++inline bool CpuHasAvx2Fma()
++{
++  static const bool has = []() {
++    int r[4];
++    __cpuid(r, 0);
++    if (r[0] < 7)
++      return false;
++    __cpuid(r, 1);
++    const bool fma = (r[2] & (1 << 12)) != 0, osxsave = (r[2] & (1 << 27)) != 0, avx = (r[2] & (1 << 28)) != 0;
++    if (!(fma && osxsave && avx) || (_xgetbv(0) & 6) != 6)
++      return false;
++    __cpuidex(r, 7, 0);
++    return (r[1] & (1 << 5)) != 0; // AVX2
++  }();
++  return has;
++}
++
++// As Sse8Accum, with a whole 8-channel weight column in one register and fused multiply-adds:
++// about 2x the SSE version.
++template <int T>
++inline void Avx8Accum(const float* W, const float* const (&x)[4], __m256 (&acc)[4])
++{
++  for (int j = 0; j < 8; j++)
++  {
++    const __m256 w = _mm256_loadu_ps(W + j * 8);
++    for (int t = 0; t < T; t++)
++      acc[t] = _mm256_fmadd_ps(w, _mm256_broadcast_ss(x[t] + j), acc[t]);
++  }
++}
++  #endif
++
+ // =============================================================================
+ // A2FastModel<Channels>
+ //
+@@ -551,6 +629,111 @@ void A2FastModel<Channels>::_layer_forward_k(Layer& L, const float* cond, int nu
+       lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2;
+     }
+   }
++  #if NAM_A2_SSE
++  else if constexpr (Channels == 8)
++  {
++    // Frame-tiled tap-major with T=4 (the design described above), in SSE: the 4-frame z tile stays
++    // in registers across all K taps, then bias, mixin, LeakyReLU, head sum and the 1x1 residual are
++    // applied to it before moving on. Same math as the Eigen path below; only the float rounding
++    // order differs (~1e-7 relative).
++    const __m128 cbl = _mm_loadu_ps(L.conv_b.data()), cbh = _mm_loadu_ps(L.conv_b.data() + 4);
++    const __m128 mwl = _mm_loadu_ps(L.mixin_w.data()), mwh = _mm_loadu_ps(L.mixin_w.data() + 4);
++    const __m128 lbl = _mm_loadu_ps(L.l1x1_b.data()), lbh = _mm_loadu_ps(L.l1x1_b.data() + 4);
++    const __m128 slope = _mm_set1_ps(kLeakySlope);
++    int tap_base[K];
++    for (int k = 0; k < K; k++)
++      tap_base[k] = tap_base_phys(K - 1 - k);
++  #if NAM_A2_AVX2
++    if (CpuHasAvx2Fma())
++    {
++      const __m256 cb = _mm256_loadu_ps(L.conv_b.data()), mw = _mm256_loadu_ps(L.mixin_w.data());
++      const __m256 lb = _mm256_loadu_ps(L.l1x1_b.data()), slope8 = _mm256_set1_ps(kLeakySlope);
++      auto tile8 = [&](int f0, auto tcount) {
++        constexpr int T = decltype(tcount)::value;
++        __m256 acc[4];
++        for (int t = 0; t < T; t++)
++          acc[t] = _mm256_setzero_ps();
++        for (int k = 0; k < K; k++)
++        {
++          const float* const x[4] = {&L.history[static_cast<size_t>(tap_base[k] + f0) * 8],
++                                     &L.history[static_cast<size_t>(tap_base[k] + f0 + (T > 1 ? 1 : 0)) * 8],
++                                     &L.history[static_cast<size_t>(tap_base[k] + f0 + (T > 2 ? 2 : 0)) * 8],
++                                     &L.history[static_cast<size_t>(tap_base[k] + f0 + (T > 3 ? 3 : 0)) * 8]};
++          Avx8Accum<T>(&L.conv_w[static_cast<size_t>(k) * 64], x, acc);
++        }
++        alignas(32) float a[4][8];
++        for (int t = 0; t < T; t++)
++        {
++          __m256 v = _mm256_fmadd_ps(mw, _mm256_set1_ps(cond[f0 + t]), _mm256_add_ps(acc[t], cb));
++          v = _mm256_blendv_ps(v, _mm256_mul_ps(v, slope8), _mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_LT_OQ));
++          float* hs = &_head_sum[static_cast<size_t>(f0 + t) * 8];
++          _mm256_storeu_ps(hs, _mm256_add_ps(_mm256_loadu_ps(hs), v));
++          _mm256_store_ps(a[t], v);
++          acc[t] = lb;
++        }
++        const float* const ax[4] = {a[0], a[1], a[2], a[3]};
++        Avx8Accum<T>(L.l1x1_w.data(), ax, acc);
++        for (int t = 0; t < T; t++)
++        {
++          float* li = &_layer_in[static_cast<size_t>(f0 + t) * 8];
++          _mm256_storeu_ps(li, _mm256_add_ps(_mm256_loadu_ps(li), acc[t]));
++        }
++      };
++      int f = 0;
++      for (; f + 4 <= num_frames; f += 4)
++        tile8(f, std::integral_constant<int, 4>());
++      for (; f < num_frames; f++)
++        tile8(f, std::integral_constant<int, 1>());
++      _mm256_zeroupper(); // Back to the SSE code without the AVX-SSE transition penalty
++      return;
++    }
++  #endif
++    auto tile = [&](int f0, auto tcount) {
++      constexpr int T = decltype(tcount)::value;
++      __m128 lo[4], hi[4];
++      for (int t = 0; t < T; t++)
++      {
++        lo[t] = _mm_setzero_ps();
++        hi[t] = _mm_setzero_ps();
++      }
++      for (int k = 0; k < K; k++)
++      {
++        const float* const x[4] = {&L.history[static_cast<size_t>(tap_base[k] + f0) * 8],
++                                   &L.history[static_cast<size_t>(tap_base[k] + f0 + (T > 1 ? 1 : 0)) * 8],
++                                   &L.history[static_cast<size_t>(tap_base[k] + f0 + (T > 2 ? 2 : 0)) * 8],
++                                   &L.history[static_cast<size_t>(tap_base[k] + f0 + (T > 3 ? 3 : 0)) * 8]};
++        Sse8Accum<T>(&L.conv_w[static_cast<size_t>(k) * 64], x, lo, hi);
++      }
++      alignas(16) float a[4][8];
++      for (int t = 0; t < T; t++)
++      {
++        const __m128 c = _mm_set1_ps(cond[f0 + t]);
++        const __m128 zl = Sse8Leaky(_mm_add_ps(_mm_add_ps(lo[t], cbl), _mm_mul_ps(mwl, c)), slope);
++        const __m128 zh = Sse8Leaky(_mm_add_ps(_mm_add_ps(hi[t], cbh), _mm_mul_ps(mwh, c)), slope);
++        float* hs = &_head_sum[static_cast<size_t>(f0 + t) * 8];
++        _mm_storeu_ps(hs, _mm_add_ps(_mm_loadu_ps(hs), zl));
++        _mm_storeu_ps(hs + 4, _mm_add_ps(_mm_loadu_ps(hs + 4), zh));
++        _mm_store_ps(a[t], zl);
++        _mm_store_ps(a[t] + 4, zh);
++        lo[t] = _mm_setzero_ps();
++        hi[t] = _mm_setzero_ps();
++      }
++      const float* const ax[4] = {a[0], a[1], a[2], a[3]};
++      Sse8Accum<T>(L.l1x1_w.data(), ax, lo, hi);
++      for (int t = 0; t < T; t++)
++      {
++        float* li = &_layer_in[static_cast<size_t>(f0 + t) * 8];
++        _mm_storeu_ps(li, _mm_add_ps(_mm_loadu_ps(li), _mm_add_ps(lo[t], lbl)));
++        _mm_storeu_ps(li + 4, _mm_add_ps(_mm_loadu_ps(li + 4), _mm_add_ps(hi[t], lbh)));
++      }
++    };
++    int f = 0;
++    for (; f + 4 <= num_frames; f += 4)
++      tile(f, std::integral_constant<int, 4>());
++    for (; f < num_frames; f++)
++      tile(f, std::integral_constant<int, 1>());
++  }
++  #endif
+   else
+   {
+     // Use Eigen's tuned 8x8 × 8xN GEMM for the whole block at once. Unlike a
+@@ -635,6 +818,24 @@ void A2FastModel<Channels>::_head_forward(float* output, int num_frames)
+ 
+   for (int f = 0; f < num_frames; f++)
+   {
++  #if NAM_A2_SSE
++    if constexpr (Channels == 8)
++    {
++      // Two independent 4-wide sums instead of one 128-long chain of dependent adds.
++      __m128 s0 = _mm_setzero_ps(), s1 = _mm_setzero_ps();
++      for (int k = 0; k < kHeadKernelSize; k++)
++      {
++        const float* src = &_head_history[static_cast<size_t>(col_of(f, k)) * 8];
++        const float* wk = _head_w[k].data();
++        s0 = _mm_add_ps(s0, _mm_mul_ps(_mm_loadu_ps(wk), _mm_loadu_ps(src)));
++        s1 = _mm_add_ps(s1, _mm_mul_ps(_mm_loadu_ps(wk + 4), _mm_loadu_ps(src + 4)));
++      }
++      alignas(16) float lanes[4];
++      _mm_store_ps(lanes, _mm_add_ps(s0, s1));
++      output[f] = (_head_b + ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]))) * _head_scale;
++      continue;
++    }
++  #endif
+     float y = _head_b;
+     for (int k = 0; k < kHeadKernelSize; k++)
+     {

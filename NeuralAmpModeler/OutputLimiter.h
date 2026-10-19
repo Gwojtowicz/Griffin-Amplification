@@ -1,0 +1,76 @@
+#pragma once
+
+// Output limiter (1.37.0): a stereo-linked lookahead peak limiter on the plugin's output, before the
+// safety soft clip. Guitar tones put out sparse sub-millisecond pick transients several dB above
+// everything else; turning the master up to make the rest louder pushed those into the soft clip.
+// This turns just those down, smoothly, so the output never exceeds kCeiling:
+//   - The gain each sample needs (ceiling / peak, or 1) is held at its lowest for the lookahead
+//     window, released over kReleaseS, then averaged over the window -- so the gain glides down
+//     ahead of a peak and reaches what that peak needs exactly when it plays (the audio is delayed
+//     by the window less one sample). Every output sample is provably within the ceiling.
+//   - Below the ceiling the gain is exactly 1: quieter material comes out untouched, only delayed.
+
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+class OutputLimiter
+{
+public:
+  static constexpr double kCeiling = 0.8912509381337456; // -1 dBFS: under the soft clip's 0.9 knee
+  static constexpr double kLookaheadS = 0.00067; // ~32 samples at 48 kHz
+  static constexpr double kReleaseS = 0.03; // 100 ms pumped audibly after each pick; 30 ms barely moves the sustain
+
+  void Reset(double sampleRate)
+  {
+    mWindow = std::max(2, static_cast<int>(std::lround(kLookaheadS * sampleRate)));
+    mReq.assign(mWindow, 1.0);
+    mBox.assign(mWindow, 1.0);
+    mDelayL.assign(mWindow, 0.0);
+    mDelayR.assign(mWindow, 0.0);
+    mSum = mWindow;
+    mRelease = 1.0;
+    mPos = 0;
+    mReleaseCoef = 1.0 - std::exp(-1.0 / (kReleaseS * sampleRate));
+  }
+
+  int Latency() const { return mWindow - 1; }
+
+  // In place, both channels (pass the same pointer twice for mono).
+  void Process(double* l, double* r, int numFrames)
+  {
+    for (int s = 0; s < numFrames; s++)
+    {
+      const double peak = std::max(std::fabs(l[s]), std::fabs(r[s]));
+      mReq[mPos] = peak > kCeiling ? kCeiling / peak : 1.0;
+      double held = 1.0;
+      for (double g : mReq)
+        held = std::min(held, g);
+      mRelease = held < mRelease ? held : mRelease + (held - mRelease) * mReleaseCoef;
+      mSum += mRelease - mBox[mPos];
+      mBox[mPos] = mRelease;
+      const double gain = std::min(1.0, mSum / mWindow);
+      // The sample written mWindow - 1 samples ago, which this gain was built for.
+      const int oldest = mPos + 1 == mWindow ? 0 : mPos + 1;
+      const double dl = mDelayL[oldest], dr = mDelayR[oldest];
+      mDelayL[mPos] = l[s];
+      mDelayR[mPos] = r[s];
+      l[s] = dl * gain;
+      if (r != l)
+        r[s] = dr * gain;
+      mPos = oldest;
+    }
+    // Re-sum the window now and then so the running sum can't drift.
+    mSum = 0.0;
+    for (double g : mBox)
+      mSum += g;
+  }
+
+  // How far the gain is down right now (dB, <= 0), for a meter or a test.
+  double GainReductionDB() const { return 20.0 * std::log10(std::max(1e-9, std::min(1.0, mSum / mWindow))); }
+
+private:
+  int mWindow = 32, mPos = 0;
+  std::vector<double> mReq, mBox, mDelayL, mDelayR;
+  double mSum = 32.0, mRelease = 1.0, mReleaseCoef = 0.0;
+};
