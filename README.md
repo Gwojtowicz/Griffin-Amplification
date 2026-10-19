@@ -4,18 +4,34 @@
 
 <h1 align="center">Griffin Amplification</h1>
 
+<h3 align="center">A free guitar amp you can see inside.</h3>
+
 <p align="center">
-  <b>A guitar amp app and VST3 plug-in with a simulated tube circuit you can look inside.</b><br>
-  Neural amp captures, a 4 × 14 cable-patched signal chain, a physics-based tube preamp and power amp,<br>
-  a mic'd speaker cab, studio EQ and dynamics, and an oscilloscope on the circuit's real node voltages.
+  <a href="https://github.com/Gwojtowicz/Griffin-Amplification/releases/latest"><b>Download for Windows</b></a>
+  &nbsp;·&nbsp; <a href="#tube-lab-a-real-circuit-simulated">How it works</a>
+  &nbsp;·&nbsp; <a href="docs/MANUAL.md">Manual</a>
 </p>
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-f2a541">
   <img alt="Platform: Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-5cc8ff">
-  <img alt="Formats: standalone and VST3" src="https://img.shields.io/badge/formats-standalone%20%7C%20VST3-8be28b">
   <img alt="Version 1.56.0" src="https://img.shields.io/badge/version-1.56.0-c49bff">
 </p>
+
+Most amp sims are black boxes: you turn a knob and something changes. Griffin Amplification
+simulates the actual tube circuit, part by part, and **shows you what it's doing while you play**:
+the voltage on every tube, where it's clipping, and the waveform on an oscilloscope.
+
+- **See why it sounds the way it does.** Turn up the drive and watch the tube's grid start to clamp.
+  The knobs are real parts (bias, caps, plate resistor, power supply), and the debug page explains
+  what each setting is doing in plain English.
+- **Free and open.** No account, no license key, no subscription. It's MIT-licensed, and every line
+  of the source is here.
+- **Light.** A 2.3 MB download with no installer, built for an ordinary laptop: a full rig runs at a
+  128-sample buffer (about 5 ms round trip) on a 2015 i7.
+
+It also loads the neural amp captures (`.nam` files) the guitar community already shares, so you
+can play a captured amp and the simulated one in the same chain.
 
 <p align="center">
   <img src="docs/images/app-main.png" alt="The main window: the chain grid, the AMP NEST library and the pedal list" width="100%">
