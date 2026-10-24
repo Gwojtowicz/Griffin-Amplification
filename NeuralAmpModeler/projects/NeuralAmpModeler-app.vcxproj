@@ -360,6 +360,7 @@
     <ClCompile Include="..\..\iPlug2\Dependencies\IPlug\RTAudio\RtAudio.cpp" />
     <ClCompile Include="..\..\iPlug2\Dependencies\IPlug\RTMidi\RtMidi.cpp" />
     <ClCompile Include="..\..\iPlug2\IGraphics\Controls\IControls.cpp" />
+    <ClCompile Include="..\miniz\miniz.c" />
     <ClCompile Include="..\..\iPlug2\IGraphics\Controls\IPopupMenuControl.cpp" />
     <ClCompile Include="..\..\iPlug2\IGraphics\Controls\ITextEntryControl.cpp" />
     <ClCompile Include="..\..\iPlug2\IGraphics\Drawing\IGraphicsNanoVG.cpp">

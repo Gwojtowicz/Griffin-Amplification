@@ -76,10 +76,21 @@
 //   - Resonance: a low-pass (~150 Hz) part of the fed-back signal is taken away, up to 75%, as the
 //     Resonance/Depth control on a Mesa or a 5150 does: less feedback in the lows, so the power
 //     amp's low end -- and the speaker's resonance bump with Spkr Load -- comes back.
+// * Bench (1.58.0, TubeBench.h): the Variac scales B+ (and so the screens), the fixed-bias supply and
+//   the phase inverter's headroom; tube age and the heaters scale the tubes' perveance and put a soft
+//   emission ceiling on their current; the bias pot sets the idle current (biasTrim). The output
+//   level stays matched at the stock bias, so a cold bias sounds colder rather than being made up.
+// * Quad (1.68.0): four power tubes, two in parallel on each side, as in a 100 W head -- into half the
+//   plate-to-plate load (1.7k), from a supply with half the resistance and twice the filter caps, and
+//   through a bigger output transformer (30 Hz corner, twice the flux before it saturates). Each tube
+//   works as in the pair (the same voltages, the same share of the load), so small signals are as loud;
+//   what changes is the supply and transformer staying out of the way longer, and a failed tube only
+//   halves its side (that side then pushes half as hard: lopsided, fizzy) instead of silencing it.
 
 #include <algorithm>
 #include <cmath>
 
+#include "TubeBench.h"
 #include "TubeCircuit.h"
 
 namespace tube
@@ -209,10 +220,11 @@ struct PentodeModel
 {
   double mu, ex, kg1, kg2, kp, kvb;
   double idleAmps; // Per-tube idle current the bias is set for
+  double ratedWatts; // Maximum plate dissipation (the bench's bias readout)
 };
 // Koren's published constants.
-constexpr PentodeModel kEL34 = {11.0, 1.35, 650.0, 4200.0, 60.0, 24.0, 0.035};
-constexpr PentodeModel k6L6 = {8.7, 1.35, 1460.0, 4500.0, 48.0, 12.0, 0.040};
+constexpr PentodeModel kEL34 = {11.0, 1.35, 650.0, 4200.0, 60.0, 24.0, 0.035, 25.0};
+constexpr PentodeModel k6L6 = {8.7, 1.35, 1460.0, 4500.0, 48.0, 12.0, 0.040, 30.0};
 
 struct PowerAmpParams
 {
@@ -232,13 +244,17 @@ struct PowerAmpParams
   bool cathodeBias = false;
   bool speakerFeedback = false;
   double resonance = 0.0; // 0..1
+  // Bench (1.58.0): the bias pot, as the idle current relative to stock (set at 120 V, new tubes).
+  double biasTrim = 1.0;
+  int tubesPerSide = 1; // 1.68.0: 2 = a quad (see the top of this file)
 
   bool operator==(const PowerAmpParams& o) const
   {
     return master == o.master && sag == o.sag && feedback == o.feedback && presence == o.presence && sixL6 == o.sixL6
            && speakerLoad == o.speakerLoad && screenSquish == o.screenSquish && otSaturation == o.otSaturation
            && coilHeat == o.coilHeat && sharedSupply == o.sharedSupply && feelDepth == o.feelDepth
-           && cathodeBias == o.cathodeBias && speakerFeedback == o.speakerFeedback && resonance == o.resonance;
+           && cathodeBias == o.cathodeBias && speakerFeedback == o.speakerFeedback && resonance == o.resonance
+           && biasTrim == o.biasTrim && tubesPerSide == o.tubesPerSide;
   }
 };
 
@@ -270,10 +286,10 @@ public:
     mVB = kBPlus;
     mVg2 = mVg2Rest;
     mD = 0.0;
-    mGrid1 = mGrid2 = mGridRef;
+    mGrid1 = mGrid2 = mGridRef * mBench.mains;
     _HoldPredictor();
-    mCc1.SetResting(-mGridRef); // At rest: no current; the cap holds plate swing 0 minus the bias
-    mCc2.SetResting(-mGridRef);
+    mCc1.SetResting(-mGridRef * mBench.mains); // At rest: no current; the cap holds plate swing 0 minus the bias
+    mCc2.SetResting(-mGridRef * mBench.mains);
     mCathodeV = mRestCathode;
     mPresHp = mPrevY = 0.0;
     mOtHp = mOtHpPrevIn = mOtLp = 0.0;
@@ -303,7 +319,7 @@ public:
     _HoldPredictor();
     double zeq, u0;
     _LoadCoefficients(zeq, u0);
-    const double yIdle = (zeq * mD + u0) / (kRl * mOutScale);
+    const double yIdle = (zeq * mD + u0) / (mRl * mOutScale);
     mPresHp = mOtHp = mOtLp = 0.0;
     mPrevY = mOtHpPrevIn = yIdle;
     // The fed-back signal at rest: the plate's idle imbalance, or nothing through the transformer.
@@ -315,7 +331,7 @@ public:
     mResonance = mResMid = mResTarget;
     mOtSatOut = 0.0;
     mOtSat = mOtSatMid = _OtSatTarget();
-    mOtFlux = _OtFluxFor(yIdle / kOtCornerW); // The primary carrying the idle imbalance, no voltage across it
+    mOtFlux = _OtFluxFor(yIdle / mOtCornerW); // The primary carrying the idle imbalance, no voltage across it
     mCoilRise = 0.0;
     mRe = mRe0;
     mPiScale = 1.0;
@@ -326,7 +342,8 @@ public:
   {
     if (p == mParams)
       return;
-    const bool tubesChanged = p.sixL6 != mParams.sixL6 || p.cathodeBias != mParams.cathodeBias;
+    const bool tubesChanged =
+      p.sixL6 != mParams.sixL6 || p.cathodeBias != mParams.cathodeBias || p.tubesPerSide != mParams.tubesPerSide;
     const bool loadChanged = p.speakerLoad != mParams.speakerLoad;
     const bool otSatOn = p.otSaturation && !mParams.otSaturation;
     mParams = p;
@@ -338,16 +355,16 @@ public:
     if (otSatOn && mOtMix <= 0.0)
     {
       mOtSat = mOtSatMid = _OtSatTarget();
-      mOtFlux = _OtFluxFor((mOtHpPrevIn - mOtHp) / kOtCornerW);
+      mOtFlux = _OtFluxFor((mOtHpPrevIn - mOtHp) / mOtCornerW);
       mOtSatOut = mOtHp;
     }
     if (tubesChanged)
     {
       mD = 0.0;
-      mGrid1 = mGrid2 = mGridRef;
+      mGrid1 = mGrid2 = mGridRef * mBench.mains;
       _HoldPredictor();
-      mCc1.SetResting(-mGridRef);
-      mCc2.SetResting(-mGridRef);
+      mCc1.SetResting(-mGridRef * mBench.mains);
+      mCc2.SetResting(-mGridRef * mBench.mains);
       mCathodeV = mRestCathode;
     }
     if (loadChanged)
@@ -355,14 +372,22 @@ public:
   }
 
   // One sample. Input and output are in the Tube Lab's normalized units (small signals at unity at
-  // the reference Master with no feedback; Master works like a real master volume).
+  // the reference Master with no feedback; Master works like a real master volume). Built twice, with
+  // and without the bench's emission ceiling (1.58.0), so stock tubes' Newton loop doesn't carry it.
   double Process(double in)
+  {
+    return (mBench.invCeiling > 0.0 || mSideN[0] != 1.0 || mSideN[1] != 1.0) ? _Process<true>(in) : _Process<false>(in);
+  }
+
+private:
+  template <bool kCeiling>
+  double _Process(double in)
   {
     const PentodeModel& m = _Model();
     // Everything the tubes see is relative to their cathode (0 V with fixed bias, so exactly as before).
     const double vk = mCathodeV;
     const double vg2 = std::max(mVg2 - vk, 1.0);
-    const double a = _ScreenFactor(m, vg2); // Vg2 factor, once per sample
+    const double a = _ScreenFactor(m, vg2) * mBench.perveance; // Vg2 factor, once per sample
     const double invVg2 = 1.0 / vg2;
     const double c0 = mSettling ? 0.0 : _PresenceConstant();
     const double fbGain = mSettling ? 1.0 : mFbGain;
@@ -398,7 +423,7 @@ public:
     // model this sample); the output is that voltage, normalized.
     double zeq, u0;
     _LoadCoefficients(zeq, u0);
-    const double yPerVolt = 1.0 / (kRl * mOutScale);
+    const double yPerVolt = 1.0 / (mRl * mOutScale);
 
     // Newton on D (the difference current) and the two power-tube grid voltages G1, G2:
     //   F1 = D - (Ip1(G1, Vp1) - Ip2(G2, Vp2)) = 0, with Vp1 = B+ - swing, Vp2 = B+ + swing
@@ -438,8 +463,10 @@ public:
       const double a31 = h2 * mCc2.g * ds2 * dUdD;
 
       double dIp1Dvg, dIp1Dvp, dIp2Dvg, dIp2Dvp;
-      _Tube(m, a, invVg2, g1 - vk, mVB - swing - vk, ip1, dIp1Dvg, dIp1Dvp);
-      _Tube(m, a * kTube2Match, invVg2, g2 - vk, mVB + swing - vk, ip2, dIp2Dvg, dIp2Dvp);
+      _Tube<kCeiling>(m, a, invVg2, g1 - vk, mVB - swing - vk, ip1, dIp1Dvg, dIp1Dvp);
+      _Tube<kCeiling>(m, a * kTube2Match, invVg2, g2 - vk, mVB + swing - vk, ip2, dIp2Dvg, dIp2Dvp);
+      if (kCeiling)
+        _KillDead(ip1, dIp1Dvg, dIp1Dvp, ip2, dIp2Dvg, dIp2Dvp);
       const double f1 = d - (ip1 - ip2);
       const double a11 = 1.0 + zeq * (dIp1Dvp + dIp2Dvp), a12 = -dIp1Dvg, a13 = dIp2Dvg;
       if (f1 > 0.0)
@@ -495,8 +522,13 @@ public:
       _SolveGrid(g1, s1, mCc1, h1);
       _SolveGrid(g2, s2, mCc2, h2);
       double t0, t1;
-      _Tube(m, a, invVg2, g1 - vk, mVB - swing - vk, ip1, t0, t1);
-      _Tube(m, a * kTube2Match, invVg2, g2 - vk, mVB + swing - vk, ip2, t0, t1);
+      _Tube<kCeiling>(m, a, invVg2, g1 - vk, mVB - swing - vk, ip1, t0, t1);
+      _Tube<kCeiling>(m, a * kTube2Match, invVg2, g2 - vk, mVB + swing - vk, ip2, t0, t1);
+      if (kCeiling)
+      {
+        double u0 = 0.0, u1 = 0.0, u2 = 0.0, u3 = 0.0;
+        _KillDead(ip1, u0, u1, ip2, u2, u3);
+      }
     }
 
     // The converged operating point: currents for the supplies, and the coupling caps' new charge.
@@ -539,7 +571,7 @@ public:
     if (!mParams.screenSquish && mSquishMix <= 0.0)
     {
       const double iScreens = kScreenFraction * iPlates;
-      mVB += mSupplyCoef * (mVSupply - mRSupply * (iPlates + iScreens) - mVB);
+      mVB += mSupplyCoef * (mVSupply * mBench.mains - mRSupply * (iPlates + iScreens) - mVB);
       mVg2 += mScreenCoef * (mVB - mRScreen * iScreens - mVg2);
       iCathode = iPlates + iScreens;
     }
@@ -561,13 +593,20 @@ public:
       }
       const double w = mSquishMix * mSquishMix * mSquishMix * (mSquishMix * (6.0 * mSquishMix - 15.0) + 10.0);
       const double iStock = kScreenFraction * iPlates;
-      const double iSquish = _ScreenCurrent(m, a, vg2, g1 - vk, mVB - swing - vk, ip1)
-                             + _ScreenCurrent(m, a * kTube2Match, vg2, g2 - vk, mVB + swing - vk, ip2);
+      // (Per tube, from its side's current shared by the side's live tubes, times those tubes.)
+      const double iSquish =
+        mSideN[0] == 1.0 && mSideN[1] == 1.0
+          ? _ScreenCurrent(m, a, vg2, g1 - vk, mVB - swing - vk, ip1)
+              + _ScreenCurrent(m, a * kTube2Match, vg2, g2 - vk, mVB + swing - vk, ip2)
+          : (mSideN[0] > 0.0 ? mSideN[0] * _ScreenCurrent(m, a, vg2, g1 - vk, mVB - swing - vk, ip1 / mSideN[0]) : 0.0)
+              + (mSideN[1] > 0.0
+                   ? mSideN[1] * _ScreenCurrent(m, a * kTube2Match, vg2, g2 - vk, mVB + swing - vk, ip2 / mSideN[1])
+                   : 0.0);
       const double iScreens = iStock + w * (iSquish - iStock);
       iCathode = iPlates + iScreens;
-      mVB += mSupplyCoef * (mVSupply - mRSupply * (iPlates + iScreens) - mVB);
+      mVB += mSupplyCoef * (mVSupply * mBench.mains - mRSupply * (iPlates + iScreens) - mVB);
       const double targetStock = mVB - mRScreen * iStock;
-      const double targetSquish = mVB + mScreenLift - mRSquish * iSquish;
+      const double targetSquish = mVB + mScreenLift * mBench.mains - mRSquish * iSquish;
       const double coef = mScreenCoef + w * (mSquishCoef - mScreenCoef);
       mVg2 += coef * (targetStock + w * (targetSquish - targetStock) - mVg2);
     }
@@ -578,7 +617,9 @@ public:
     // filter. Settles back to exactly 1 once switched off.
     if (mParams.sharedSupply || mPiScale != 1.0)
     {
-      const double target = mParams.sharedSupply ? SharedSupplyScale(mVg2 / mVg2Rest, _Strength()) : 1.0;
+      // (Relative to where the Variac puts the screens: that's not sag.)
+      const double target =
+        mParams.sharedSupply ? SharedSupplyScale(mVg2 / (mVg2Rest * mBench.mains), _Strength()) : 1.0;
       mPiScale += mPiCoef * (target - mPiScale);
       if (!mParams.sharedSupply && std::fabs(mPiScale - 1.0) < 1e-7)
         mPiScale = 1.0;
@@ -630,6 +671,7 @@ public:
     return out * mFbProof;
   }
 
+public:
   double RailVoltage() const { return mVB; }
   double ScreenVoltage() const { return mVg2; }
   // Debug probes (TubeProbe.h).
@@ -643,6 +685,28 @@ public:
   double CathodeVoltage() const { return mCathodeV; } // Cathode bias: the bias it has set itself (0 fixed)
   double IdleAmps() const { return _Model().idleAmps; }
   double RestingScreenVoltage() const { return mVg2Rest; }
+  // Bench (1.58.0, TubeBench.h): the Variac, perveance and emission ceiling, a few times a
+  // millisecond while they glide. Cheap: nothing is re-solved.
+  void SetBench(const bench::State& s) { mBench = s; }
+  // 1.62.0: a power tube that's failed (red-plated to death) passes no current: the amp runs on the
+  // other one alone -- thin and fizzy, every other half-cycle crossing over -- or, with both dead, not
+  // at all.
+  // 1.68.0: four sockets; tube k is on side k % 2 (V9, V10, then the quad's V11, V12), and a quad's
+  // failed tube leaves its side the other one.
+  void SetTubeDead(int tube, bool dead)
+  {
+    mDead[std::clamp(tube, 0, 3)] = dead;
+    _UpdateSides();
+  }
+  int TubesPerSide() const { return mParams.tubesPerSide; }
+  double BenchMains() const { return mBench.mains; }
+  // Each tube's plate dissipation this sample (W), its rating, and the grids' bias supply now.
+  // (Each tube's own: a side's current is shared by its live tubes.)
+  double Dissipation1() const { return mSideN[0] > 0.0 ? (Plate1() - mCathodeV) * mIp1 / mSideN[0] : 0.0; }
+  double Dissipation2() const { return mSideN[1] > 0.0 ? (Plate2() - mCathodeV) * mIp2 / mSideN[1] : 0.0; }
+  double RatedWatts() const { return _Model().ratedWatts; }
+  double BiasSupply() const { return mGridRef * mBench.mains; }
+  double RestingCathodeVoltage() const { return mRestCathode; }
   double FeedbackDB() const { return 20.0 * std::log10(1.0 + mBeta); }
   // Real Feel (1.33.0): the voice coil's temperature rise (K) and the transformer's flux relative to
   // where its inductance has halved.
@@ -687,8 +751,8 @@ private:
   // swing at ~106 Hz (a modestly sized guitar-amp transformer; hi-fi ones go far lower). Below
   // about half of it, the transformer is linear.
   static constexpr double kOtCornerHz = 40.0;
-  static constexpr double kOtCornerW = 2.0 * 3.14159265358979 * kOtCornerHz;
   static constexpr double kOtSatVoltSeconds = 0.6;
+  static constexpr double kQuadOtCornerHz = 30.0, kQuadOtFlux = 2.0; // A quad's bigger transformer
   static constexpr double kOtFadeS = 0.02; // OT Iron's crossfade, and its saturation point's glide
   static constexpr double kDepthPower = 2.0; // Depth -> strength exponent (see _Strength)
   // Voice coil heating: copper's resistance rise per kelvin, the coil's thermal resistance to the
@@ -760,14 +824,13 @@ private:
   static constexpr double kSpkFs = 95.0; // Cone resonance
   static constexpr double kSpkRm = 39.0; // Resonance peak above Re (~45 ohms total at fs)
   static constexpr double kSpkQms = 3.5;
-  static constexpr double kSpkScale = kRl / 8.0;
 
   // u = zeq * D + u0 for this sample: the plate swing for a difference current D.
   void _LoadCoefficients(double& zeq, double& u0) const
   {
     if (!mParams.speakerLoad)
     {
-      zeq = kRl;
+      zeq = mRl;
       u0 = 0.0;
       return;
     }
@@ -814,6 +877,7 @@ private:
   // Plate current and slopes for one pentode (screen at vg2, given as invVg2 = 1 / vg2: 1.45.0 took
   // the divisions out of the Newton loop; factor a = (2/Kg1)(vg2/Kp)^Ex). The grid voltage is the
   // real one: its grid circuit (see Process) is what limits it above 0 V.
+  template <bool kCeiling = false> // (The bench's emission ceiling: only in Process; the resting point is designed without it)
   void _Tube(const PentodeModel& m, double a, double invVg2, double vg1, double vp, double& ip, double& dIpDvg,
              double& dIpDvp) const
   {
@@ -826,6 +890,47 @@ private:
     ip = a * f * t;
     dIpDvg = a * df * t * invVg2;
     dIpDvp = vp > 0.0 ? a * f * dt : 0.0;
+    if (kCeiling) // Bench: the cathode's emission ceiling (TubeBench.h)
+    {
+      double slope;
+      ip = bench::Ceiling(ip, mBench.invCeiling, slope);
+      dIpDvg *= slope;
+      dIpDvp *= slope;
+    }
+  }
+
+  // Each side's current and slopes: one tube's times the side's live tubes; a dead side passes nothing
+  // (see SetTubeDead).
+  void _KillDead(double& ip1, double& g1, double& p1, double& ip2, double& g2, double& p2) const
+  {
+    if (mSideN[0] == 0.0)
+      ip1 = g1 = p1 = 0.0;
+    else if (mSideN[0] != 1.0)
+    {
+      ip1 *= mSideN[0];
+      g1 *= mSideN[0];
+      p1 *= mSideN[0];
+    }
+    if (mSideN[1] == 0.0)
+      ip2 = g2 = p2 = 0.0;
+    else if (mSideN[1] != 1.0)
+    {
+      ip2 *= mSideN[1];
+      g2 *= mSideN[1];
+      p2 *= mSideN[1];
+    }
+  }
+  // Live tubes per side from the dead flags (a pair: tubes 0, 1; a quad adds 2, 3).
+  void _UpdateSides()
+  {
+    const int n = std::clamp(mParams.tubesPerSide, 1, 2);
+    for (int side = 0; side < 2; side++)
+    {
+      int alive = 0;
+      for (int j = 0; j < n; j++)
+        alive += mDead[side + 2 * j] ? 0 : 1;
+      mSideN[side] = alive;
+    }
   }
 
   // Solves one power-tube grid's node equation for the phase inverter's output s, with D held:
@@ -835,10 +940,11 @@ private:
   template <class CapT> // (Cap is declared further down)
   double _SolveGrid(double& g, double s, const CapT& cc, double h) const
   {
-    double slope = -h * cc.g - 1.0 / kRg;
+    double slope = -h * cc.g - mGridN / kRg; // (A quad: two grids per side, their leaks in parallel)
     // Usually the grid sits well below 0 V, where its current is negligible (< 1e-9 A at -2 V) and
     // the equation is linear: solve it directly, no Newton or transcendental calls.
-    const double linear = (h * (cc.g * s - cc.ieq) + mGridRef * (1.0 / kRg)) / -slope;
+    const double gridRef = mGridRef * mBench.mains; // The bias supply follows the Variac
+    const double linear = (h * (cc.g * s - cc.ieq) + gridRef * (mGridN / kRg)) / -slope;
     if (linear - mCathodeV < -2.0)
     {
       g = linear;
@@ -848,8 +954,10 @@ private:
     {
       double ig, dig;
       _GridCurrent(g - mCathodeV, ig, dig);
-      const double f = h * (cc.g * (s - g) - cc.ieq) - (g - mGridRef) / kRg - ig;
-      slope = -h * cc.g - 1.0 / kRg - dig;
+      ig *= mGridN;
+      dig *= mGridN;
+      const double f = h * (cc.g * (s - g) - cc.ieq) - (g - gridRef) * mGridN / kRg - ig;
+      slope = -h * cc.g - mGridN / kRg - dig;
       const double dg = -f / slope;
       g += dg;
       if (std::fabs(dg) < kGridTolerance)
@@ -863,14 +971,15 @@ private:
   // level with the same slope (and the same slope's derivative).
   void _PiLookup(const PhaseInverterTable& pi, double u, double& s1, double& d1, double& s2, double& d2) const
   {
-    if (mPiScale == 1.0)
+    const double k = mPiScale * mBench.mains; // Its own supply, and the Variac's
+    if (k == 1.0)
     {
       pi.Lookup(u, s1, d1, s2, d2);
       return;
     }
-    pi.Lookup(u / mPiScale, s1, d1, s2, d2);
-    s1 *= mPiScale;
-    s2 *= mPiScale;
+    pi.Lookup(u / k, s1, d1, s2, d2);
+    s1 *= k;
+    s2 *= k;
   }
 
   // Screen squish: one tube's screen current. The cathode stream is about a F(x) pi/2 whatever the
@@ -897,7 +1006,7 @@ private:
   double _SaturatingPrimary(double in)
   {
     const double sat = mOtSat;
-    const double k = 0.5 * mT * kOtCornerW;
+    const double k = 0.5 * mT * mOtCornerW;
     const double rhs = mOtFlux + 0.5 * mT * (in + mOtSatOut);
     double l = mOtFlux;
     for (int i = 0; i < 6; i++)
@@ -910,12 +1019,12 @@ private:
     }
     mOtFlux = l;
     const double r = l / sat;
-    mOtSatOut = in - kOtCornerW * l * (1.0 + r * r * r * r);
+    mOtSatOut = in - mOtCornerW * l * (1.0 + r * r * r * r);
     return mOtSatOut;
   }
 
   // The saturation flux at the current Depth, in the output's normalized units.
-  double _OtSatTarget() const { return kOtSatVoltSeconds / mOtStrength / (kRl * mOutScale); }
+  double _OtSatTarget() const { return mOtSatVs / mOtStrength / (mRl * mOutScale); }
 
   // The flux whose magnetizing current h(flux) is `current` (h is odd and rises monotonically, and
   // Newton from flux = current approaches from outside, never overshooting).
@@ -1014,10 +1123,22 @@ private:
     }();
     (void)built;
     const PentodeModel& m = _Model();
+    // Quad (1.68.0): tubes per side, the load each side sees, the transformer (see the top of this file).
+    const bool quad = mParams.tubesPerSide >= 2;
+    mN = quad ? 2.0 : 1.0;
+    mGridN = mN;
+    mRl = quad ? kRl / 2.0 : kRl;
+    mOtCornerHz = quad ? kQuadOtCornerHz : kOtCornerHz;
+    mOtCornerW = 2.0 * 3.14159265358979 * mOtCornerHz;
+    mOtSatVs = quad ? kOtSatVoltSeconds * kQuadOtFlux : kOtSatVoltSeconds;
+    _UpdateSides();
     mScreenAnchorV = -1.0; // The tubes may have changed: _ScreenFactor recomputes exactly
     mInvMu = 1.0 / m.mu;
-    // Fixed bias for the model's idle current at rest (bisection; current rises with vg1).
-    {
+    // (The resting point is designed with new tubes at stock mains, as the bench sets the bias.)
+    // Fixed bias for an idle current at rest (bisection; current rises with vg1), and with cathode
+    // bias, the cathode voltage that gives it with the grids at 0 V (more cathode voltage, less
+    // current).
+    auto restFor = [&](double idleAmps, double& bias, double& cathode) {
       const double a = (2.0 / m.kg1) * std::pow(kScreenRest / m.kp, m.ex);
       double lo = -150.0, hi = 0.0;
       for (int i = 0; i < 60; i++)
@@ -1025,15 +1146,13 @@ private:
         const double mid = 0.5 * (lo + hi);
         double ip, d1, d2;
         _Tube(m, a, 1.0 / kScreenRest, mid, kBPlus, ip, d1, d2);
-        if (ip < m.idleAmps)
+        if (ip < idleAmps)
           lo = mid;
         else
           hi = mid;
       }
-      mBias = 0.5 * (lo + hi);
-      // Cathode bias: the cathode voltage that gives the same idle current with the grids at 0 V
-      // (bisection; more cathode voltage, less current).
-      mRestCathode = 0.0;
+      bias = 0.5 * (lo + hi);
+      cathode = 0.0;
       if (mParams.cathodeBias)
       {
         double klo = 0.0, khi = 150.0;
@@ -1043,13 +1162,17 @@ private:
           const double ak = (2.0 / m.kg1) * std::pow((kScreenRest - mid) / m.kp, m.ex);
           double ip, d1, d2;
           _Tube(m, ak, 1.0 / (kScreenRest - mid), -mid, kBPlus - mid, ip, d1, d2);
-          if (ip > m.idleAmps)
+          if (ip > idleAmps)
             klo = mid;
           else
             khi = mid;
         }
-        mRestCathode = 0.5 * (klo + khi);
+        cathode = 0.5 * (klo + khi);
       }
+    };
+    {
+      // The output level is matched at the stock bias; the bias pot's own setting is applied after.
+      restFor(m.idleAmps, mBias, mRestCathode);
       mGridRef = mParams.cathodeBias ? 0.0 : mBias; // Where the grid leaks return to
       const double restVgk = mGridRef - mRestCathode;
       const double aRest = (2.0 / m.kg1) * std::pow((kScreenRest - mRestCathode) / m.kp, m.ex);
@@ -1057,7 +1180,7 @@ private:
       // reduced by the plate load (each tube's rp across Rl).
       double ip, gm, gp;
       _Tube(m, aRest, 1.0 / (kScreenRest - mRestCathode), restVgk, kBPlus - mRestCathode, ip, gm, gp);
-      const double dDdu = 2.0 * gm / (1.0 + 2.0 * gp * kRl);
+      const double dDdu = quad ? 2.0 * mN * gm / (1.0 + 2.0 * mN * gp * mRl) : 2.0 * gm / (1.0 + 2.0 * gp * kRl);
       // Output scale: small signals come out at unity at the reference Master with no feedback.
       // In the midband the coupling cap is a short, so each grid gets the inverter's swing through
       // the divider Rg / (Rg + Rpi).
@@ -1067,6 +1190,12 @@ private:
       const double gridDivider = kRg / (kRg + 0.5 * (mRpi1 + mRpi2));
       const double refGain = 2.0 + 78.0 * kReferenceMaster * kReferenceMaster;
       mOutScale = dDdu * refGain * gridDivider;
+      // Bench: the bias pot (exactly the stock resting point at 100%).
+      if (mParams.biasTrim != 1.0)
+      {
+        restFor(m.idleAmps * std::clamp(mParams.biasTrim, 0.2, 3.0), mBias, mRestCathode);
+        mGridRef = mParams.cathodeBias ? 0.0 : mBias;
+      }
     }
     // Feedback: up to a loop gain of 2 (about 10 dB of feedback) at the reference Master.
     mBeta = 2.0 * mParams.feedback;
@@ -1081,6 +1210,11 @@ private:
     mOtStrength = 2.0 * mStrength - 1.0; // 1 at 1x, 31 at 4x, 199 at 10x
     mRSupply = 20.0 + 580.0 * mParams.sag;
     mRScreen = 500.0 + 1700.0 * mParams.sag;
+    if (quad) // A bigger supply: half the resistance (and twice the caps: the same time constants)
+    {
+      mRSupply /= mN;
+      mRScreen /= mN;
+    }
     // The supplies' exact resting point: both tubes' actual idle currents (including the pair's
     // mismatch) and the screen voltage they settle to, so B+ starts exactly at rest instead of
     // drifting there (which the speaker load's resonance turned into a small thump).
@@ -1095,7 +1229,7 @@ private:
         double x1, x2;
         _Tube(m, ar, 1.0 / (vg2r - vk), vgk, kBPlus - vk, i1, x1, x2);
         _Tube(m, ar * kTube2Match, 1.0 / (vg2r - vk), vgk, kBPlus - vk, i2, x1, x2);
-        iTot = i1 + i2;
+        iTot = mN * (i1 + i2);
         iScr = kScreenFraction * iTot;
         vg2r = kBPlus - rStock * iScr;
       }
@@ -1104,7 +1238,7 @@ private:
       mRestI1 = i1;
       mRestI2 = i2;
       // The cathode resistor that holds the cathode there with these currents (and the screens').
-      mRkCath = mRestCathode / std::max((i1 + i2) * (1.0 + kScreenFraction), 1e-6);
+      mRkCath = mRestCathode / std::max(mN * (i1 + i2) * (1.0 + kScreenFraction), 1e-6);
       mCathodeCoef = 1.0 - std::exp(-mT / std::max(mRkCath * kCathodeCapFarads, 1e-6));
     }
     // Resonance: a low-pass part of the fed-back signal taken away (see the top of this file).
@@ -1112,8 +1246,8 @@ private:
     mResGlide = 1.0 - std::exp(-mT / 0.005);
     mResCoef = 1.0 - std::exp(-2.0 * 3.14159265358979 * kResonanceHz * mT);
     _SetSquishDepth(m); // Squish's parts (and B+'s resting supply) at its gliding Depth
-    mSupplyCoef = 1.0 - std::exp(-mT / (mRSupply * 40e-6));
-    mScreenCoef = 1.0 - std::exp(-mT / (mRScreen * 40e-6));
+    mSupplyCoef = 1.0 - std::exp(-mT / (mRSupply * 40e-6 * mN));
+    mScreenCoef = 1.0 - std::exp(-mT / (mRScreen * 40e-6 * mN));
     mPiCoef = 1.0 - std::exp(-mT / kPiDecoupleTauS);
     // Grid coupling caps (value per tube type; a change keeps each cap's voltage, see Cap).
     const double cc = mParams.sixL6 ? 100e-9 : 22e-9;
@@ -1121,7 +1255,7 @@ private:
     mCc2.Init(cc, mT);
     // Speaker network companion conductances (trapezoidal) at this sample rate.
     {
-      const double s = kSpkScale;
+      const double s = mRl / 8.0; // The speaker as each plate sees it through the transformer
       const double w0 = 2.0 * 3.14159265358979 * kSpkFs;
       const double cm = kSpkQms / (kSpkRm * w0); // Parallel RLC: Q = R * sqrt(C/L), w0 = 1/sqrt(LC)
       const double lm = 1.0 / (w0 * w0 * cm);
@@ -1134,7 +1268,7 @@ private:
       mG3 = 1.0 / (kSpkRm * s) + mGL2 + mGC;
     }
     // Output transformer: ~40 Hz primary-inductance roll-off, ~12 kHz leakage roll-off.
-    mOtHpCoef = std::exp(-2.0 * 3.14159265358979 * kOtCornerHz * mT);
+    mOtHpCoef = std::exp(-2.0 * 3.14159265358979 * mOtCornerHz * mT);
     mCoilCoef = 1.0 - std::exp(-mT / kCoilTauS);
     mOtFadeStep = mT / kOtFadeS;
     mOtSatCoef = 1.0 - std::exp(-mT / (0.5 * kOtFadeS));
@@ -1153,13 +1287,13 @@ private:
   {
     const double strength = std::pow(mSqDepth, kDepthPower);
     mSqrtStrength = std::sqrt(strength);
-    mRSquish = kSquishScreenOhms * strength + 1700.0 * mParams.sag;
-    mSquishCoef = 1.0 - std::exp(-mT / (mRSquish * kSquishScreenFarads / strength));
+    mRSquish = (kSquishScreenOhms * strength + 1700.0 * mParams.sag) / mN;
+    mSquishCoef = 1.0 - std::exp(-mT / (mRSquish * mN * kSquishScreenFarads / strength));
     const double vk = mRestCathode, vgk = mGridRef - vk;
-    const double iSquish = _ScreenCurrent(m, mRestA, mVg2Rest - vk, vgk, kBPlus - vk, mRestI1)
-                           + _ScreenCurrent(m, mRestA * kTube2Match, mVg2Rest - vk, vgk, kBPlus - vk, mRestI2);
+    const double iSquish = mN * (_ScreenCurrent(m, mRestA, mVg2Rest - vk, vgk, kBPlus - vk, mRestI1)
+                                 + _ScreenCurrent(m, mRestA * kTube2Match, mVg2Rest - vk, vgk, kBPlus - vk, mRestI2));
     mScreenLift = mVg2Rest - kBPlus + mRSquish * iSquish;
-    const double iTot = mRestI1 + mRestI2;
+    const double iTot = mN * (mRestI1 + mRestI2);
     const double iScr = mParams.screenSquish ? iSquish : kScreenFraction * iTot;
     mVSupply = kBPlus + mRSupply * (iTot + iScr);
   }
@@ -1238,5 +1372,11 @@ private:
   double mSqDepth = 1.0, mSqDepthMid = 1.0, mSqGlideCoef = 0.0;
   double mRestA = 0.0, mRestI1 = 0.0, mRestI2 = 0.0;
   double mPiScale = 1.0, mPiCoef = 0.0; // Shared supply: the phase inverter's supply relative to rest
+  bench::State mBench; // Variac, perveance and emission ceiling (see SetBench)
+  bool mDead[4] = {false, false, false, false}; // 1.62.0: failed power tubes (see SetTubeDead)
+  // 1.68.0: tubes per side (the quad), each side's live tubes, the load per side, the grids per side,
+  // the output transformer's corner and saturation flux.
+  double mN = 1.0, mSideN[2] = {1.0, 1.0}, mRl = kRl, mGridN = 1.0;
+  double mOtCornerHz = kOtCornerHz, mOtCornerW = 2.0 * 3.14159265358979 * kOtCornerHz, mOtSatVs = kOtSatVoltSeconds;
 };
 } // namespace tube

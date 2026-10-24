@@ -6,7 +6,11 @@
 // * a readout: plain-English lines on what the circuit is doing and how it plays (TubeDebug.h),
 // * a two-channel oscilloscope on any of the probe points (TubeProbe.h): triggered at 0.5-20 ms/div,
 //   rolling at 50-200 ms/div for slow things like sag and blocking recovery,
-// * a CSV log switch, and a line on the app's audio settings.
+// * a CSV log switch, and a line on the app's audio settings,
+// * the bench (1.58.0, TubeBench.h): Variac, bias pot and tube age knobs (attached by the plugin,
+//   see BenchKnobRect) and a live readout of mains, heaters, emission, supplies and the power tubes'
+//   current and dissipation (TubeBenchControl),
+// * ALWAYS ON (1.58.0): keeps the probes running with the page closed.
 // Included from NeuralAmpModeler.cpp after NeuralAmpModelerControls.h (uses NAMOverlayPanelControl).
 
 #include <functional>
@@ -650,7 +654,7 @@ private:
     // dx to the side ('W': its right end there).
     float dx = 0.f, dy = 0.f;
   };
-  static constexpr int kNumNodes = tube::kNumProbes;
+  static constexpr int kNumNodes = tube::kProbeOutput + 1; // (Not the sockets' plates: see TubeProbe.h)
   static constexpr Node kNodes[kNumNodes] = {
     {tube::kProbeInput, tubemap::kInX, tubemap::kInY, "IN", 'A', kPre, kPeak},
     {tube::kProbeV1Block, tubemap::kInCapX, tubemap::kTubeY, "blk", 'b', kPre, kLevel},
@@ -1025,6 +1029,155 @@ private:
   float mScroll = 0.f, mMaxScroll = 0.f;
 };
 
+// The bench readout (1.58.0): four columns -- mains, emission, supplies, power tubes -- from the live
+// probe statistics (not the held ones: with nothing playing, the power tubes' average current is
+// their idle current).
+class TubeBenchControl : public IControl
+{
+public:
+  TubeBenchControl(const IRECT& bounds)
+  : IControl(bounds)
+  {
+    mIgnoreMouse = true;
+  }
+
+  void SetStats(const tube::ProbeStats& s, bool circuit, bool powerAmp)
+  {
+    mStats = s;
+    mCircuit = circuit;
+    mPowerAmp = powerAmp;
+    mHave = true;
+    SetDirty(false);
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    using namespace tubedebug;
+    using tube::debug::Format;
+    g.FillRoundRect(COLOR_BLACK.WithOpacity(0.25f), mRECT, 4.f);
+    const IRECT area = mRECT.GetPadded(-8.f);
+    const IText title(9.f, ColorA(), "Michroma-Regular", EAlign::Near, EVAlign::Top);
+    const IText label(10.5f, Dim().WithOpacity(0.7f), "Roboto-Regular", EAlign::Near, EVAlign::Middle);
+    const IText value(10.5f, Text(), "Roboto-Regular", EAlign::Far, EVAlign::Middle);
+    if (!mHave)
+    {
+      g.DrawText(IText(11.f, Dim(), "Roboto-Regular"), "Waiting for the first measurement...", area);
+      return;
+    }
+    if (!mCircuit)
+    {
+      g.DrawText(IText(11.f, Amber(), "Roboto-Regular"),
+                 "The bench works on the Circuit engine's tubes: switch the Tube Lab to CIRCUIT.", area);
+      return;
+    }
+    const tube::ProbeStats& s = mStats;
+    const float colGap = 12.f;
+    const float colW = (area.W() - 3.f * colGap) / 4.f;
+    auto column = [&](int i) { return IRECT(area.L + i * (colW + colGap), area.T, area.L + i * (colW + colGap) + colW, area.B); };
+    constexpr float rowH = 15.f;
+    auto row = [&](const IRECT& col, int r, const char* name, const std::string& v, bool warn = false) {
+      const IRECT rr(col.L, col.T + 16.f + r * rowH, col.R, col.T + 16.f + (r + 1) * rowH);
+      g.DrawText(label, name, rr);
+      IText t = value;
+      if (warn)
+        t.mFGColor = Amber();
+      g.DrawText(t, v.c_str(), rr);
+    };
+
+    // MAINS: the Variac, heaters, cathodes (with a glow swatch the colour of the cathode).
+    {
+      const IRECT col = column(0);
+      g.DrawText(title, "MAINS", col);
+      const bool gliding = std::fabs(s.mainsV - s.mainsTargetV) > 0.3;
+      row(col, 0, "Variac", gliding ? Format("%.1f -> %.0f V", s.mainsV, s.mainsTargetV) : Format("%.1f V", s.mainsV));
+      row(col, 1, "Heaters", Format("%.2f V", s.heaterV), s.heaterV < 5.7 || s.heaterV > 6.9);
+      row(col, 2, "Cathodes", Format("%.0f K", s.cathodeK));
+      row(col, 3, "Supplies", Format("%+.0f%% of stock", 100.0 * (s.mainsV / tube::bench::kMainsNominal - 1.0)));
+      // Glow: dull red when cool, orange at stock, toward yellow when hot.
+      const float t = (float)std::clamp((s.cathodeK - 850.0) / 350.0, 0.0, 1.0);
+      const IColor glow(255, 255, (int)(60 + 140 * t), (int)(20 + 40 * t));
+      const float cx = col.R - 7.f, cy = col.T + 5.f;
+      g.FillCircle(glow.WithOpacity(0.25f + 0.25f * t), cx, cy, 7.f);
+      g.FillCircle(glow.WithOpacity(0.6f + 0.4f * t), cx, cy, 3.f);
+    }
+    // EMISSION: each section's reserve and perveance, and what that means.
+    {
+      const IRECT col = column(1);
+      g.DrawText(title, "EMISSION", col);
+      auto verdict = [](double reserve) {
+        return reserve >= 3.0 ? "healthy" : reserve >= 1.5 ? "peaks soften" : reserve >= 0.8 ? "peaks limited" : "starved";
+      };
+      row(col, 0, "Preamp", Format("%.1fx, gm %.0f%%", s.reserve[0], 100.0 * s.perveance[0]), s.reserve[0] < 1.5);
+      row(col, 1, "", verdict(s.reserve[0]), s.reserve[0] < 1.5);
+      if (mPowerAmp)
+      {
+        row(col, 2, "Power", Format("%.1fx, gm %.0f%%", s.reserve[1], 100.0 * s.perveance[1]), s.reserve[1] < 1.5);
+        row(col, 3, "", verdict(s.reserve[1]), s.reserve[1] < 1.5);
+      }
+    }
+    // SUPPLY: the preamp's B+ (its live range), the power amp's B+ and screens at their lowest, the bias.
+    {
+      const IRECT col = column(2);
+      g.DrawText(title, "SUPPLY", col);
+      const bool live = s.railMax > s.railMin && s.samples > 0;
+      row(col, 0, "Preamp B+",
+          !live ? std::string("-")
+                : s.railMax - s.railMin > 1.0 ? Format("%.0f-%.0f V", s.railMin, s.railMax) : Format("%.0f V", s.railMax));
+      if (mPowerAmp && s.paSamples > 0)
+      {
+        row(col, 1, "Power B+", Format("%.0f V", s.paRailMin));
+        row(col, 2, "Screens", Format("%.0f V", s.paScreenMin));
+        row(col, 3, s.cathodeBias ? "Cathode" : "Bias supply",
+            s.cathodeBias ? Format("%.1f V", s.paCathodeRest) : Format("%.1f V", s.paBiasNow));
+      }
+      else
+        row(col, 1, "Power amp", "off");
+    }
+    // POWER TUBES: average current and dissipation per tube, with a bar against the rating.
+    {
+      const IRECT col = column(3);
+      g.DrawText(title, s.sixL6 ? "POWER TUBES (6L6)" : "POWER TUBES (EL34)", col);
+      if (!mPowerAmp || s.paSamples <= 0)
+      {
+        row(col, 0, "Power amp", "off");
+        return;
+      }
+      const double n = (double)s.paSamples;
+      double worst = 0.0;
+      for (int t = 0; t < 2; t++)
+      {
+        const double ma = 1e3 * s.paCurrentSum[t] / n, w = s.paDissSum[t] / n;
+        const double pct = 100.0 * w / std::max(1.0, s.paRatedW);
+        worst = std::max(worst, pct);
+        const IRECT rr(col.L, col.T + 16.f + t * 2 * rowH, col.R, col.T + 16.f + (t * 2 + 1) * rowH);
+        g.DrawText(label, t == 0 ? "V1" : "V2", rr);
+        g.DrawText(value, Format("%.1f mA  %.1f W  %.0f%%", ma, w, pct).c_str(), rr);
+        // Bar: 0..120% of rating; cold below 45%, sweet 60-75%, hot past 75%, red past 100%.
+        const IRECT bar(col.L, rr.B + 2.f, col.R, rr.B + 8.f);
+        g.FillRoundRect(COLOR_BLACK.WithOpacity(0.35f), bar, 2.f);
+        const float frac = (float)std::clamp(pct / 120.0, 0.0, 1.0);
+        const IColor c = pct > 100.0 ? IColor(255, 235, 60, 50) : pct > 75.0 ? Amber() : pct >= 45.0 ? ColorA() : ColorB();
+        g.FillRoundRect(c, IRECT(bar.L, bar.T, bar.L + bar.W() * frac, bar.B), 2.f);
+        for (double mark : {45.0, 75.0, 100.0})
+        {
+          const float x = bar.L + bar.W() * (float)(mark / 120.0);
+          g.DrawLine(Dim(), x, bar.T - 1.f, x, bar.B + 1.f);
+        }
+      }
+      const char* verdict = worst > 100.0 ? "RED PLATING: past the rating"
+                            : worst > 75.0 ? "Hot"
+                            : worst >= 60.0 ? "Sweet spot"
+                            : worst >= 45.0 ? "Cool"
+                                            : "Cold: crossover";
+      row(col, 4, Format("Bias pot %.0f%%", 100.0 * s.paBiasTrim).c_str(), verdict, worst > 100.0 || worst < 45.0);
+    }
+  }
+
+private:
+  tube::ProbeStats mStats;
+  bool mHave = false, mCircuit = true, mPowerAmp = false;
+};
+
 // A small pill button whose label comes from a function (so it can say ON/OFF, etc.).
 class TubeDebugButton : public IControl
 {
@@ -1068,7 +1221,10 @@ public:
     std::function<bool()> isLogging;
     std::function<void(bool)> setLogging;
     std::function<void()> openLogFolder;
+    std::function<bool()> isAlwaysOn; // 1.58.0: probes kept running with the page closed
+    std::function<void()> toggleAlwaysOn;
   };
+  static constexpr int kNumBenchKnobs = 4;
 
   NAMTubeDebugPageControl(const IRECT& bounds, const ISVG& closeSVG, TubeScopeSettings* scope, Callbacks callbacks)
   : NAMOverlayPanelControl(bounds, "TUBE LAB DEBUG", closeSVG)
@@ -1083,10 +1239,17 @@ public:
     const IRECT content = GetRECT().GetPadded(-14.f).GetReducedFromTop(40.f);
     const IRECT bottomBar = content.GetFromBottom(24.f);
     const IRECT rest = content.GetReducedFromBottom(30.f);
-    const IRECT top = rest.GetFromTop(rest.H() * 0.58f);
-    const IRECT scopeArea = rest.GetReducedFromTop(top.H() + 8.f);
+    // 1.58.0: the bench row between the map/readout and the scope.
+    const float benchH = std::clamp(rest.H() * 0.2f, 104.f, 124.f);
+    const IRECT top = rest.GetFromTop((rest.H() - benchH - 8.f) * 0.6f);
+    const IRECT benchArea(rest.L, top.B + 8.f, rest.R, top.B + 8.f + benchH);
+    const IRECT scopeArea = rest.GetReducedFromTop(top.H() + benchH + 16.f);
     const IRECT mapArea = top.GetFromLeft(top.W() * 0.62f);
     const IRECT readoutArea = top.GetReducedFromLeft(mapArea.W() + 8.f);
+    // The knobs on the left of the bench row (the plugin attaches them; see BenchKnobRect).
+    const IRECT knobs = benchArea.GetFromLeft(std::min(benchArea.W() * 0.36f, 380.f));
+    mBenchKnobsArea = knobs;
+    mBench = new TubeBenchControl(benchArea.GetReducedFromLeft(knobs.W() + 8.f));
 
     mScope = new TubeScopeControl(scopeArea, mScopeSettings);
     mMap = new TubeCircuitMapControl(mapArea, [this](int probe, bool channelB) {
@@ -1097,6 +1260,8 @@ public:
     AddChildControl(mMap);
     AddChildControl(mReadout);
     AddChildControl(mScope);
+    AddChildControl(new BenchBackdrop(knobs));
+    AddChildControl(mBench);
     mMap->SetSelected(mScopeSettings->chA, mScopeSettings->chB);
 
     const IRECT logButton = bottomBar.GetFromLeft(110.f);
@@ -1115,9 +1280,29 @@ public:
         if (mCallbacks.openLogFolder)
           mCallbacks.openLogFolder();
       }));
-    mStatus = new StatusControl(bottomBar.GetReducedFromLeft(236.f));
+    // ALWAYS ON (1.58.0): the probes keep running with the page closed (the plugin asks first).
+    AddChildControl(new TubeDebugButton(
+      bottomBar.GetReducedFromLeft(236.f).GetFromLeft(130.f),
+      [this]() {
+        return std::string(mCallbacks.isAlwaysOn && mCallbacks.isAlwaysOn() ? "ALWAYS ON: ON" : "ALWAYS ON: OFF");
+      },
+      [this]() { return mCallbacks.isAlwaysOn && mCallbacks.isAlwaysOn(); },
+      [this]() {
+        if (mCallbacks.toggleAlwaysOn)
+          mCallbacks.toggleAlwaysOn();
+      }))
+      ->SetTooltip("Keep the Tube Lab's probes running with this page closed, so its readouts, bench and scope "
+                   "history are already live when you open it. Costs audio CPU all the time.");
+    mStatus = new StatusControl(bottomBar.GetReducedFromLeft(374.f));
     AddChildControl(mStatus);
   }
+
+  // Where the plugin puts bench knob i (0 Variac, 1 Bias pot, 2 Preamp age, 3 Power age).
+  IRECT BenchKnobRect(int i) const
+  {
+    return mBenchKnobsArea.GetPadded(-6.f).GetReducedFromTop(14.f).SubRectHorizontal(kNumBenchKnobs, i);
+  }
+  TubeBenchControl* Bench() { return mBench; }
 
   TubeScopeControl* Scope() { return mScope; }
   TubeCircuitMapControl* Map() { return mMap; }
@@ -1134,6 +1319,22 @@ public:
   }
 
 private:
+  // The bench knobs' panel and its title.
+  struct BenchBackdrop : public IControl
+  {
+    BenchBackdrop(const IRECT& bounds)
+    : IControl(bounds)
+    {
+      mIgnoreMouse = true;
+    }
+    void Draw(IGraphics& g) override
+    {
+      g.FillRoundRect(COLOR_BLACK.WithOpacity(0.25f), mRECT, 4.f);
+      g.DrawText(IText(9.f, tubedebug::ColorA(), "Michroma-Regular", EAlign::Near, EVAlign::Top), "BENCH",
+                 mRECT.GetPadded(-8.f));
+    }
+  };
+
   // Two lines along the bottom: the app's audio settings, and the CSV log's state.
   struct StatusControl : public IControl
   {
@@ -1156,5 +1357,7 @@ private:
   TubeScopeControl* mScope = nullptr;
   TubeCircuitMapControl* mMap = nullptr;
   TubeReadoutControl* mReadout = nullptr;
+  TubeBenchControl* mBench = nullptr;
+  IRECT mBenchKnobsArea;
   StatusControl* mStatus = nullptr;
 };

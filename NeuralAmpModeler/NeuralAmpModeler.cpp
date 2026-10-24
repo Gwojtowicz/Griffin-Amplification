@@ -24,6 +24,13 @@
 
 #include "NeuralAmpModelerControls.h"
 #include "TubeDebugControls.h"
+#include "OutputPageControls.h"
+#include "SpeakerLabControls.h"
+#include "LibraryControls.h"
+#include "PackPickerControl.h" // 1.70.0 PACK PICKER
+static void _PackLog(const std::string& text); // 1.70.1 (defined with the PACK PICKER code)
+#include "TubeChassisControls.h"
+#include "ParamHelp.h"
 #include "EQControls.h"
 #include "IPlugPaths.h"
 #if defined(APP_API) && defined(OS_WIN)
@@ -239,6 +246,17 @@ static const PedalDef kLatePedals[chaingrid::kNumLatePedals] = {
    {{"Threshold", kGateThreshold}, {"Release", kGateRelease}, {"Range", kGateRange}, {nullptr, -1}}},
   {"PRO COMP", kSCompActive, kSCompEngaged, -1,
    {{"Threshold", kSCompThreshold}, {"Ratio", kSCompRatio}, {"Makeup", kSCompMakeup}, {"Mix", kSCompMix}}},
+  // 1.66.0 (MorePedals.h): in the wider popup (see _IsWidePedal).
+  {"TRACK GATE", kTGActive, kTGEngaged, -1,
+   {{"Threshold", kTGThreshold}, {"Release", kTGRelease}, {"Range", kTGRange}, {"Ratio", kTGRatio}}},
+  {"DIGI DELAY", kDigiActive, kDigiEngaged, -1,
+   {{"Time", kDigiTime}, {"Feedback", kDigiFeedback}, {"Level", kDigiLevel}, {nullptr, -1}}},
+  {"ANALOG DLY", kAnaActive, kAnaEngaged, -1, {{"Delay", kAnaTime}, {"Regen", kAnaRegen}, {"Mix", kAnaMix}, {nullptr, -1}}},
+  {"TAPE ECHO", kTapeActive, kTapeEngaged, -1,
+   {{"Rate", kTapeRate}, {"Intensity", kTapeIntensity}, {"Echo", kTapeEcho}, {"Reverb", kTapeReverb}}},
+  {"SPRING VERB", kSprActive, kSprEngaged, -1, {{"Dwell", kSprDwell}, {"Tone", kSprTone}, {"Mix", kSprMix}, {"Decay", kSprDecay}}},
+  // 1.67.0: TUBE LAB 2 shares the Tube Lab's popup (see _SetUiLab).
+  {"TUBE LAB 2", kLab2Active, LabParam(1, kTubeEngaged), -1, {{nullptr, -1}, {nullptr, -1}, {nullptr, -1}, {nullptr, -1}}},
 };
 
 // Any pedal's def, by grid id (an original pedal, an extra copy, or a late pedal).
@@ -247,6 +265,41 @@ static const PedalDef& PedalOf(int id)
   if (chaingrid::IsLatePedal(id))
     return kLatePedals[id - chaingrid::kFirstLatePedal];
   return chaingrid::IsExtraPedal(id) ? gExtraPedals[id - chaingrid::kFirstExtraPedal] : kPedals[id];
+}
+
+// 1.65.0: a control's hover help (ParamHelp.h): the effect pedals' extra copies borrow their original's,
+// the EQ bands and SPEAKER LAB mics say which band or mic they are, and every pedal's On switch says so.
+static std::string ParamHelpFor(int p)
+{
+  if (const int base = Lab2Base(p); base >= 0) // 1.67.0: TUBE LAB 2's copy says what TUBE LAB's does
+    return ParamHelpFor(base);
+  for (int e = 0; e < chaingrid::kNumExtraPedals; e++)
+  {
+    const PedalDef& d = gExtraPedals[e];
+    const PedalDef& base = kPedals[chaingrid::PedalType(chaingrid::kFirstExtraPedal + e)];
+    for (int k = 0; k < 4; k++)
+      if (d.knobs[k].paramIdx == p && base.knobs[k].paramIdx >= 0)
+        if (const char* h = BaseParamHelp(base.knobs[k].paramIdx))
+          return std::string(d.name) + " -- " + h;
+  }
+  if (p >= kProEqBandFirst && p <= kProEqBandLast)
+    return EqBandHelp(false, (p - kProEqBandFirst) / 4, (p - kProEqBandFirst) % 4, false);
+  if (p >= kOutEqBandFirst && p <= kOutEqBandLast)
+    return EqBandHelp(true, (p - kOutEqBandFirst) / 4, (p - kOutEqBandFirst) % 4, false);
+  if (p >= kProEqBandExtFirst && p <= kProEqBandExtLast)
+    return EqBandHelp(false, (p - kProEqBandExtFirst) / 2, (p - kProEqBandExtFirst) % 2, true);
+  if (p >= kOutEqBandExtFirst && p <= kOutEqBandExtLast)
+    return EqBandHelp(true, (p - kOutEqBandExtFirst) / 2, (p - kOutEqBandExtFirst) % 2, true);
+  if (p >= kLabMicFirst && p <= kLabMicLast)
+    return LabMicHelp((p - kLabMicFirst) / kNumLabMicFields, (p - kLabMicFirst) % kNumLabMicFields);
+  if (p >= kLabMicCabFirst && p <= kLabMicCabLast)
+    return std::string("Mic ") + char('A' + p - kLabMicCabFirst) + " Cab: which cab it's on (with two cabs).";
+  if (const char* h = BaseParamHelp(p))
+    return h;
+  for (int id = 0; id < chaingrid::kNumIds; id++)
+    if (chaingrid::IsPedal(id) && PedalOf(id).engagedParam == p)
+      return std::string(PedalOf(id).name) + " on/off. Off passes the signal through (delays, reverbs and cabs ring out).";
+  return std::string();
 }
 
 EMsgBoxResult _ShowMessageBox(iplug::igraphics::IGraphics* pGraphics, const char* str, const char* caption,
@@ -507,6 +560,59 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     GetParam(kSCompScHpf)->InitFrequency("ProCompScHpf", 20.0, 20.0, 500.0, 1.0);
     GetParam(kSCompScHpf)->SetDisplayText(20.0, "Off");
   }
+  // 1.66.0 pedals (MorePedals.h).
+  {
+    GetParam(kTGActive)->InitBool("TrackGateActive", false);
+    GetParam(kTGEngaged)->InitBool("TrackGateEngaged", true);
+    GetParam(kTGModel)->InitEnum("TrackGateModel", 0, {"Tracking", "Classic", "Smart"});
+    GetParam(kTGThreshold)->InitDouble("TrackGateThreshold", -55.0, -90.0, -20.0, 0.1, "dBFS");
+    GetParam(kTGRelease)->InitDouble("TrackGateRelease", 4.0, 0.0, 10.0, 0.1);
+    GetParam(kTGHold)->InitDouble("TrackGateHold", 20.0, 0.0, 500.0, 1.0, "ms", 0, "", IParam::ShapePowCurve(2.0));
+    GetParam(kTGRange)->InitDouble("TrackGateRange", -90.0, -90.0, 0.0, 0.5, "dB");
+    GetParam(kTGRange)->SetDisplayText(-90.0, "Silent");
+    GetParam(kTGRatio)->InitDouble("TrackGateRatio", 20.0, 1.5, 20.0, 0.1, ":1", 0, "", IParam::ShapePowCurve(2.0));
+    GetParam(kTGRatio)->SetDisplayText(20.0, "Gate");
+    GetParam(kTGNoise)->InitEnum("TrackGateNoise", 2, {"Hiss", "Mid", "Full"});
+    GetParam(kTGKey)->InitBool("TrackGateKey", false);
+    GetParam(kDigiActive)->InitBool("DigiDelayActive", false);
+    GetParam(kDigiEngaged)->InitBool("DigiDelayEngaged", true);
+    GetParam(kDigiMode)->InitEnum("DigiDelayMode", 0, {"Standard", "Mod", "Warm", "Reverse"});
+    GetParam(kDigiTime)->InitDouble("DigiDelayTime", 350.0, 20.0, 1200.0, 1.0, "ms", 0, "", IParam::ShapePowCurve(2.0));
+    GetParam(kDigiFeedback)->InitDouble("DigiDelayFeedback", 4.0, 0.0, 10.0, 0.1);
+    GetParam(kDigiLevel)->InitDouble("DigiDelayLevel", 5.0, 0.0, 10.0, 0.1);
+    GetParam(kAnaActive)->InitBool("AnalogDelayActive", false);
+    GetParam(kAnaEngaged)->InitBool("AnalogDelayEngaged", true);
+    GetParam(kAnaTime)->InitDouble("AnalogDelayTime", 300.0, 20.0, 600.0, 1.0, "ms", 0, "", IParam::ShapePowCurve(1.5));
+    GetParam(kAnaRegen)->InitDouble("AnalogDelayRegen", 4.0, 0.0, 10.0, 0.1);
+    GetParam(kAnaMix)->InitDouble("AnalogDelayMix", 5.0, 0.0, 10.0, 0.1);
+    GetParam(kAnaMod)->InitBool("AnalogDelayMod", false);
+    GetParam(kAnaRate)->InitDouble("AnalogDelayRate", 0.8, 0.1, 8.0, 0.01, "Hz", 0, "", IParam::ShapePowCurve(2.0));
+    GetParam(kAnaWidth)->InitDouble("AnalogDelayWidth", 4.0, 0.0, 10.0, 0.1);
+    GetParam(kTapeActive)->InitBool("TapeEchoActive", false);
+    GetParam(kTapeEngaged)->InitBool("TapeEchoEngaged", true);
+    GetParam(kTapeHeads)->InitEnum("TapeEchoHeads", 0, {"1", "2", "3", "1+2", "2+3", "1+2+3", "1+3"});
+    GetParam(kTapeRate)->InitDouble("TapeEchoRate", 5.0, 0.0, 10.0, 0.1);
+    GetParam(kTapeIntensity)->InitDouble("TapeEchoIntensity", 4.0, 0.0, 10.0, 0.1);
+    GetParam(kTapeEcho)->InitDouble("TapeEchoLevel", 5.0, 0.0, 10.0, 0.1);
+    GetParam(kTapeReverb)->InitDouble("TapeEchoReverb", 0.0, 0.0, 10.0, 0.1);
+    GetParam(kTapeWow)->InitDouble("TapeEchoWow", 3.0, 0.0, 10.0, 0.1);
+    GetParam(kTapeDrive)->InitDouble("TapeEchoDrive", 3.0, 0.0, 10.0, 0.1);
+    GetParam(kSprActive)->InitBool("SpringVerbActive", false);
+    GetParam(kSprEngaged)->InitBool("SpringVerbEngaged", true);
+    GetParam(kSprDwell)->InitDouble("SpringVerbDwell", 5.0, 0.0, 10.0, 0.1);
+    GetParam(kSprTone)->InitDouble("SpringVerbTone", 5.0, 0.0, 10.0, 0.1);
+    GetParam(kSprMix)->InitDouble("SpringVerbMix", 3.0, 0.0, 10.0, 0.1);
+    GetParam(kSprDecay)->InitDouble("SpringVerbDecay", 5.0, 0.0, 10.0, 0.1);
+  }
+
+  // Tap tempo (1.71.0).
+  GetParam(kTempoBPM)->InitDouble("TempoBPM", 120.0, 40.0, 300.0, 0.1, "BPM");
+  {
+    const char* names[] = {"DelayTapDiv", "Delay2TapDiv", "Delay3TapDiv", "DigiDelayTapDiv", "AnalogDelayTapDiv",
+                           "TapeEchoTapDiv"};
+    for (int k = 0; k < 6; k++)
+      GetParam(kDelayTapDiv + k)->InitEnum(names[k], 1, {"Off", "1/4", "1/8.", "1/8", "1/4T", "1/16"});
+  }
 
   // CAB LAB. Defaults: a 4x12 Greenback, an SM57 close and slightly off the cap panned a bit left,
   // an R-121 ribbon a little farther back panned a bit right, and a touch of room.
@@ -518,7 +624,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     GetParam(kCabSource)->InitBool("CabSourceIR", cabDefaults.useIR);
     GetParam(kCabSpeaker)
       ->InitEnum("CabSpeaker", cabDefaults.speaker,
-                 {"4x12 V30", "4x12 Greenback", "4x12 G12H-30", "2x12 Alnico Blue", "1x12 Jensen P12", "1x12 EVM12L"});
+                 {"4x12 V30", "4x12 Greenback", "4x12 G12H-30", "2x12 Alnico Blue", "1x12 Jensen P12", "1x12 EVM12L",
+                  "4x10 Jensen P10R"});
     auto initMic = [this](int type, int pos, int dist, int level, int pan, const cab::MicParams& d, const char* tag) {
       const std::string t(tag);
       GetParam(type)->InitEnum((t + "Type").c_str(), d.type,
@@ -537,6 +644,58 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     GetParam(kRoomSize)->InitDouble("RoomSize", cabDefaults.roomSize * 10.0, 0.0, 10.0, 0.1);
     GetParam(kRoomWidth)->InitDouble("RoomWidth", cabDefaults.width * 100.0, 0.0, 100.0, 1.0, "%");
     GetParam(kCabOutput)->InitGain("CabOutput", cabDefaults.outputDB, -24.0, 12.0, 0.1);
+    // SPEAKER LAB (1.59.0). A new CAB LAB starts in 3D; older states load as classic (see
+    // _ResetChainGridParams).
+    GetParam(kCabLab3D)->InitBool("CabLab3D", true);
+    GetParam(kCabFormat)->InitEnum("CabFormat", cabDefaults.format, {"4x12", "2x12", "1x12", "4x10"});
+    for (int m = 0; m < cab::kNumLabMics; m++)
+    {
+      const cab::LabMic& d = cabDefaults.lab[m];
+      const std::string t = std::string("LabMic") + char('A' + m);
+      GetParam(LabMicParam(m, 0))->InitBool((t + "On").c_str(), d.on);
+      GetParam(LabMicParam(m, 1))
+        ->InitEnum((t + "Type").c_str(), d.type,
+                   {"SM57", "SM7B", "Beta 57A", "R-121 Ribbon", "MD421", "U87 Condenser", "e609", "e906", "M160 Ribbon",
+                    "C414 Condenser"});
+      GetParam(LabMicParam(m, 2))->InitDouble((t + "X").c_str(), d.x * 100.0, -50.0, 50.0, 0.1, "cm");
+      GetParam(LabMicParam(m, 3))->InitDouble((t + "Y").c_str(), d.y * 100.0, -50.0, 50.0, 0.1, "cm");
+      GetParam(LabMicParam(m, 4))
+        ->InitDouble((t + "Z").c_str(), d.z * 100.0, 0.0, 150.0, 0.1, "cm", 0, "", IParam::ShapePowCurve(3.0));
+      GetParam(LabMicParam(m, 5))->InitGain((t + "Level").c_str(), d.levelDB, -24.0, 6.0, 0.1);
+      GetParam(LabMicParam(m, 6))->InitDouble((t + "Pan").c_str(), d.pan * 100.0, -100.0, 100.0, 1.0, "%");
+      GetParam(LabMicParam(m, 7))->InitBool((t + "Invert").c_str(), d.invert);
+      GetParam(kLabMicCabFirst + m)->InitEnum((t + "Cab").c_str(), d.cab, {"Cab 1", "Cab 2"});
+    }
+    // 1.61.0: dual cabs.
+    GetParam(kCabDual)->InitEnum("CabDual", cabDefaults.dual ? 1 : 0, {"Single", "Dual"});
+    GetParam(kCab2Format)->InitEnum("Cab2Format", cabDefaults.format2, {"4x12", "2x12", "1x12", "4x10"});
+    GetParam(kCab2Speaker)
+      ->InitEnum("Cab2Speaker", cabDefaults.speaker2,
+                 {"4x12 V30", "4x12 Greenback", "4x12 G12H-30", "2x12 Alnico Blue", "1x12 Jensen P12", "1x12 EVM12L",
+                  "4x10 Jensen P10R"});
+    GetParam(kCab2SourceIR)->InitBool("Cab2SourceIR", cabDefaults.useIR2);
+  }
+  GetParam(kTubeCanFail)->InitBool("TubeCanFail", false); // 1.62.0
+  GetParam(kTubeCapture)->InitBool("TubeCaptureAmp", false); // 1.64.0
+  // 1.68.0: the chassis sockets V5, V6 (named "TubeSock5Role" etc.) and the quad switch (TUBE LAB 2 copies
+  // them below).
+  GetParam(kTubeQuad)->InitBool("TubeQuad", false);
+  {
+    const tube::SocketParams d;
+    for (int k = 0; k < tube::kNumSockets; k++)
+    {
+      const std::string n = "TubeSock" + std::to_string(5 + k);
+      GetParam(SocketParam(k, kSockRole))->InitEnum((n + "Role").c_str(), d.role, {"Off", "Gain", "Follower", "Boost"});
+      GetParam(SocketParam(k, kSockTube))->InitEnum((n + "Tube").c_str(), d.tube, {"12AX7", "12AT7", "12AU7", "5751"});
+      GetParam(SocketParam(k, kSockGain))->InitDouble((n + "Gain").c_str(), d.gain * 10.0, 0.0, 10.0, 0.1);
+      GetParam(SocketParam(k, kSockBias))->InitDouble((n + "Bias").c_str(), d.biasV, -8.0, -0.3, 0.01, "V");
+      GetParam(SocketParam(k, kSockCap))
+        ->InitEnum((n + "CapSel").c_str(), 1, {"None", "0.68 uF", "1 uF", "2.2 uF", "10 uF", "25 uF"});
+      GetParam(SocketParam(k, kSockPlateCap))
+        ->InitEnum((n + "PlateCapSel").c_str(), 4, {"None", "47 pF", "100 pF", "220 pF", "470 pF", "1 nF"});
+      GetParam(SocketParam(k, kSockCouple))
+        ->InitEnum((n + "CoupleSel").c_str(), 3, {"2.2 nF", "4.7 nF", "10 nF", "22 nF", "47 nF", "100 nF"});
+    }
   }
 
   // Signal-chain grid: not automatable (they're the routing, not sound settings). The defaults are
@@ -585,6 +744,16 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
   GetParam(kHumFilter)->InitBool("HumFilter", false);
   GetParam(kOutputLimiter)->InitBool("OutputLimiter", false);
   GetParam(kOutputMono)->InitBool("OutputMono", false);
+  // 1.58.0: the Tube Lab bench (debug page) and the OUTPUT page.
+  GetParam(kTubeVariac)->InitDouble("TubeVariac", 120.0, 90.0, 135.0, 0.5, "V");
+  GetParam(kTubeBiasPot)->InitDouble("TubeBiasPot", 100.0, 50.0, 150.0, 1.0, "%");
+  GetParam(kTubePreampAge)->InitDouble("TubePreampAge", 0.0, 0.0, 100.0, 1.0, "%");
+  GetParam(kTubePowerAge)->InitDouble("TubePowerAge", 0.0, 0.0, 100.0, 1.0, "%");
+  GetParam(kLimiterCeiling)->InitDouble("LimiterCeiling", -1.0, -12.0, -1.0, 0.1, "dB");
+  GetParam(kLimiterRelease)->InitDouble("LimiterRelease", OutputLimiter::kReleaseS * 1000.0, 5.0, 500.0, 1.0, "ms", 0, "",
+                                        IParam::ShapeExp());
+  GetParam(kOutputWidth)->InitDouble("OutputWidth", 100.0, 0.0, 200.0, 1.0, "%");
+  GetParam(kOutputWiden)->InitDouble("OutputWiden", 0.0, 0.0, 100.0, 1.0, "%");
   // CAB 2 / CAB 3: on, unity, centred by default.
   for (int k = 0; k < kNumExtraCabs; k++)
   {
@@ -664,6 +833,13 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       }
     }
   }
+  // TUBE LAB 2 (1.67.0): a copy of each Tube Lab param (same range, default and display texts), named
+  // Lab2Tube*. Last, after every Tube Lab param is set up (each one's name starts with "Tube").
+  GetParam(kLab2Active)->InitBool("Lab2Active", false);
+  for (int i = 0; i < kNumLabParams; i++)
+    GetParam(kLab2First + i)->Init(*GetParam(kTubeLabParams[i]), "Tube", "Lab2Tube");
+  for (int p = kTubeChassisFirst; p <= kTubeChassisLast; p++) // 1.68.0: and of the chassis's
+    GetParam(LabParam(1, p))->Init(*GetParam(p), "Tube", "Lab2Tube");
   _MigrateLegacyChain();
 
   mNoiseGateTrigger.AddListener(&mNoiseGateGain);
@@ -695,6 +871,9 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     for (int i = 0; i < chaingrid::kNumIds; i++)
       mPedalChips[i] = nullptr;
     mCabDetailControls.clear();
+    mLabOnly[0].clear();
+    mLabOnly[1].clear();
+    mLabRetarget.clear();
     mCabButton = nullptr;
     mSpecStripCtls.clear();
     mAmpChip = nullptr;
@@ -766,6 +945,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 #else
     const auto midiLearnButtonArea = headerButtonLeftOf(libraryToggleButtonArea, 54.f, 6.f);
 #endif
+    const auto tapButtonArea = headerButtonLeftOf(midiLearnButtonArea, 44.f, 6.f); // 1.71.0: tap tempo
+    const auto tempoArea = headerButtonLeftOf(tapButtonArea, 86.f, 4.f).GetVPadded(-3.f); // As tall as the buttons look
     const IVStyle headerButtonStyle = style.WithLabelText(IText(12.f, EAlign::Center, PluginColors::NAM_ONACCENT))
                                         .WithValueText(IText(12.f, EAlign::Center, PluginColors::NAM_ONACCENT));
     const auto tunerPanelArea = b.GetPadded(-40.f);
@@ -773,7 +954,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     const auto titleHeight = std::clamp(contentArea.H() * 0.115f, 32.0f, 58.0f);
     // Stops short of the header buttons -- with the AMP NEST panel hidden the content area runs
     // under them, and the A/B switch ended up on top of TUNE.
-    const float headerButtonsL = midiLearnButtonArea.L;
+    const float headerButtonsL = tempoArea.L;
     auto titleArea = contentArea.GetFromTop(titleHeight);
     titleArea.R = std::min(titleArea.R, headerButtonsL - 12.f);
     const auto abSwitchArea = titleArea.GetFromRight(std::clamp(contentArea.W() * 0.11f, 70.0f, 110.0f)).GetPadded(-10.0f);
@@ -874,7 +1055,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     // inverted rect -- shrink everything proportionally instead of overlapping, which is the whole
     // point of laying this out bottom-up.
     const auto knobStackArea =
-      ampControlsArea.GetReducedFromBottom(std::min(fileRowsHeight + 8.0f, ampControlsArea.H() * 0.6f));
+      ampControlsArea.GetReducedFromBottom(std::min(2.f * fileRowsHeight + 8.0f, ampControlsArea.H() * 0.6f));
     // Floor of 38: NAMSwitchControl draws its handle at the switch bitmap's own (fixed, logical)
     // height rather than a fraction of its bounds, so a shorter zone than this leaves no room
     // underneath for the South-oriented label and the pill paints over its own caption.
@@ -923,7 +1104,9 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     const auto presenceToggleArea = toggleUnder(presenceKnobArea);
 
     const auto modelArea =
-      ampControlsArea.GetFromBottom(fileRowsHeight).GetFromTop(fileHeight).GetMidHPadded(fileWidth).GetVShifted(-1);
+      ampControlsArea.GetFromBottom(2.f * fileRowsHeight).GetFromTop(fileHeight).GetMidHPadded(fileWidth).GetVShifted(-1);
+    // 1.70.2: the PACK dropdown, the same size as the model dropdown, one row under it (the bottom row).
+    const auto packArea = modelArea.GetVShifted(fileRowsHeight);
     const auto slimIconArea =
       IRECT(modelArea.R + 6.f, modelArea.MH() - 14.f, modelArea.R + 6.f + 2.f * 28.f, modelArea.MH() + 14.f);
     const auto modelIconArea = modelArea.GetFromLeft(30).GetTranslated(-40, 10);
@@ -1127,6 +1310,15 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                                            rightArrowSVG, fileBackgroundBitmap, globeSVG, "Get Amp Models", getUrl),
                  kCtrlTagModelFileBrowser);
 
+    // 1.70.2 PACK PICKER: one dropdown, styled like the model dropdown above it, always shown. Its menu:
+    // the pack's captures, the packs in the library, and choosing / rescanning a pack folder.
+    addAmpDetail(new NAMPackButtonControl(
+                   packArea, [this]() { return _PackLabel(0); }, nullptr,
+                   [this](IControl* pCaller) { _PackShowMenu(0, pCaller); },
+                   [this](IPopupMenu* pMenu) { _PackOnMenu(pMenu); }, fileBackgroundBitmap, style.valueText))
+      ->SetTooltip("PACK: switch between the captures of one capture pack (e.g. an unzipped TONE3000 download). "
+                   "Pick a pack from your library, then a capture. Switching keeps the volume level-matched "
+                   "(Raw output mode). The model loader above works as before.");
     auto hideSlimOverlay = [](IControl* pCaller) {
       IGraphics* ui = pCaller->GetUI();
       if (auto* backdrop = ui->GetControlWithTag(kCtrlTagSlimOverlayBackdrop))
@@ -1224,6 +1416,38 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     // Each pedal's cell is at its index, moved up by mLibraryScrollY, and clipped to
     // pedalPickerListArea (see the chips' clip getter).
     NAMScrollBarControl* pedalPickerScrollBar = nullptr;
+    // 1.60.0: the AMP NEST's LABS (TUBE LAB and CAB LAB, one slot each), the PEDALS button that opens
+    // the drawer, and the drawer itself: over the grid's lower part, above the spectrum strip. The
+    // pedal list above is no longer shown (its geometry is kept for the panel's other rows).
+    auto isLab = [](int id) { return id == kTubePedalIdx || id == chaingrid::kTubeLab2 || id == kCabLabPedalIdx; };
+    const float labSlotH = std::clamp(pedalPickerListArea.H() * 0.3f, 56.f, 86.f);
+    const IRECT labSlotsArea(pedalPickerListArea.L, pedalPickerHeaderArea.B + 4.f, pedalPickerListArea.R,
+                             pedalPickerHeaderArea.B + 4.f + labSlotH);
+    auto labSlotRect = [labSlotsArea](int id) {
+      // 1.67.0: TUBE LAB, TUBE LAB 2, CAB LAB.
+      return labSlotsArea.SubRectHorizontal(3, id == kTubePedalIdx ? 0 : id == chaingrid::kTubeLab2 ? 1 : 2).GetPadded(-4.f);
+    };
+    const IRECT pedalsButtonArea(pedalPickerListArea.L + 4.f, labSlotsArea.B + 12.f, pedalPickerListArea.R - 4.f,
+                                 labSlotsArea.B + 12.f + std::max(32.f, libRowH * 1.15f));
+    // 1.61.1: the drawer opens over the AMP NEST panel itself (from its title down), with an X; the
+    // grid stays in full view, so it stays open while you drag pedals out. CAB, taken off the grid,
+    // waits in its first slot.
+    const IRECT drawerRect(libraryPanelArea.L + 6.f, libraryTitleArea.T - 4.f, libraryPanelArea.R - 6.f,
+                           libraryPanelArea.B - 6.f);
+    const IRECT drawerChipsArea = drawerRect.GetPadded(-8.f).GetReducedFromTop(52.f);
+    std::vector<int> drawerTypes;
+    for (int t = 0; t < chaingrid::kNumIds; t++) // (The later pedals' types are past kPedalPickerTypes)
+      if (chaingrid::IsPedalType(t) && t != chaingrid::PedalType(kTubePedalIdx)
+          && t != chaingrid::PedalType(kCabLabPedalIdx) && t != chaingrid::PedalType(chaingrid::kTubeLab2))
+        drawerTypes.push_back(t);
+    const int drawerCols = 4;
+    const int drawerRows = ((int)drawerTypes.size() + 1 + drawerCols - 1) / drawerCols; // (+1: CAB)
+    auto drawerSlotRect = [drawerChipsArea, drawerCols, drawerRows](int slot) {
+      const float cw = drawerChipsArea.W() / drawerCols;
+      const float rh = std::min(drawerChipsArea.H() / drawerRows, cw * 1.25f);
+      const float left = drawerChipsArea.L + (slot % drawerCols) * cw, top = drawerChipsArea.T + (slot / drawerCols) * rh;
+      return IRECT(left, top, left + cw, top + rh).GetPadded(-3.f);
+    };
 
     if (mShowLibraryPanel)
     {
@@ -1268,9 +1492,56 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         "GET PEDALS (TONE3000)", style));
 
       pGraphics->AttachControl(new IVLabelControl(
-        pedalPickerHeaderArea, "PEDALS",
-        DEFAULT_STYLE.WithValueText(IText(14, PluginColors::NAM_THEMEFONTCOLOR, "Michroma-Regular")).WithDrawFrame(false)));
-      if (pedalPickerMaxScroll > 0.f)
+        pedalPickerHeaderArea, "LABS",
+        DEFAULT_STYLE.WithValueText(IText(15, IColor(255, 214, 170, 90), "Michroma-Regular")).WithDrawFrame(false)));
+      // (The controls the PEDALS drawer covers are in "UNDER_DRAWER": hidden while it's open, so their
+      // edges don't show around it.)
+      for (int id : {kTubePedalIdx, chaingrid::kTubeLab2, kCabLabPedalIdx})
+        pGraphics
+          ->AttachControl(new NAMLabSlotControl(
+            labSlotRect(id), PedalOf(id).name, id == kCabLabPedalIdx ? 2 : 1,
+            [this, id]() { return _ReadChainGrid().Placed(id); },
+            [this, id]() { return GetParam(PedalOf(id).engagedParam)->Value() > 0.5; },
+            [this, id]() { _SelectBlock(id); }), kNoTag, "UNDER_DRAWER")
+          ->SetTooltip(id == kTubePedalIdx
+                         ? "TUBE LAB: a tube amp simulated part by part -- preamp triodes, tone stack, phase "
+                           "inverter, power tubes and their supply, into a real speaker load."
+                       : id == chaingrid::kTubeLab2
+                         ? "TUBE LAB 2: a second Tube Lab with its own settings and its own capture (Capture + "
+                           "LOAD in its popup), for dual amps: put both on the grid, side by side on two rows."
+                         : "CAB LAB: speaker cabs with up to four mics placed in 3D (SPEAKER LAB), and a room.");
+      pGraphics
+        ->AttachControl(new NAMPedalsButtonControl(
+          pedalsButtonArea,
+          [this]() {
+            // Pedal types with a copy still off the grid (what the drawer shows), and CAB if it's out.
+            int n = _ReadChainGrid().Placed(chaingrid::kCab) ? 0 : 1;
+            for (int t = 0; t < chaingrid::kNumIds; t++)
+            {
+              if (!chaingrid::IsPedalType(t) || t == chaingrid::PedalType(kTubePedalIdx)
+                  || t == chaingrid::PedalType(kCabLabPedalIdx) || t == chaingrid::PedalType(chaingrid::kTubeLab2))
+                continue;
+              for (int copy = 0; copy < chaingrid::NumCopies(t); copy++)
+              {
+                const int id = chaingrid::PedalCopyId(t, copy);
+                if (GetParam(PedalOf(id).activeParam)->Value() <= 0.5 || GetParam(GridCellParam(id))->Value() < 0.0)
+                {
+                  n++;
+                  break;
+                }
+              }
+            }
+            return n;
+          },
+          [this]() { return mPedalDrawerOpen; }, [this]() { _SetPedalDrawerOpen(!mPedalDrawerOpen); }),
+          kNoTag, "UNDER_DRAWER")
+        ->SetTooltip("Open the pedals: drag one onto the grid.");
+      pGraphics->AttachControl(new NAMHintTextControl(
+        IRECT(pedalPickerListArea.L, pedalsButtonArea.B + 10.f, pedalPickerListArea.R, pedalPickerListArea.B),
+        "Drag a lab or a pedal onto the grid; drag it off the grid to take it out. Anything switched off "
+        "uses no CPU."), kNoTag, "UNDER_DRAWER");
+      pGraphics->ForControlInGroup("UNDER_DRAWER", [this](IControl* ctrl) { ctrl->Hide(mPedalDrawerOpen); });
+      if (false) // 1.60.0: the scrolling pedal list is now the drawer
       {
         // Scrolling moves the rows live (no relayout): each chip re-reads its position, which
         // follows mLibraryScrollY.
@@ -1309,16 +1580,23 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     addAmpDetail(new NAMKnobControl(outputKnobArea, kOutputLevel, "Master Out", ampKnobStyle, knobBackgroundBitmap))
       ->SetTooltip("Master output: the level out of the whole chain. If the OUT meter shows CLIP, turn this down "
                    "(or turn the Limiter on).");
-    // Limiter and Mono (1.55.0) share the space under Master Out, side by side.
+    // Limiter and the OUTPUT page (1.58.0; it replaced 1.55.0's Mono switch) share the space under
+    // Master Out, side by side.
     const IRECT outputToggles = toggleUnder(outputKnobArea);
     addAmpDetail(new NAMSwitchControl(outputToggles.SubRectHorizontal(2, 0), kOutputLimiter, "Limiter", style,
                                       switchHandleBitmap))
-      ->SetTooltip("Output limiter: catches the brief pick peaks at -1 dBFS (smoothly, 0.7 ms ahead), so you can "
-                   "turn Master Out up for a louder sound without clipping. Adds 0.7 ms of latency.");
-    addAmpDetail(new NAMSwitchControl(outputToggles.SubRectHorizontal(2, 1), kOutputMono, "Mono", style,
-                                      switchHandleBitmap))
-      ->SetTooltip("Mono output: both outputs play the left and right channels mixed together, so one speaker "
-                   "gets everything (the cab's mic pan, room and the effects' stereo spread fold to the middle).");
+      ->SetTooltip("Output limiter: catches the brief pick peaks (at -1 dBFS unless you set its Ceiling lower on "
+                   "the OUTPUT page), so you can turn Master Out up for a louder sound without clipping. Adds 0.7 ms "
+                   "of latency.");
+    addAmpDetail(new NAMFlatButtonControl(outputToggles.SubRectHorizontal(2, 1).GetCentredInside(
+                                            outputToggles.W() * 0.5f - 4.f, std::min(24.f, outputToggles.H())),
+                                          "OUTPUT",
+                                          [pGraphics]() {
+                                            if (auto* page = pGraphics->GetControlWithTag(kCtrlTagOutputPage))
+                                              page->Hide(false);
+                                          }))
+      ->SetTooltip("The OUTPUT page: Master Out, the limiter's Ceiling and Release, and stereo Width / Widen "
+                   "(Width 0% is mono).");
 
     // Post-amp tone shaping: low-end density (200-500Hz shelf) and high-end boost (2-6kHz shelf).
     // Each has its own on/off toggle, same pattern as the EQ switch.
@@ -1346,8 +1624,13 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 
     auto attachMeters = [&]() {
       pGraphics->AttachControl(new NAMMeterControl<1>(inputMeterArea, style), kCtrlTagInputMeter);
-      pGraphics->AttachControl(new NAMMeterControl<2>(outputMeterArea, style),
-                               kCtrlTagOutputMeter);
+      auto* outMeter = new NAMMeterControl<2>(outputMeterArea, style);
+      outMeter->SetClickFunc([pGraphics]() {
+        if (auto* page = pGraphics->GetControlWithTag(kCtrlTagOutputPage))
+          page->Hide(false);
+      });
+      pGraphics->AttachControl(outMeter, kCtrlTagOutputMeter)
+        ->SetTooltip("The final output. Click for the OUTPUT page (Master Out, limiter, stereo width).");
       // The meters are otherwise two unlabeled bars pinned to opposite edges, with nothing saying
       // which end of the chain each one is measuring.
       const IVStyle meterLabelStyle =
@@ -1457,6 +1740,21 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       ->SetTooltip("MIDI learn: click a knob or switch, then press or move a control on your MIDI controller (a "
                    "footswitch, the expression pedal). Click MIDI again when you're done.");
 
+    // Tap tempo (1.71.0): the BPM, and TAP (MIDI-learnable, for a footswitch).
+    pGraphics->AttachControl(new NAMTempoControl(tempoArea, kTempoBPM, [this]() { return _BeatPhase(); }));
+    pGraphics
+      ->AttachControl(new IVButtonControl(
+                        tapButtonArea,
+                        [this](IControl* pCaller) {
+                          _TempoTap(std::chrono::duration<double>(
+                                      std::chrono::steady_clock::now().time_since_epoch())
+                                      .count());
+                        },
+                        "TAP", headerButtonStyle),
+                      kCtrlTagTapButton)
+      ->SetTooltip("Tap tempo: tap two or more times on the beat. Every delay set to a Tap note value follows. "
+                   "MIDI learn it to a footswitch to tap with your foot.");
+
 #ifdef APP_API
     pGraphics
       ->AttachControl(new IVButtonControl(
@@ -1492,6 +1790,10 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       auto* gridControl = new NAMChainGridControl(
         chainArea, gridGeom, [this]() { return _ReadChainGrid(); },
         [this](const chaingrid::Grid& g) { _WriteChainGrid(g); });
+      gridControl->SetOutClick([pGraphics]() {
+        if (auto* page = pGraphics->GetControlWithTag(kCtrlTagOutputPage))
+          page->Hide(false);
+      });
       pGraphics->AttachControl(gridControl);
 
       // Where a block sits: its grid cell's chip.
@@ -1514,7 +1816,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       };
       // Dropping a block re-plugs it where it lands (see ChainGrid::Insert): into a column that
       // has blocks, in parallel with them; into an empty column, in series. A pedal dropped off
-      // the grid leaves the chain (back to the AMP NEST list); AMP, CAB and the loop snap back.
+      // the grid leaves the chain (back to the AMP NEST list); so does CAB since 1.61.1 (into the
+      // PEDALS drawer); AMP and the loop snap back.
       auto dropBlock = [this, dropCell](int block, float x, float y) {
         const bool isPedal = chaingrid::IsPedal(block);
         chaingrid::Grid g = _ReadChainGrid();
@@ -1523,11 +1826,14 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                                      (int)g.Placed(block));
         if (c < 0)
         {
-          if (isPedal && g.Placed(block))
+          if ((isPedal || block == chaingrid::kCab) && g.Placed(block))
           {
             g.Remove(block);
             _WriteChainGrid(g);
-            SendParameterValueFromUI(PedalOf(block).activeParam, 0.0);
+            if (isPedal)
+              SendParameterValueFromUI(PedalOf(block).activeParam, 0.0);
+            if (auto* ui = GetUI())
+              ui->SetAllControlsDirty();
           }
           return;
         }
@@ -1558,7 +1864,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 
       // The AMP block: draggable and clickable -- opens its own (bigger) popup.
       auto* ampChip = makeFixedBlock(chaingrid::kAmp, "AMP", kAmpBlockId);
-      ampChip->SetActiveGetter([this]() { return GetParam(kAmpEngaged)->Value() > 0.5; });
+      ampChip->SetActiveGetter([this]() { return GetParam(kAmpEngaged)->Value() > 0.5 && !_TubeTakesCapture(); });
+      ampChip->SetNameGetter([this]() { return std::string(_TubeTakesCapture() ? "AMP IN LAB" : ""); });
       ampChip->SetSelectedGetter([this]() { return mSelectedBlock == kAmpBlockId; });
       ampChip->SetSelectedFunc([this](int) { _SelectBlock(kAmpBlockId); });
       mAmpChip = ampChip;
@@ -1583,6 +1890,10 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       mLoopReturnChip = loopReturnChip;
       pGraphics->AttachControl(loopReturnChip);
 
+      // 1.60.0: the PEDALS drawer's panel. Its chips are the pedals' own (attached next, above it).
+      pGraphics->AttachControl(new NAMPedalDrawerControl(drawerRect, [this]() { _SetPedalDrawerOpen(false); }),
+                               kCtrlTagPedalDrawer)
+        ->Hide(!mPedalDrawerOpen);
       // Pass 1: every chip, so the popup (attached after) always draws on top of all of them. A
       // pedal that isn't in the chain sits in the AMP NEST panel's list, one row per pedal type. The
       // effect types come in several copies: the row shows the first copy that's free, so after
@@ -1606,41 +1917,47 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         const int nestRow = chaingrid::PedalType(p);
 
         auto inPicker = [inNest, p]() { return inNest(p); };
-        auto positionGetter = [this, blockRect, pedalPickerRowsArea, pedalPickerCellW, kPedalPickerRowH, kPedalPickerCols, p, nestRow,
-                               inPicker, nestFront]() {
+        const bool lab = isLab(p);
+        auto positionGetter = [this, blockRect, p, lab, labSlotRect, drawerTypes, drawerSlotRect, inPicker, nestFront]() {
           if (inPicker())
           {
-            // Packed: skip the types with every copy in the chain, so the grid has no holes.
-            int slot = 0;
-            for (int t = 0; t < nestRow; t++)
-              if (chaingrid::IsPedalType(t) && nestFront(t) >= 0)
+            if (lab)
+              return labSlotRect(p); // 1.60.0: its own slot in the AMP NEST's LABS
+            // In the drawer, packed: the types with every copy in the chain are skipped, so it has
+            // no holes (and CAB, off the grid, comes first).
+            int slot = _ReadChainGrid().Placed(chaingrid::kCab) ? 0 : 1;
+            for (int t : drawerTypes)
+            {
+              if (t == chaingrid::PedalType(p))
+                break;
+              if (nestFront(t) >= 0)
                 slot++;
-            const float top = pedalPickerRowsArea.T - mLibraryScrollY + (slot / kPedalPickerCols) * kPedalPickerRowH;
-            const float left = pedalPickerRowsArea.L + (slot % kPedalPickerCols) * pedalPickerCellW;
-            return IRECT(left, top, left + pedalPickerCellW, top + kPedalPickerRowH).GetPadded(-4.f);
+            }
+            return drawerSlotRect(slot);
           }
           return blockRect(p);
         };
 
         auto* chip = new NAMPedalChipControl(positionGetter(), def.name, p, style,
                                              [dropBlock](int pedalIdx, float x, float y) { dropBlock(pedalIdx, x, y); });
+        if (lab)
+          chip->SetLabKind(p == kCabLabPedalIdx ? 2 : 1);
         chip->SetDragPreviewFunc([previewDrop, p](float x, float y, bool dragging) { previewDrop(p, x, y, dragging); });
         chip->SetActiveGetter(
           [this, engagedParam]() { return GetParam(engagedParam)->Value() > 0.5; });
         chip->SetPositionGetter(positionGetter);
-        // In the pedal list, a chip shows (and takes clicks) only inside the list's visible area,
-        // only if it's its type's front copy, and not at all while the AMP NEST panel is hidden.
-        chip->SetClipGetter([this, inPicker, nestFront, nestRow, p, pedalPickerListArea](IRECT& clip) {
+        // 1.60.0: off the grid, a lab shows in its AMP NEST slot (while the panel's open, and the
+        // drawer, which covers the slots, isn't) and a pedal in the drawer (while it's open, its
+        // type's front copy only).
+        chip->SetClipGetter([this, inPicker, nestFront, nestRow, p, lab, labSlotRect, drawerChipsArea](IRECT& clip) {
           if (!inPicker())
             return false;
-          clip = (mShowLibraryPanel && nestFront(nestRow) == p) ? pedalPickerListArea : IRECT();
+          if (lab)
+            clip = mShowLibraryPanel && !mPedalDrawerOpen ? labSlotRect(p) : IRECT();
+          else
+            clip = (mShowLibraryPanel && mPedalDrawerOpen && nestFront(nestRow) == p) ? drawerChipsArea : IRECT();
           return true;
         });
-        if (pedalPickerScrollBar)
-          chip->SetWheelFunc([pedalPickerScrollBar, inPicker, kPedalPickerRowH](float d) {
-            if (inPicker())
-              pedalPickerScrollBar->Scroll(-d * kPedalPickerRowH * 0.5f);
-          });
         chip->SetSelectedGetter([this, p]() { return mSelectedBlock == p; });
         chip->SetSelectedFunc([this](int pedalIdx) { _SelectBlock(pedalIdx); });
         if (p >= kNumBuiltInPedals && p < kNumPedals)
@@ -1659,6 +1976,17 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       // pedal) holding the IR/cab loading controls. Attached after every pedal chip so it's always
       // on top and clickable.
       auto* cabChip = makeFixedBlock(chaingrid::kCab, "CAB", kCabBlockId);
+      // 1.61.1: CAB can come off the grid (drag it off, like a pedal); then it waits in the PEDALS
+      // drawer's first slot until it's dragged back in.
+      cabChip->SetPositionGetter([this, blockRect, drawerSlotRect]() {
+        return _ReadChainGrid().Placed(chaingrid::kCab) ? blockRect(chaingrid::kCab) : drawerSlotRect(0);
+      });
+      cabChip->SetClipGetter([this, drawerChipsArea](IRECT& clip) {
+        if (_ReadChainGrid().Placed(chaingrid::kCab))
+          return false;
+        clip = mShowLibraryPanel && mPedalDrawerOpen ? drawerChipsArea : IRECT();
+        return true;
+      });
       cabChip->SetActiveGetter([this]() { return GetParam(kIRToggle)->Value() > 0.5; });
       cabChip->SetSelectedGetter([this]() { return mSelectedBlock == kCabBlockId; });
       cabChip->SetSelectedFunc([this](int) { _SelectBlock(kCabBlockId); });
@@ -1732,6 +2060,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           }
           continue;
         }
+        if (p == chaingrid::kTubeLab2)
+          continue; // 1.67.0: it opens the Tube Lab's popup (see _SetUiLab)
         if (p == kTubePedalIdx)
         {
           // Tube Lab: its own, bigger card (see _ComputeTubePopupCardArea) -- the On and Circuit
@@ -1741,15 +2071,16 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           const IRECT tubeBody = _ComputeTubePopupCardArea(b).GetReducedFromTop(38.f).GetPadded(-10.f);
           const IRECT topRow = tubeBody.GetFromTop(tubeBody.H() * 0.2f);
           const IRECT switchesArea = topRow.GetFromLeft(std::min(600.f, topRow.W() * 0.66f));
-          // Six cells: On, Circuit, Spkr Load, Economy, 8x (1.46.0: up here with Economy, its opposite),
-          // and PRESETS / DEBUG stacked.
-          const float switchW = std::min(100.f, switchesArea.W() / 6.f - 4.f);
-          const IRECT switchArea = switchesArea.GetGridCell(0, 0, 1, 6).GetCentredInside(switchW, 60.f);
-          const IRECT engineSwitchArea = switchesArea.GetGridCell(0, 1, 1, 6).GetCentredInside(switchW, 60.f);
-          const IRECT loadSwitchArea = switchesArea.GetGridCell(0, 2, 1, 6).GetCentredInside(switchW, 60.f);
-          const IRECT economySwitchArea = switchesArea.GetGridCell(0, 3, 1, 6).GetCentredInside(switchW, 60.f);
-          const IRECT hqSwitchArea = switchesArea.GetGridCell(0, 4, 1, 6).GetCentredInside(switchW, 60.f);
-          const IRECT buttonsCell = switchesArea.GetGridCell(0, 5, 1, 6).GetCentredInside(switchW, 58.f);
+          // Seven cells: On, Circuit, AMP Capture (1.64.0), Spkr Load, Economy, 8x (1.46.0: up here with
+          // Economy, its opposite), and PRESETS / DEBUG stacked.
+          const float switchW = std::min(100.f, switchesArea.W() / 7.f - 4.f);
+          const IRECT switchArea = switchesArea.GetGridCell(0, 0, 1, 7).GetCentredInside(switchW, 60.f);
+          const IRECT engineSwitchArea = switchesArea.GetGridCell(0, 1, 1, 7).GetCentredInside(switchW, 60.f);
+          const IRECT captureSwitchArea = switchesArea.GetGridCell(0, 2, 1, 7).GetCentredInside(switchW, 60.f);
+          const IRECT loadSwitchArea = switchesArea.GetGridCell(0, 3, 1, 7).GetCentredInside(switchW, 60.f);
+          const IRECT economySwitchArea = switchesArea.GetGridCell(0, 4, 1, 7).GetCentredInside(switchW, 60.f);
+          const IRECT hqSwitchArea = switchesArea.GetGridCell(0, 5, 1, 7).GetCentredInside(switchW, 60.f);
+          const IRECT buttonsCell = switchesArea.GetGridCell(0, 6, 1, 7).GetCentredInside(switchW, 58.f);
           const IRECT presetButtonArea = buttonsCell.GetFromTop(26.f);
           const IRECT debugButtonArea = buttonsCell.GetFromBottom(26.f);
           const IRECT curveArea = topRow.GetReducedFromLeft(switchesArea.W() + 10.f);
@@ -1764,8 +2095,24 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
             mPedalDetailControls[p].push_back(c);
             mTubeTabControls.push_back({c, tab});
           };
+          // 1.62.0: CHASSIS, at the tab bar's right end: the preamp as a chassis (TubeChassisControls.h).
+          {
+            auto* chassisButton = new NAMFlatButtonControl(tabBarArea.GetFromRight(tabBarArea.W() * 0.16f).GetPadded(-2.f),
+                                                           "CHASSIS", [pGraphics]() {
+                                                             if (auto* page = pGraphics->GetControlWithTag(kCtrlTagTubeChassis))
+                                                               page->Hide(false);
+                                                           });
+            chassisButton->SetTooltip("The whole amp as a chassis in 3D (drag to turn it): the preamp tubes, four sockets "
+                                      "for more preamp tubes (gain stages, followers or boosts), the power tubes and "
+                                      "output transformer, the turret board's parts, the Variac. Click anything to see and "
+                                      "set it; double-click to go to its page.");
+            pGraphics->AttachControl(chassisButton);
+            chassisButton->Hide(true);
+            mPedalDetailControls[p].push_back(chassisButton);
+          }
           auto* tabBar = new NAMTabBarControl(
-            tabBarArea, {"PREAMP", "POWER AMP", "FEEL"}, [this]() { return mTubeTab; },
+            tabBarArea.GetReducedFromRight(tabBarArea.W() * 0.16f + 4.f), {"PREAMP", "POWER AMP", "FEEL"},
+            [this]() { return mTubeTab; },
             [this](int tab) {
               mTubeTab = tab;
               _ApplyTubeTab();
@@ -1794,6 +2141,64 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           loadSwitch->Hide(true);
           mPedalDetailControls[p].push_back(loadSwitch);
 
+          {
+            auto* captureSwitch =
+              new NAMSwitchControl(captureSwitchArea, kTubeCapture, "AMP Capture", style, switchHandleBitmap);
+            pGraphics->AttachControl(captureSwitch);
+            captureSwitch->SetTooltip(
+              "Use the capture loaded in the AMP block as the Tube Lab's preamp: Drive is the gain into it, and its "
+              "output drives the Tube Lab's own power amp -- Master, Sag, Feedback, Presence, EL34/6L6, the bench "
+              "(Variac, bias pot, tube age), Real Feel, the speaker load, failing tubes -- and the tone stack if one's "
+              "on. The AMP block steps aside while this is on (the capture runs once, here). Best with a preamp or DI "
+              "capture: a full-amp capture already has a power amp in it.");
+            captureSwitch->Hide(true);
+            mPedalDetailControls[p].push_back(captureSwitch);
+            mLabOnly[0].push_back(captureSwitch);
+            // 1.67.0: TUBE LAB 2's own capture, in the same place, and its loader under the curve.
+            auto* capture2 = new NAMSwitchControl(captureSwitchArea, LabParam(1, kTubeCapture), "Capture", style,
+                                                  switchHandleBitmap);
+            pGraphics->AttachControl(capture2);
+            capture2->SetTooltip(
+              "Use TUBE LAB 2's own capture (LOAD CAPTURE, under the curve) as its preamp: Drive is the gain into it, "
+              "and its output drives TUBE LAB 2's power amp, bench, Real Feel and speaker load -- and its tone stack if "
+              "one's on. A second amp beside TUBE LAB and the AMP block. Best with a preamp or DI capture.");
+            capture2->Hide(true);
+            mPedalDetailControls[p].push_back(capture2);
+            mLabOnly[1].push_back(capture2);
+            const IRECT lab2Row = topRow.GetReducedFromLeft(switchesArea.W() + 10.f).GetFromBottom(20.f);
+            const std::string griffinDir = GriffinLibraryDir();
+            const std::vector<std::string> capPaths = {griffinDir + "IRs and Amp Profiles (copied)", griffinDir + "tone"};
+            auto* loader = new NAMPresetBrowserControl(
+              lab2Row.GetFromLeft(lab2Row.W() * 0.4f), "LOAD CAPTURE", "nam", capPaths, true,
+              [this](const WDL_String& fileName, const WDL_String&) {
+                if (!fileName.GetLength())
+                  return;
+                const std::string msg = _StageLab2Model(fileName);
+                if (msg.size())
+                {
+                  _ShowMessageBox(GetUI(), ("Failed to load the capture:\n\n" + msg).c_str(), "TUBE LAB 2", kMB_OK);
+                  return;
+                }
+                // Loading one switches it in (Circuit engine, Capture on).
+                SendParameterValueFromUI(LabParam(1, kTubeCircuit), 1.0);
+                SendParameterValueFromUI(LabParam(1, kTubeCapture), 1.0);
+              },
+              style);
+            pGraphics->AttachControl(loader);
+            loader->SetTooltip("Load a .nam capture into TUBE LAB 2 (it switches Capture on).");
+            loader->Hide(true);
+            mPedalDetailControls[p].push_back(loader);
+            mLabOnly[1].push_back(loader);
+            auto* capName = new IVLabelControl(
+              lab2Row.GetReducedFromLeft(lab2Row.W() * 0.42f),
+              mLab2ModelPath.GetLength() ? mLab2ModelPath.get_filepart() : "No capture loaded",
+              DEFAULT_STYLE.WithDrawFrame(false).WithValueText(
+                IText(10.f, PluginColors::NAM_THEMEFONTCOLOR.WithOpacity(0.8f), "Roboto-Regular")));
+            pGraphics->AttachControl(capName, kCtrlTagLab2CaptureName);
+            capName->Hide(true);
+            mPedalDetailControls[p].push_back(capName);
+            mLabOnly[1].push_back(capName);
+          }
           auto* economySwitch =
             new NAMSwitchControl(economySwitchArea, kTubeEconomy, "Economy", style, switchHandleBitmap);
           pGraphics->AttachControl(economySwitch);
@@ -1849,13 +2254,13 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           mPedalDetailControls[p].push_back(debugButton);
 
           auto* curve = new TubeCurveControl(curveArea, [this](double x) {
-            return mTubeStage[0].TransferCurve(x, GetParam(kTubeDrive)->Value(), GetParam(kTubeBias)->Value(),
-                                               GetParam(kTubeCircuit)->Bool(), GetParam(kTubePlate)->Value() * 1000.0,
-                                               GetParam(kTubeStage2)->Bool(), GetParam(kTubeGain2)->Value() / 10.0,
-                                               GetParam(kTubeBias2)->Value());
+            return _UiStages()[0].TransferCurve(x, GetParam(_TP(kTubeDrive))->Value(), GetParam(_TP(kTubeBias))->Value(),
+                                               GetParam(_TP(kTubeCircuit))->Bool(), GetParam(_TP(kTubePlate))->Value() * 1000.0,
+                                               GetParam(_TP(kTubeStage2))->Bool(), GetParam(_TP(kTubeGain2))->Value() / 10.0,
+                                               GetParam(_TP(kTubeBias2))->Value());
           });
           pGraphics->AttachControl(curve, kCtrlTagTubeCurve);
-          curve->SetDimmed(GetParam(kTubeEngaged)->Value() <= 0.5);
+          curve->SetDimmed(GetParam(_TP(kTubeEngaged))->Value() <= 0.5);
           curve->Hide(true);
           mPedalDetailControls[p].push_back(curve);
 
@@ -1922,6 +2327,11 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
              "of from the plates: the transformer's bass and treble roll-offs sit inside the loop, so Feedback "
              "no longer flattens them -- a looser, fuller low end (+2 dB at 40-70 Hz at your settings). Needs "
              "Power Amp on; most noticeable with Feedback up."},
+            {kTubeQuad, "4 Tubes", true, kPow, 1, 3,
+             "Four power tubes (a quad, like a 100 W head) instead of two: two per side in parallel into half the "
+             "load, a stiffer supply and a bigger output transformer. Small signals are as loud; the supply sags "
+             "the same per tube and the transformer saturates later, so big chords stay firmer. With failing on, "
+             "a failed tube only halves its side. Needs Power Amp on."},
             {kTubeResonance, "Resonance", false, kPow, 1, 2,
              "Resonance (like a Mesa's or a 5150's): takes part of the negative feedback away below ~150 Hz, so "
              "the power amp's low end comes back -- and with Spkr Load on, the speaker's resonance thump (+3.5 dB "
@@ -2220,6 +2630,53 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                       {kPDGate, "Gate", false, "Noise gate: 0 off, then a threshold from -90 to -30 dBFS on the input."},
                       {kPDBright, "Bright", true, "More top end after the clipping."}};
               break;
+            case chaingrid::kTrackGate:
+              about = "Three gates: Tracking (after the ISP Decimator), Classic (Boss NS-2), Smart (MXR Smart Gate).";
+              ctls = {{kTGModel, "Model", false, BaseParamHelp(kTGModel)},
+                      {kTGThreshold, "Threshold", false, BaseParamHelp(kTGThreshold)},
+                      {kTGRelease, "Release", false, BaseParamHelp(kTGRelease)},
+                      {kTGHold, "Hold", false, BaseParamHelp(kTGHold)},
+                      {kTGRange, "Range", false, BaseParamHelp(kTGRange)},
+                      {kTGRatio, "Ratio", false, BaseParamHelp(kTGRatio)},
+                      {kTGNoise, "Noise", false, BaseParamHelp(kTGNoise)},
+                      {kTGKey, "Key In", true, BaseParamHelp(kTGKey)}};
+              break;
+            case chaingrid::kDigiDelay:
+              about = "Digital delay after the Boss DD-3 / DD-8: clean repeats, chorused, warm or reversed.";
+              ctls = {{kDigiMode, "Mode", false, BaseParamHelp(kDigiMode)},
+                      {kDigiTime, "Time", false, BaseParamHelp(kDigiTime)},
+                      {kDigiFeedback, "Feedback", false, BaseParamHelp(kDigiFeedback)},
+                      {kDigiLevel, "Level", false, BaseParamHelp(kDigiLevel)},
+                      {kDigiTapDiv, "Tap", false, BaseParamHelp(kDigiTapDiv)}};
+              break;
+            case chaingrid::kAnalogDelay:
+              about = "Bucket-brigade delay after the MXR Carbon Copy: dark repeats that can run away.";
+              ctls = {{kAnaTime, "Delay", false, BaseParamHelp(kAnaTime)},
+                      {kAnaRegen, "Regen", false, BaseParamHelp(kAnaRegen)},
+                      {kAnaMix, "Mix", false, BaseParamHelp(kAnaMix)},
+                      {kAnaMod, "Mod", true, BaseParamHelp(kAnaMod)},
+                      {kAnaRate, "Rate", false, BaseParamHelp(kAnaRate)},
+                      {kAnaWidth, "Width", false, BaseParamHelp(kAnaWidth)},
+                      {kAnaTapDiv, "Tap", false, BaseParamHelp(kAnaTapDiv)}};
+              break;
+            case chaingrid::kTapeEcho:
+              about = "Tape echo after the Boss RE-20 / Roland Space Echo: three heads, wow, saturation and a spring.";
+              ctls = {{kTapeHeads, "Heads", false, BaseParamHelp(kTapeHeads)},
+                      {kTapeRate, "Rate", false, BaseParamHelp(kTapeRate)},
+                      {kTapeIntensity, "Intensity", false, BaseParamHelp(kTapeIntensity)},
+                      {kTapeEcho, "Echo", false, BaseParamHelp(kTapeEcho)},
+                      {kTapeReverb, "Reverb", false, BaseParamHelp(kTapeReverb)},
+                      {kTapeWow, "Wow", false, BaseParamHelp(kTapeWow)},
+                      {kTapeDrive, "Saturate", false, BaseParamHelp(kTapeDrive)},
+                      {kTapeTapDiv, "Tap", false, BaseParamHelp(kTapeTapDiv)}};
+              break;
+            case chaingrid::kSpringVerb:
+              about = "Spring reverb after a '63 Fender Reverb / Boss FRV-1: the drip and splash of two springs.";
+              ctls = {{kSprDwell, "Dwell", false, BaseParamHelp(kSprDwell)},
+                      {kSprTone, "Tone", false, BaseParamHelp(kSprTone)},
+                      {kSprMix, "Mix", false, BaseParamHelp(kSprMix)},
+                      {kSprDecay, "Decay", false, BaseParamHelp(kSprDecay)}};
+              break;
             case chaingrid::kApexPreamp:
             default:
               about = "After the Horizon Devices Apex Preamp: a three-stage high-gain preamp.";
@@ -2390,6 +2847,11 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           addKnob(cell(roomRow, 2), kRoomSize, "Size");
           addKnob(cell(roomRow, 3), kRoomWidth, "Width");
           addKnob(cell(roomRow, 4), kCabOutput, "Output");
+          // 1.59.0: the SPEAKER LAB page (4x12 / 2x12 / 1x12 / 4x10 and four mics placed in 3D).
+          attach(new NAMFlatButtonControl(cell(roomRow, 5).GetCentredInside(cell(roomRow, 5).W() - 6.f, 28.f),
+                                          "SPEAKER LAB", [this]() { _ShowSpeakerLab(true); }))
+            ->SetTooltip("The SPEAKER LAB: pick the cab (4x12, 2x12, 1x12, 4x10) and place up to four mics in X, Y "
+                         "and Z, with front, side and 3D views and the response they make.");
           _RefreshCabLabControls(pGraphics);
           continue;
         }
@@ -2411,10 +2873,14 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         onOffSwitch->Hide(true);
         mPedalDetailControls[p].push_back(onOffSwitch);
 
-        int nKnobs = 0;
+        // DELAY (and its copies) also gets its Tap note value (1.71.0), as a fifth knob.
+        std::vector<std::pair<int, const char*>> knobs;
         for (int k = 0; k < 4; k++)
           if (def.knobs[k].paramIdx >= 0)
-            nKnobs++;
+            knobs.push_back({def.knobs[k].paramIdx, def.knobs[k].label});
+        if (chaingrid::IsPedal(p) && !chaingrid::IsLatePedal(p) && chaingrid::PedalType(p) == 3)
+          knobs.push_back({kDelayTapDiv + chaingrid::PedalCopy(p), "Tap"});
+        const int nKnobs = (int)knobs.size();
         const float knobSize = std::clamp(std::min(panelKnobsArea.W() / 4.5f, panelKnobsArea.H() * 0.7f), 55.f,
                                           NAM_KNOB_HEIGHT);
         const float knobSpacing = knobSize * 1.3f;
@@ -2425,8 +2891,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         {
           const float cx = rowLeft + knobSpacing * (k + 0.5f);
           const IRECT knobArea(cx - knobSize * 0.5f, knobTop, cx + knobSize * 0.5f, knobTop + knobSize);
-          auto* knob =
-            new NAMKnobControl(knobArea, def.knobs[k].paramIdx, def.knobs[k].label, style, knobBackgroundBitmap);
+          auto* knob = new NAMKnobControl(knobArea, knobs[k].first, knobs[k].second, style, knobBackgroundBitmap);
           pGraphics->AttachControl(knob);
           knob->Hide(true);
           mPedalDetailControls[p].push_back(knob);
@@ -2607,10 +3072,56 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         ShellExecuteA(nullptr, "open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #endif
       };
+      callbacks.isAlwaysOn = [this]() { return mTubeProbesAlways; };
+      callbacks.toggleAlwaysOn = [this, pGraphics]() {
+        if (!mTubeProbesAlways)
+        {
+          const EMsgBoxResult r = _ShowMessageBox(
+            pGraphics,
+            "ALWAYS ON keeps the Tube Lab's probes recording every sample even with this page closed, so the readouts, "
+            "the bench and the scope's history are already live when you open it.\n\n"
+            "It costs audio CPU the whole time: about 3% more of a core (measured on your Tube Lab settings: 18.7% -> "
+            "21.9%), which leaves less room before dropouts at small buffer sizes. While this page is open it also "
+            "redraws the map and scope (GPU), as it always has; closed, it draws nothing.\n\nTurn it on?",
+            "Tube Lab probes: ALWAYS ON", kMB_OKCANCEL);
+          if (r != kOK)
+            return;
+        }
+        mTubeProbesAlways = !mTubeProbesAlways;
+        _SaveUiPrefs();
+      };
       // Stays open across relayouts (a window resize rebuilds every control).
-      pGraphics
-        ->AttachControl(new NAMTubeDebugPageControl(b, crossSVG, &mTubeScopeSettings, callbacks), kCtrlTagTubeDebug)
-        ->Hide(!mTubeDebugVisible);
+      auto* debugPage = new NAMTubeDebugPageControl(b, crossSVG, &mTubeScopeSettings, callbacks);
+      pGraphics->AttachControl(debugPage, kCtrlTagTubeDebug);
+      // The bench knobs (1.58.0), on the page's bench row.
+      {
+        const struct
+        {
+          int param;
+          const char* label;
+          const char* tip;
+        } benchKnobs[NAMTubeDebugPageControl::kNumBenchKnobs] = {
+          {kTubeVariac, "Variac",
+           "Variac: the wall voltage into the amp (120 V stock). Lower it for less headroom everywhere, a saggier, "
+           "browner feel and cooler heaters; raise it for more clean headroom and a hotter, tighter amp. The "
+           "supplies follow in a fraction of a second, the cathodes' temperature over a few seconds."},
+          {kTubeBiasPot, "Bias",
+           "Bias pot: the power tubes' idle current, as % of stock (set at 120 V with new tubes). Colder means more "
+           "crossover grit and less dissipation; hotter means smoother and fuller, until it red-plates. Watch the "
+           "POWER TUBES readout."},
+          {kTubePreampAge, "Pre Age",
+           "Preamp tube age: 0% new .. 100% worn out. Worn cathodes have less gain and much less emission to spare, "
+           "so hard peaks get rounded off (more so with the Variac low: cooler heaters)."},
+          {kTubePowerAge, "Pwr Age",
+           "Power tube age: 0% new .. 100% worn out. Less gain and idle current, and the peaks run into what the "
+           "cathodes can still emit: a softer, compressed attack."}};
+        for (int i = 0; i < NAMTubeDebugPageControl::kNumBenchKnobs; i++)
+          debugPage
+            ->AddChildControl(new NAMKnobControl(debugPage->BenchKnobRect(i), benchKnobs[i].param, benchKnobs[i].label,
+                                                 style, knobBackgroundBitmap))
+            ->SetTooltip(benchKnobs[i].tip);
+      }
+      debugPage->Hide(!mTubeDebugVisible);
     }
     // The Output EQ page (1.46.0): the final output's spectrum in detail, and the editable Output EQ.
     {
@@ -2636,6 +3147,525 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       page->Hide(true);
     }
 
+    // The OUTPUT page (1.58.0, OutputPageControls.h): Master Out, the limiter and the stereo controls.
+    {
+      auto* page = new NAMOverlayPanelControl(b, "OUTPUT", crossSVG);
+      pGraphics->AttachControl(page, kCtrlTagOutputPage);
+      const IRECT body = b.GetReducedFromTop(64.f).GetPadded(-24.f);
+      const float gap = 16.f;
+      const float cardW = std::min(360.f, (body.W() - 2.f * gap) / 3.f);
+      const float cardH = body.H();
+      const float left = body.MW() - 1.5f * cardW - gap;
+      auto card = [&](int i) { return IRECT(left + i * (cardW + gap), body.T, left + i * (cardW + gap) + cardW, body.T + cardH); };
+      auto knobRow = [&](const IRECT& c, int row) {
+        return IRECT(c.L + 14.f, c.T + 40.f + row * 74.f, c.R - 14.f, c.T + 40.f + row * 74.f + 66.f);
+      };
+      auto sideKnob = [&](const IRECT& r, int param, const char* label, const char* tip) {
+        auto* k = new NAMKnobControl(r, param, label, style, knobBackgroundBitmap);
+        k->SetSideText(true);
+        k->SetTooltip(tip);
+        page->AddChildControl(k);
+      };
+      // LEVEL
+      {
+        const IRECT c = card(0);
+        page->AddChildControl(new NAMOutputCardControl(
+          c, "LEVEL",
+          "Master Out: the level out of the whole chain, after the Output EQ and the stereo controls, into the "
+          "limiter. If the OUT meter shows CLIP, turn this down or switch the limiter on.",
+          c.T + 40.f + 80.f));
+        sideKnob(knobRow(c, 0), kOutputLevel, "Master Out", "Master output: the level out of the whole chain.");
+      }
+      // LIMITER
+      {
+        const IRECT c = card(1);
+        page->AddChildControl(new NAMOutputCardControl(
+          c, "LIMITER",
+          "A lookahead peak limiter: the output never goes past the Ceiling. It only turns down the brief pick "
+          "peaks, so Master Out can go up without clipping. Adds 0.7 ms of latency.",
+          c.T + 40.f + 3.f * 74.f + 44.f));
+        page->AddChildControl(new NAMSwitchControl(knobRow(c, 0).GetFromLeft(110.f).GetCentredInside(100.f, 60.f),
+                                                   kOutputLimiter, "On", style, switchHandleBitmap))
+          ->SetTooltip("Output limiter on/off (it fades over a few ms, so switching doesn't click).");
+        sideKnob(knobRow(c, 1), kLimiterCeiling, "Ceiling", "The most the output can reach (dBFS).");
+        sideKnob(knobRow(c, 2), kLimiterRelease, "Release",
+                 "How fast the limiter lets go after a peak. 30 ms (the default) barely moves the sustain; longer is "
+                 "smoother but can pump, shorter is more transparent on fast playing.");
+        const IRECT m = knobRow(c, 3);
+        page->AddChildControl(new NAMOutputMeterControl(IRECT(m.L, m.T, m.R, m.T + 40.f),
+                                                        NAMOutputMeterControl::Kind::GainReduction),
+                              kCtrlTagLimiterGR);
+      }
+      // STEREO
+      {
+        const IRECT c = card(2);
+        page->AddChildControl(new NAMOutputCardControl(
+          c, "STEREO",
+          "Width: 0% is mono (both outputs get L + R; this was the Mono switch), 100% is as it is, 200% is twice as "
+          "wide. Widen: stereo from a mono chain. A delayed copy of the middle goes to the sides, opposite ways "
+          "round, so it sounds wide, the bass stays centred, and played through one speaker nothing cancels.",
+          c.T + 40.f + 2.f * 74.f + 44.f));
+        sideKnob(knobRow(c, 0), kOutputWidth, "Width", "Stereo width: 0% mono, 100% as is, 200% twice as wide.");
+        sideKnob(knobRow(c, 1), kOutputWiden, "Widen", "Makes stereo out of what's in the middle (a mono guitar).");
+        const IRECT m = knobRow(c, 2);
+        page->AddChildControl(new NAMOutputMeterControl(IRECT(m.L, m.T, m.R, m.T + 40.f),
+                                                        NAMOutputMeterControl::Kind::Correlation),
+                              kCtrlTagOutCorrelation);
+      }
+      page->Hide(true);
+    }
+
+    // The CHASSIS page (1.62.0; the whole amp in 3D, with the preamp sockets, since 1.68.0;
+    // TubeChassisControls.h).
+    {
+      using namespace chassis;
+      auto* page = new NAMOverlayPanelControl(b, "TUBE LAB CHASSIS", crossSVG);
+      pGraphics->AttachControl(page, kCtrlTagTubeChassis);
+      const IRECT body = b.GetReducedFromTop(52.f).GetPadded(-14.f);
+      const IRECT sceneR = body.GetFromLeft(body.W() * 0.64f);
+      const IRECT side = body.GetReducedFromLeft(sceneR.W() + 10.f);
+      NAMTubeChassisControl::Callbacks cb;
+      cb.view = [this]() {
+        View v;
+        const tube::TubeParams tp = _ReadTubeParams(mUiLab);
+        v.circuit = tp.circuit;
+        v.capture = tp.capture;
+        v.engaged = GetParam(_TP(kTubeEngaged))->Value() > 0.5;
+        v.title = mUiLab == 0 ? "GRIFFIN  TUBE LAB" : "GRIFFIN  TUBE LAB 2";
+        v.variacV = GetParam(_TP(kTubeVariac))->Value();
+        v.heat = v.variacV / tube::bench::kMainsNominal;
+        v.inUse[0] = tp.circuit;
+        v.inUse[1] = tp.circuit && tp.stage2;
+        v.inUse[2] = tp.circuit && tp.cathodeFollower;
+        v.inUse[3] = tp.circuit && tp.powerAmp;
+        for (int k = 0; k < tube::kNumSockets; k++)
+        {
+          v.socketRole[k] = GetParam(_TP(SocketParam(k, kSockRole)))->Int();
+          v.socketTube[k] = GetParam(_TP(SocketParam(k, kSockTube)))->Int();
+          v.inUse[4 + k] = tp.socket[k].role != tube::kSocketOff;
+        }
+        for (int i = 0; i < tube::TubeStage::kNumStageLevels; i++)
+          v.level[i] = mUiStageLevel[i].load(std::memory_order_relaxed);
+        v.powerAmp = tp.circuit && tp.powerAmp;
+        v.sixL6 = tp.sixL6;
+        v.quad = tp.quad;
+        for (int k = 0; k < 4; k++)
+        {
+          v.life[k] = mUiPowerLife[k].load(std::memory_order_relaxed);
+          v.dead[k] = mUiPowerDead[k].load(std::memory_order_relaxed);
+          v.dissipation[k] = mUiDissRatio[k].load(std::memory_order_relaxed);
+        }
+        const int knobs[6] = {kTubeDrive, kTubeBass, kTubeMid, kTubeTreble, kTubeMaster, kTubePresence};
+        for (int k = 0; k < 6; k++)
+          v.knob[k] = GetParam(_TP(knobs[k]))->GetNormalized();
+        v.rk[0] = _UiStages()[0].StageRk(0);
+        v.rk[1] = _UiStages()[0].StageRk(1);
+        v.raKOhm = tp.plateKOhm;
+        v.gain2 = tp.gain2;
+        auto disp = [this](int param) {
+          WDL_String s;
+          GetParam(_TP(param))->GetDisplayWithLabel(s);
+          return std::string(s.Get());
+        };
+        char buf[48];
+        const double cinNF = tube::TubeParams::BloomToCinFarads(tp.bloom) * 1e9;
+        snprintf(buf, sizeof(buf), cinNF < 10.0 ? "%.1f nF" : "%.0f nF", cinNF);
+        v.value[kInputCap] = buf;
+        snprintf(buf, sizeof(buf), "%.0f ohm", v.rk[0]);
+        v.value[kRk1] = buf;
+        v.value[kCk1] = disp(kTubeCathodeCap);
+        v.value[kRa] = disp(kTubePlate);
+        v.value[kCp1] = disp(kTubePlateCap);
+        v.value[kCouple] = disp(kTubeCouple);
+        v.value[kGain2Pot] = disp(kTubeGain2);
+        snprintf(buf, sizeof(buf), "%.0f ohm", v.rk[1]);
+        v.value[kRk2] = buf;
+        v.value[kCk2] = disp(kTubeCap2);
+        v.value[kCp2] = disp(kTubePlateCap2);
+        return v;
+      };
+      cb.selected = [this]() { return mChassisSelected; };
+      cb.select = [this](int item) {
+        mChassisSelected = item;
+        mChassisSignature = -1.0; // Redraw now
+      };
+      cb.nudgeVariac = [this](double d) {
+        const double normalized = std::clamp(GetParam(_TP(kTubeVariac))->GetNormalized() + d, 0.0, 1.0);
+        const int variac = _TP(kTubeVariac);
+        BeginInformHostOfParamChangeFromUI(variac);
+        SendParameterValueFromUI(variac, normalized);
+        EndInformHostOfParamChangeFromUI(variac);
+        if (auto* ui = GetUI())
+          ui->ForControlWithParam(variac, [normalized](IControl* c) { c->SetValueFromDelegate(normalized); });
+      };
+      cb.go = [this](int link) { _ChassisGo(link); };
+      cb.yaw = &mChassisYaw;
+      cb.pitch = &mChassisPitch;
+      page->AddChildControl(new NAMTubeChassisControl(sceneR, cb));
+
+      // The side column: what's selected and what it does, its controls, links to its pages, failing, the
+      // power tubes.
+      struct ItemInfo
+      {
+        const char* title;
+        const char* text;
+      };
+      static const ItemInfo kInfo[kNumItems] = {
+        {"INPUT CAP (BLOOM)",
+         "The coupling cap into V1's grid, 2.2 to 220 nF. Big, it passes the lows and a hard pick charges it, so the "
+         "tube sits colder for a moment after (blocking) and swells back: bloom. Small: tighter, brighter, cleaner "
+         "recovery."},
+        {"V1 CATHODE RESISTOR (BIAS)",
+         "Sets where V1 idles: the resistor is the value that gives this grid bias. Toward 0 V: more gain, and it "
+         "clips on top (grid current) sooner. Colder: it cuts off sooner on the bottom -- sputterier, more "
+         "asymmetric."},
+        {"V1 BYPASS CAP",
+         "Across V1's cathode resistor: full gain above its corner, less below. None: clean, tight, less gain. "
+         "0.68 uF: tight lows into the gain (the classic high-gain trick). 25 uF: full and fat."},
+        {"PLATE RESISTORS",
+         "The plate loads of V1, V2 and every gain socket. Bigger: more gain, and more squash before the stage clips. "
+         "Smaller: cleaner, more headroom."},
+        {"V1 PLATE CAP",
+         "Across V1's plate resistor: rolls off fizz above a few kHz. None is the brightest; 1 nF is dark."},
+        {"COUPLING CAP (V1 TO V2)",
+         "Between the stages. Small: less low end into V2, so a lot of gain stays tight. Big: the full low end (and "
+         "more blocking on hard hits)."},
+        {"GAIN 2 POT", "How much of V1 reaches V2 (an audio-taper pot): how hard the second stage is pushed."},
+        {"V2 CATHODE RESISTOR (BIAS 2)",
+         "Where V2 idles, like V1's. A little colder than V1 is the classic high-gain choice: sharper, more "
+         "aggressive clipping."},
+        {"V2 BYPASS CAP", "V2's cathode bypass, like V1's: small for tight, big for full."},
+        {"V2 PLATE CAP", "Across V2's plate resistor. 470 pF is the classic: it tames the second stage's fizz."},
+        {"V1  12AX7  INPUT STAGE",
+         "The first gain stage: your guitar straight into its grid. Drive sets how hard. It glows with what you play."},
+        {"V2  12AX7  GAIN STAGE",
+         "The second gain stage, cascaded after V1 through the Gain 2 pot and the coupling cap. Off, it sits cold."},
+        {"V3  12AX7  CATHODE FOLLOWER",
+         "Drives the tone stack from a low impedance, and squashes and rounds the biggest swings (Marshall, 5150). It "
+         "follows the last gain stage, sockets included. Off, it sits cold."},
+        {"V4  12AX7  PHASE INVERTER",
+         "The long-tail pair that splits the signal into two opposite halves for the push-pull power tubes. It "
+         "lights with the power amp."},
+        {"VARIAC",
+         "The wall voltage into the amp. Down: less headroom everywhere, a saggier feel, cooler and redder heaters. "
+         "Up: more headroom and hotter, whiter heaters -- and with the power tubes biased hot, they can red-plate "
+         "(and, with failing on, wear out). Drag the dial, or use the wheel over it."},
+        {"", ""}, // The sockets: see socketInfo
+        {"", ""},
+        {"V9  POWER TUBE",
+         "One side of the push-pull power amp, driven by V4. EL34: the British crunch, mids forward; 6L6: the American "
+         "clean, deeper and tighter. Past its rated plate dissipation it red-plates (the plates glow); with failing on, "
+         "it wears out and can fail. 4 Tubes makes the amp a quad: V11 joins V9 on this side, V12 joins V10."},
+        {"V10  POWER TUBE", "The other side of the push-pull power amp, from V4's other output. See V9."},
+        {"V11  POWER TUBE",
+         "A quad's second tube on V9's side, in parallel with it (4 Tubes on): the two share that side's current. With "
+         "4 Tubes off, an empty socket."},
+        {"V12  POWER TUBE",
+         "A quad's second tube on V10's side, in parallel with it (4 Tubes on). With 4 Tubes off, an empty socket."},
+        {"OUTPUT TRANSFORMER",
+         "Matches the power tubes to the speaker. With Spkr Load on, they drive a real speaker's impedance through it "
+         "(bass resonance, treble rise); OT Iron (FEEL) lets its core saturate on big low notes."},
+        {"POWER TRANSFORMER AND FILTER CAPS",
+         "The supply: mains in, B+ out through the filter caps. How stiff it is sets the power amp's sag (Power Sag); "
+         "Shared B+ lets the preamp sag with it; the 60 Hz switch adds its ripple."},
+        {"INPUT JACK",
+         "Your guitar in, after Drive. With Capture on, the AMP capture plays the preamp here instead of the tubes, "
+         "and drives this power amp."},
+        {"SPEAKER JACK", "The power amp out to the speaker: on to the CAB / CAB LAB in your chain."},
+        {"FRONT PANEL", "The knobs you'd reach for: Drive, Bass, Middle, Treble, Master, Presence. They show the Tube "
+                        "Lab's settings; set them here (Drive, Master) or on the PREAMP and POWER AMP tabs."}};
+      auto socketInfo = [this](int k) {
+        static const char* roles[tube::kNumSocketRoles] = {
+          "An empty socket. Give it a job: GAIN (another gain stage after the one before it), FOLLOWER (a cathode "
+          "follower on the stage before it), or BOOST (a gain stage with its cathode unbypassed: less gain, more "
+          "headroom). The sockets run V5 then V6, after V2 and before V3.",
+          "A gain stage like V2, driven by the stage before it through its own Gain pot and coupling cap. Each one "
+          "stacked adds gain and compression, the way a 5150 or a Soldano cascades its stages.",
+          "A cathode follower on the stage before it: it drives what's next from a low impedance and rounds off the "
+          "biggest swings. It has no gain of its own, so only its tube type applies.",
+          "A gain stage with its cathode unbypassed: local feedback leaves about a third of the gain, cleaner and "
+          "tighter, with more headroom -- a clean boost into what's next. Cap is ignored."};
+        static const char* tubes[tube::kNumTubeTypes] = {
+          "12AX7: mu 100, the high-gain standard.",
+          "12AT7: mu 60 and about four times the current: less gain, more headroom, a firmer drive.",
+          "12AU7: mu 17: low gain, a lot of headroom, biased around -5 V. The clean-boost and driver tube.",
+          "5751: mu 70, a 12AX7 with about 30% less gain: smoother, later breakup."};
+        const int role = std::clamp(GetParam(_TP(SocketParam(k, kSockRole)))->Int(), 0, tube::kNumSocketRoles - 1);
+        const int type = std::clamp(GetParam(_TP(SocketParam(k, kSockTube)))->Int(), 0, tube::kNumTubeTypes - 1);
+        char title[64];
+        snprintf(title, sizeof(title), "V%d  SOCKET  %s%s%s", 5 + k, role ? chassis::TubeTypeName(type) : "",
+                 role ? "  " : "", chassis::SocketRoleName(role));
+        std::string text = roles[role];
+        if (role)
+        {
+          text += std::string(" ") + tubes[type];
+          const double rk = _UiStages()[0].SocketRk(k);
+          if (rk > 0.0)
+          {
+            char buf[64];
+            snprintf(buf, sizeof(buf), " Its cathode resistor for this bias: %.0f ohm.", rk);
+            text += buf;
+          }
+          if (!GetParam(_TP(kTubeCircuit))->Bool() || GetParam(_TP(kTubeCapture))->Bool())
+            text += " (Not heard: the sockets need the Circuit engine, without Capture.)";
+        }
+        return std::make_pair(std::string(title), text);
+      };
+      const float textH = std::max(96.f, side.H() * 0.29f);
+      page->AddChildControl(new NAMDynamicTextControl(side.GetFromTop(textH), [this, socketInfo]() {
+        const int item = std::clamp(mChassisSelected, 0, (int)kNumItems - 1);
+        if (IsSocket(item))
+          return socketInfo(item - kSocket5);
+        return std::make_pair(std::string(kInfo[item].title), std::string(kInfo[item].text));
+      }));
+      // The selected item's fields: rows of 22 px under the text (each control shown only while its item is
+      // selected, see _UpdateChassis).
+      using Mode = NAMLabFieldControl::Mode;
+      const IColor gold(255, 214, 170, 90);
+      const float rowH = 24.f, fieldsT = side.T + textH + 6.f;
+      auto row = [&](int r) { return IRECT(side.L, fieldsT + r * rowH, side.R, fieldsT + r * rowH + rowH - 3.f); };
+      mChassisFields.clear();
+      auto field = [&](int item, const IRECT& r, int param, const char* label, Mode mode) {
+        auto* f = new NAMLabFieldControl(r, param, label, mode, gold);
+        page->AddChildControl(f);
+        mChassisFields.push_back({item, f});
+        return f;
+      };
+      const struct
+      {
+        int item, param;
+        const char* label;
+        Mode mode;
+      } single[] = {{kInputCap, kTubeBloom, "Set", Mode::Drag},
+                    {kRk1, kTubeBias, "Set", Mode::Drag},
+                    {kCk1, kTubeCathodeCap, "Set", Mode::Stepper},
+                    {kRa, kTubePlate, "Set", Mode::Drag},
+                    {kCp1, kTubePlateCap, "Set", Mode::Stepper},
+                    {kCouple, kTubeCouple, "Set", Mode::Stepper},
+                    {kGain2Pot, kTubeGain2, "Set", Mode::Drag},
+                    {kRk2, kTubeBias2, "Set", Mode::Drag},
+                    {kCk2, kTubeCap2, "Set", Mode::Stepper},
+                    {kCp2, kTubePlateCap2, "Set", Mode::Stepper},
+                    {kTubeV1, kTubeDrive, "Drive", Mode::Drag},
+                    {kTubeV2, kTubeStage2, "Stage 2", Mode::Toggle},
+                    {kTubeV3, kTubeCathodeFollower, "Follower", Mode::Toggle},
+                    {kTubeV4, kTubePower, "Power Amp", Mode::Toggle},
+                    {kVariac, kTubeVariac, "Variac", Mode::Drag},
+                    {kOutputTransformer, kTubeSpeakerLoad, "Spkr Load", Mode::Toggle},
+                    {kPowerSupply, kTubePowerSag, "Power Sag", Mode::Drag},
+                    {kInputJack, kTubeCapture, "Capture", Mode::Toggle},
+                    {kSpeakerJack, kTubeSpeakerLoad, "Spkr Load", Mode::Toggle}};
+      for (const auto& s : single)
+        field(s.item, row(0), s.param, s.label, s.mode);
+      for (int k = 0; k < 4; k++)
+      {
+        field(kPowerTube1 + k, row(0).GetFromLeft(row(0).W() * 0.5f - 3.f), kTube6L6, "6L6", Mode::Toggle);
+        field(kPowerTube1 + k, row(0).GetFromRight(row(0).W() * 0.5f - 3.f), kTubeQuad, "4 Tubes", Mode::Toggle)
+          ->SetTooltip("Four power tubes (a quad, like a 100 W head) instead of two: two per side in parallel, a "
+                       "stiffer supply and a bigger output transformer. Same volume; the supply and transformer stay "
+                       "out of the way longer, and a failed tube only halves its side.");
+        field(kPowerTube1 + k, row(1), kTubeBiasPot, "Bias", Mode::Drag);
+      }
+      field(kFrontPanel, row(0).GetFromLeft(row(0).W() * 0.5f - 3.f), kTubeDrive, "Drive", Mode::Drag);
+      field(kFrontPanel, row(0).GetFromRight(row(0).W() * 0.5f - 3.f), kTubeMaster, "Master", Mode::Drag);
+      for (int k = 0; k < tube::kNumSockets; k++)
+      {
+        const int item = kSocket5 + k;
+        field(item, row(0), SocketParam(k, kSockRole), "Job", Mode::Segments)
+          ->SetTooltip("What the socket does: empty, a gain stage, a cathode follower on the stage before it, or a "
+                       "boost (an unbypassed gain stage).");
+        field(item, row(1), SocketParam(k, kSockTube), "Tube", Mode::Segments)
+          ->SetTooltip("The tube in it. Changing it sets Bias to where that tube usually runs.");
+        field(item, row(2).GetFromLeft(row(2).W() * 0.5f - 3.f), SocketParam(k, kSockGain), "Gain", Mode::Drag)
+          ->SetTooltip("Its pot: how much of the stage before it drives this one (audio taper).");
+        field(item, row(2).GetFromRight(row(2).W() * 0.5f - 3.f), SocketParam(k, kSockBias), "Bias", Mode::Drag)
+          ->SetTooltip("Where it idles (grid to cathode). Toward 0 V: more gain, clips on top sooner. Colder: cuts "
+                       "off sooner, sharper and more lopsided.");
+        field(item, row(3).GetFromLeft(row(3).W() * 0.5f - 3.f), SocketParam(k, kSockCap), "Cap", Mode::Stepper)
+          ->SetTooltip("Its cathode bypass cap (Gain only): small for tight lows, big for full.");
+        field(item, row(3).GetFromRight(row(3).W() * 0.5f - 3.f), SocketParam(k, kSockPlateCap), "Plate C",
+              Mode::Stepper)
+          ->SetTooltip("Across its plate resistor: rolls off fizz. 470 pF is the classic on a late stage.");
+        field(item, row(4).GetFromLeft(row(4).W() * 0.5f - 3.f), SocketParam(k, kSockCouple), "Couple", Mode::Stepper)
+          ->SetTooltip("The coupling cap into it: small keeps a lot of gain tight, big passes the full low end.");
+      }
+      // The selected item's links to its pages, then failing and the power tubes.
+      const IRECT linksRow = row(5).GetTranslated(0.f, 2.f);
+      page->AddChildControl(new NAMChassisLinksControl(
+        linksRow, [this]() { return mChassisSelected; }, [this](int link) { _ChassisGo(link); }));
+      const IRECT failRow = linksRow.GetTranslated(0.f, rowH + 2.f);
+      page->AddChildControl(new NAMLabFieldControl(failRow.GetFromLeft(failRow.W() * 0.6f), kTubeCanFail,
+                                                   "Power tubes can fail", Mode::Toggle, IColor(255, 235, 90, 60)))
+        ->SetTooltip("On: power tubes run past their rated plate dissipation (red-plating -- the Variac up and the "
+                     "bias pot hot) wear out, faster the further over, and fail with a bang: the amp runs on the other "
+                     "tube alone, thin and fizzy, or not at all with both gone. REPLACE puts a new one in.");
+      page->AddChildControl(new NAMPowerTubeStatusControl(
+        IRECT(side.L, failRow.B + 6.f, side.R, side.B),
+        [this]() {
+          NAMPowerTubeStatusControl::Reading r;
+          const tube::TubeParams tp = _ReadTubeParams(mUiLab);
+          r.powerAmp = tp.circuit && tp.powerAmp;
+          r.sixL6 = tp.sixL6;
+          r.canFail = tp.canFail;
+          r.quad = tp.quad;
+          for (int k = 0; k < 4; k++)
+          {
+            r.life[k] = mUiPowerLife[k].load(std::memory_order_relaxed);
+            r.dead[k] = mUiPowerDead[k].load(std::memory_order_relaxed);
+            r.dissipation[k] = mUiDissRatio[k].load(std::memory_order_relaxed);
+          }
+          return r;
+        },
+        [this](int k) { (mUiLab == 0 ? mReplacePowerReq : mReplacePowerReq2).fetch_or(1 << k); }));
+      page->Hide(true);
+    }
+
+    // The SPEAKER LAB page (1.59.0, SpeakerLabControls.h).
+    {
+      mLabModel.params = [this]() { return _ReadCabLabParams(); };
+      mLabModel.setMic = [this](int m, double x, double y, double z) { _SetLabMicPosition(m, x, y, z); };
+      mLabModel.select = [this](int m) {
+        mLabSelectedMic = std::clamp(m, 0, cab::kNumLabMics - 1);
+        const cab::CabLabParams cp = _ReadCabLabParams();
+        if (cp.dual)
+          mLabSelectedCab = cp.MicCab(mLabSelectedMic); // The views follow the mic to its cab
+        _SpeakerLabChanged();
+      };
+      mLabModel.selected = &mLabSelectedMic;
+      mLabModel.selectedCab = &mLabSelectedCab;
+      mLabModel.selectCab = [this](int c) {
+        mLabSelectedCab = std::clamp(c, 0, 1);
+        _SpeakerLabChanged();
+      };
+      mLabModel.yaw = &mLabYaw;
+      mLabModel.pitch = &mLabPitch;
+      mLabModel.redrawViews = [this]() { _SpeakerLabChanged(); };
+      mLabFormatShown = GetParam(kCabFormat)->Int();
+      mLabFormat2Shown = GetParam(kCab2Format)->Int();
+      auto* page = new NAMOverlayPanelControl(b, "SPEAKER LAB", crossSVG);
+      pGraphics->AttachControl(page, kCtrlTagSpeakerLab);
+      // 1.67.1: back to CAB LAB's classic card (and its Mic A / Mic B knobs: 3D off).
+      page->AddChildControl(new NAMFlatButtonControl(IRECT(b.R - 66.f - 120.f, b.T + 14.f, b.R - 66.f, b.T + 38.f),
+                                                     "CAB LAB", [this]() { _ShowSpeakerLab(false); }))
+        ->SetTooltip("CAB LAB's classic card: its Mic A / Mic B knobs (switches 3D off). Its SPEAKER LAB button "
+                     "brings you back here.");
+      using Mode = NAMLabFieldControl::Mode;
+      const IRECT body = b.GetReducedFromTop(52.f).GetPadded(-14.f);
+      // Top row: single or dual cabs, the cab tabs, 3D on/off, CAB LAB's output.
+      const IRECT top = body.GetFromTop(22.f);
+      page->AddChildControl(new NAMLabFieldControl(top.GetFromLeft(top.W() * 0.22f), kCabDual, "Cabs", Mode::Segments,
+                                                   speakerlab::CabColor(0)))
+        ->SetTooltip("One cab, or two side by side (each with its own size, speaker or IR). Each mic is on one of "
+                     "them; the pans stay as they are.");
+      page->AddChildControl(new NAMSpeakerLabCabTabsControl(
+        IRECT(top.L + top.W() * 0.24f, top.T, top.L + top.W() * 0.62f, top.B), &mLabModel));
+      page->AddChildControl(new NAMLabFieldControl(
+                              IRECT(top.L + top.W() * 0.64f, top.T, top.L + top.W() * 0.74f, top.B), kCabLab3D, "3D",
+                              Mode::Toggle, speakerlab::CabColor(0))) // 1.67.1: gold, so On shows
+        ->SetTooltip("3D placement (this page). Off: CAB LAB's classic Mic A / Mic B knobs, as older presets were made.");
+      page->AddChildControl(new NAMLabFieldControl(top.GetFromRight(top.W() * 0.24f), kCabOutput, "Output", Mode::Drag))
+        ->SetTooltip("CAB LAB's output level. Drag sideways (Shift: fine), wheel to nudge, double-click to reset.");
+      // Second row: the selected cab's size, speaker, source and IR (one set per cab; OnIdle shows the
+      // selected cab's).
+      const IRECT cabRow = top.GetTranslated(0.f, 26.f);
+      for (auto& v : mLabCabControls)
+        v.clear();
+      for (int cab = 0; cab < 2; cab++)
+      {
+        const IColor accent = speakerlab::CabColor(cab);
+        auto add = [&](IControl* c, const char* tip) {
+          c->SetTooltip(tip);
+          page->AddChildControl(c);
+          mLabCabControls[cab].push_back(c);
+        };
+        add(new NAMLabFieldControl(cabRow.GetFromLeft(cabRow.W() * 0.3f), cab == 0 ? kCabFormat : kCab2Format, "Size",
+                                   Mode::Segments, accent),
+            "This cab's size: where its cones sit, how big, open or closed back. Changing it moves its mics to the "
+            "same spot on the matching cone of the new cab.");
+        add(new NAMLabFieldControl(IRECT(cabRow.L + cabRow.W() * 0.32f, cabRow.T, cabRow.L + cabRow.W() * 0.6f, cabRow.B),
+                                   cab == 0 ? kCabSpeaker : kCab2Speaker, "Speaker", Mode::Stepper, accent),
+            "This cab's speakers (with IR on, the IR is the speaker instead).");
+        add(new NAMLabFieldControl(IRECT(cabRow.L + cabRow.W() * 0.62f, cabRow.T, cabRow.L + cabRow.W() * 0.68f, cabRow.B),
+                                   cab == 0 ? kCabSource : kCab2SourceIR, "IR", Mode::Toggle, accent),
+            "Use this cab's IR (loaded with the button beside it) as its speaker, instead of the model.");
+        const IRECT irArea(cabRow.L + cabRow.W() * 0.7f, cabRow.T, cabRow.R, cabRow.B);
+        const std::string griffinDir = GriffinLibraryDir();
+        const std::vector<std::string> irPaths = {
+          griffinDir + "tone", griffinDir + "IRs and Amp Profiles (copied)\\Griffin tone folder captures"};
+        add(new NAMPresetBrowserControl(irArea.GetFromLeft(irArea.W() * 0.42f), cab == 0 ? "CAB 1 IR" : "CAB 2 IR",
+                                        "wav", irPaths, false,
+                                        [this, cab](const WDL_String& fileName, const WDL_String&) {
+                                          if (!fileName.GetLength())
+                                            return;
+                                          if (cab == 0 ? _StageCabLabIR(fileName) : _StageCabLabIR2(fileName))
+                                            SendParameterValueFromUI(cab == 0 ? kCabSource : kCab2SourceIR, 1.0);
+                                        },
+                                        style),
+            "Load an IR for this cab (it switches IR on).");
+        const WDL_String& path = cab == 0 ? mCabLabIRPath : mCabLabIR2Path;
+        auto* name = new IVLabelControl(
+          irArea.GetReducedFromLeft(irArea.W() * 0.44f), path.GetLength() ? path.get_filepart() : "No IR loaded",
+          DEFAULT_STYLE.WithDrawFrame(false).WithValueText(IText(10.f, accent.WithOpacity(0.85f), "Roboto-Regular")));
+        page->AddChildControl(name, cab == 0 ? kCtrlTagCabLabIR1Name : kCtrlTagCabLabIR2Name);
+        mLabCabControls[cab].push_back(name);
+      }
+      // The views.
+      const IRECT rest = body.GetReducedFromTop(54.f);
+      const IRECT views = rest.GetFromTop(rest.H() * 0.52f);
+      const float gap = 6.f;
+      const float frontW = views.W() * 0.38f, sideW = views.W() * 0.31f;
+      const IRECT frontR(views.L, views.T, views.L + frontW, views.B);
+      const IRECT sideR(frontR.R + gap, views.T, frontR.R + gap + sideW, views.B);
+      const IRECT perspR(sideR.R + gap, views.T, views.R, views.B);
+      using View = NAMSpeakerLabViewControl::View;
+      page->AddChildControl(new NAMSpeakerLabViewControl(frontR, View::Front, &mLabModel));
+      page->AddChildControl(new NAMSpeakerLabViewControl(sideR, View::Side, &mLabModel));
+      page->AddChildControl(new NAMSpeakerLabViewControl(perspR, View::Persp, &mLabModel));
+      // Bottom: the response plot; the mic tabs, the selected mic's fields, its readout.
+      const IRECT bottom = rest.GetReducedFromTop(views.H() + gap);
+      page->AddChildControl(new NAMSpeakerLabResponseControl(bottom.GetFromLeft(bottom.W() * 0.4f), &mLabModel));
+      const IRECT right = bottom.GetReducedFromLeft(bottom.W() * 0.4f + gap);
+      page->AddChildControl(new NAMSpeakerLabTabsControl(right.GetFromTop(24.f), &mLabModel));
+      const IRECT row1 = right.GetReducedFromTop(28.f).GetFromTop(22.f);
+      const IRECT row2 = row1.GetTranslated(0.f, 26.f);
+      for (auto& v : mLabMicControls)
+        v.clear(); // (The last layout's controls are gone)
+      for (int m = 0; m < cab::kNumLabMics; m++)
+      {
+        const IColor accent = speakerlab::MicColor(m);
+        auto add = [&](const IRECT& r, int field, const char* label, Mode mode, const char* tip) {
+          auto* c = new NAMLabFieldControl(r.GetPadded(-2.f), LabMicParam(m, field), label, mode, accent);
+          c->SetTooltip(tip);
+          page->AddChildControl(c);
+          mLabMicControls[m].push_back(c);
+        };
+        add(row1.SubRectHorizontal(8, 0), 0, "On", Mode::Toggle, "This mic on or off.");
+        add(IRECT(row1.SubRectHorizontal(8, 1).L, row1.T, row1.SubRectHorizontal(8, 3).R, row1.B), 1, "Mic",
+            Mode::Stepper, "The mic: its response, polar pattern and proximity effect.");
+        {
+          // 1.61.0: which cab it's on (dual cabs).
+          auto* cabField = new NAMLabFieldControl(row1.SubRectHorizontal(8, 4).GetPadded(-2.f), kLabMicCabFirst + m, "",
+                                                  Mode::Stepper, accent);
+          cabField->SetTooltip("Which cab this mic is on (with two cabs). It keeps its spot on the matching cone.");
+          page->AddChildControl(cabField);
+          mLabMicControls[m].push_back(cabField);
+        }
+        add(IRECT(row1.SubRectHorizontal(8, 5).L, row1.T, row1.SubRectHorizontal(8, 6).R, row1.B), 5, "Level",
+            Mode::Drag, "This mic's level. Drag (Shift: fine), wheel, double-click to reset.");
+        add(row1.SubRectHorizontal(8, 7), 7, "Flip", Mode::Toggle,
+            "Polarity flip: try it when two mics thin each other out.");
+        const char* tips[3] = {"Across the baffle: centimetres right of the cab's centre (left is negative).",
+                               "Up and down: centimetres above the cab's centre.",
+                               "Out from the grille cloth, in centimetres (0 is touching it)."};
+        add(row2.SubRectHorizontal(4, 0), 2, "X", Mode::Drag, tips[0]);
+        add(row2.SubRectHorizontal(4, 1), 3, "Y", Mode::Drag, tips[1]);
+        add(row2.SubRectHorizontal(4, 2), 4, "Z", Mode::Drag, tips[2]);
+        add(row2.SubRectHorizontal(4, 3), 6, "Pan", Mode::Drag, "Where this mic sits left to right.");
+      }
+      page->AddChildControl(new NAMSpeakerLabReadoutControl(right.GetReducedFromTop(28.f + 52.f + 4.f), &mLabModel));
+      page->Hide(true);
+    }
+
     const auto slimKnobArea = b.GetCentredInside(100.f, NAM_KNOB_HEIGHT + 24.f);
     pGraphics->AttachControl(new NAMSlimOverlayBackdropControl(b, hideSlimOverlay), kCtrlTagSlimOverlayBackdrop)
       ->Hide(true);
@@ -2648,12 +3678,45 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       pControl->SetMouseOverWhenDisabled(true);
     });
 
+    // 1.67.0: every control bound to a Tube Lab param follows the lab being shown (but REAL FEEL's, which
+    // is TUBE LAB's own, and the per-lab capture switches).
+    mLabRetarget.clear();
+    pGraphics->ForAllControlsFunc([this](IControl* ctrl) {
+      const int p = ctrl->GetParamIdx();
+      if (p < 0 || LabParam(1, p) == p)
+        return;
+      for (auto* own : mPedalDetailControls[chaingrid::kRealFeel])
+        if (own == ctrl)
+          return;
+      for (auto* own : mLabOnly[0])
+        if (own == ctrl)
+          return;
+      mLabRetarget.push_back({ctrl, p});
+    });
+    {
+      const int lab = mUiLab; // A relayout keeps showing it
+      mUiLab = 0;
+      _SetUiLab(lab);
+    }
+
+    // 1.65.0: hover help on every knob and switch that doesn't already have its own tooltip (ParamHelp.h).
+    pGraphics->ForAllControlsFunc([](IControl* ctrl) {
+      const int p = ctrl->GetParamIdx();
+      if (p < 0 || p >= kNumParams || (ctrl->GetTooltip() && *ctrl->GetTooltip()))
+        return;
+      const std::string help = ParamHelpFor(p);
+      if (!help.empty())
+        ctrl->SetTooltip(help.c_str());
+    });
+
     // MIDI learn overlay (1.43.0): last, so it's over everything. Stays on across relayouts.
     {
       NAMMidiLearnOverlayControl::Callbacks cb;
       cb.targetOf = [](IControl* c) -> int {
         if (c->GetTag() == kCtrlTagTuneButton)
           return kMidiTargetTuner;
+        if (c->GetTag() == kCtrlTagTapButton)
+          return kMidiTargetTap;
         // A block on the grid (or in the pedal list): its On switch (1.43.2).
         if (auto* chip = dynamic_cast<NAMPedalChipControl*>(c))
         {
@@ -2800,7 +3863,8 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   // GATE's key (1.52.0): the clean input after Master In, copied for this block while Key Input is on
   // (a block may process the input in place before the GATE runs).
   mGateKeyChannels = 0;
-  if (GetParam(kGateKey)->Bool() && GetParam(GridCellParam(chaingrid::kGate))->Value() >= 0.0)
+  if ((GetParam(kGateKey)->Bool() && GetParam(GridCellParam(chaingrid::kGate))->Value() >= 0.0)
+      || (GetParam(kTGKey)->Bool() && GetParam(GridCellParam(chaingrid::kTrackGate))->Value() >= 0.0)) // 1.66.0
   {
     const int keyChannels = (int)std::min<size_t>(numChannelsInternal, 2);
     for (int c = 0; c < keyChannels; c++)
@@ -2841,6 +3905,12 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
       stage.Reset(sampleRate, GetBlockSize());
     mTubeWasInChain = tubeInChain;
   }
+  if (grid.Placed(chaingrid::kTubeLab2) != mTube2WasInChain) // 1.67.0
+  {
+    for (auto& stage : mTubeStage2)
+      stage.Reset(sampleRate, GetBlockSize());
+    mTube2WasInChain = grid.Placed(chaingrid::kTubeLab2);
+  }
   // Whether each block on the grid actually processes, or passes its input straight through. A
   // pedal processes when it's engaged (its on/off switch -- MIDI/automation-mappable, doesn't move
   // it); a NAM pedal also needs a capture loaded.
@@ -2852,6 +3922,7 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   // Tube Lab: its on/off switch is a crossfade inside the stage (see mTubeStage), not a bypass, so
   // the reported latency stays put.
   processes[kTubePedalIdx] = true;
+  processes[chaingrid::kTubeLab2] = true; // 1.67.0: likewise
   // REAL FEEL follows the Tube Lab's On switch by fading itself (see RealFeel.h), not by bypassing:
   // a bypass would step its squish and Shared B+ gains.
   processes[chaingrid::kRealFeel] = true;
@@ -2870,7 +3941,7 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   processes[kLoopSendPedalIdx] = loopOn && numChannelsExternalOut > (size_t)kLoopBusChannelOffset;
   processes[kLoopReturnPedalIdx] = loopOn && numChannelsExternalIn > (size_t)kLoopBusChannelOffset;
   const float loopMixTarget = (float)(GetParam(kLoopMix)->Value() / 100.0);
-  processes[chaingrid::kAmp] = GetParam(kAmpEngaged)->Value() > 0.5;
+  processes[chaingrid::kAmp] = GetParam(kAmpEngaged)->Value() > 0.5 && !_TubeTakesCapture();
   // 1.42.0: which blocks can process at all (have their IR / capture), so one switched off can keep
   // processing while it fades out; and which blocks' On switches crossfade (see mBlockFade). The
   // Tube Lab and REAL FEEL fade inside themselves, and the FX loop only exists with the aux bus.
@@ -2879,7 +3950,7 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   for (int id = 0; id < chaingrid::kNumIds; id++)
   {
     available[id] = true;
-    fades[id] = id != kTubePedalIdx && id != chaingrid::kRealFeel && id != kLoopSendPedalIdx
+    fades[id] = id != kTubePedalIdx && id != chaingrid::kTubeLab2 && id != chaingrid::kRealFeel && id != kLoopSendPedalIdx
                 && id != kLoopReturnPedalIdx && id != chaingrid::kInput;
   }
   available[chaingrid::kCab2] = mExtraCabIR[0] != nullptr;
@@ -2902,7 +3973,8 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
     const int type = chaingrid::IsPedal(id) ? chaingrid::PedalType(id) : -1;
     return type == 2 || type == 3 || type == 4 || id == chaingrid::kFlanger || id == chaingrid::kPhaser
            || id == kCabPedalIdx || id == kCabLabPedalIdx || id == chaingrid::kCab2 || id == chaingrid::kCab3
-           || id == chaingrid::kSkyVerb || id == chaingrid::kFlangerDoubler;
+           || id == chaingrid::kSkyVerb || id == chaingrid::kFlangerDoubler || id == chaingrid::kDigiDelay
+           || id == chaingrid::kAnalogDelay || id == chaingrid::kTapeEcho || id == chaingrid::kSpringVerb;
   };
   // A/B switch in progress: the gain for the AMP and CAB outputs this block (see _ABBeginBlock).
   const bool abFading = _ABBeginBlock(numFrames);
@@ -2962,7 +4034,8 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
     }
   };
 
-  auto applyPedal = [this, numFrames, inputs, outputs, processEffect, loopMixTarget](int pedalIdx, sample** in,
+  auto applyPedal = [this, numFrames, inputs, outputs, processEffect, loopMixTarget, noiseGateActive,
+                     toneStackActive](int pedalIdx, sample** in,
                                                                                      size_t numChannels) -> sample** {
     if (chaingrid::IsPedal(pedalIdx) && chaingrid::PedalType(pedalIdx) < chaingrid::kNumMultiPedalTypes)
       return processEffect(pedalIdx, in, numChannels);
@@ -3037,6 +4110,33 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         mStudioComp.SetParams(cp);
         return mStudioComp.Process(in, (int)numChannels, (int)numFrames);
       }
+      // 1.66.0 (MorePedals.h).
+      case chaingrid::kTrackGate:
+        mTrackGate.SetParams(GetParam(kTGModel)->Int(), GetParam(kTGThreshold)->Value(),
+                             GetParam(kTGRelease)->Value() / 10.0, GetParam(kTGHold)->Value(), GetParam(kTGRange)->Value(),
+                             GetParam(kTGRatio)->Value(), GetParam(kTGNoise)->Int());
+        return mTrackGate.Process(in, (int)numChannels, (int)numFrames,
+                                  GetParam(kTGKey)->Bool() && mGateKeyChannels > 0 ? mGateKeyPtrs : nullptr,
+                                  GetParam(kTGKey)->Bool() ? mGateKeyChannels : 0);
+      case chaingrid::kDigiDelay:
+        mDigiDelay.SetParams(GetParam(kDigiMode)->Int(), GetParam(kDigiTime)->Value(),
+                             GetParam(kDigiFeedback)->Value() / 10.0, GetParam(kDigiLevel)->Value() / 10.0);
+        return mDigiDelay.Process(in, (int)numChannels, (int)numFrames);
+      case chaingrid::kAnalogDelay:
+        mAnalogDelay.SetParams(GetParam(kAnaTime)->Value(), GetParam(kAnaRegen)->Value() / 10.0,
+                               GetParam(kAnaMix)->Value() / 10.0, GetParam(kAnaMod)->Bool(), GetParam(kAnaRate)->Value(),
+                               GetParam(kAnaWidth)->Value() / 10.0);
+        return mAnalogDelay.Process(in, (int)numChannels, (int)numFrames);
+      case chaingrid::kTapeEcho:
+        mTapeEcho.SetParams(GetParam(kTapeHeads)->Int(), GetParam(kTapeRate)->Value() / 10.0,
+                            GetParam(kTapeIntensity)->Value() / 10.0, GetParam(kTapeEcho)->Value() / 10.0,
+                            GetParam(kTapeReverb)->Value() / 10.0, GetParam(kTapeWow)->Value() / 10.0,
+                            GetParam(kTapeDrive)->Value() / 10.0);
+        return mTapeEcho.Process(in, (int)numChannels, (int)numFrames);
+      case chaingrid::kSpringVerb:
+        mSpringVerb.SetParams(GetParam(kSprDwell)->Value() / 10.0, GetParam(kSprTone)->Value() / 10.0,
+                              GetParam(kSprMix)->Value() / 10.0, GetParam(kSprDecay)->Value() / 10.0);
+        return mSpringVerb.Process(in, (int)numChannels, (int)numFrames);
       case chaingrid::kApexPreamp:
         mApexPreamp.SetParams(GetParam(kApexGain)->Value() / 10.0, GetParam(kApexBass)->Value() / 10.0,
                               GetParam(kApexMid)->Value() / 10.0, GetParam(kApexTreble)->Value() / 10.0,
@@ -3093,21 +4193,97 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         return mRealFeelPtrs;
       }
       case kTubePedalIdx:
+      case chaingrid::kTubeLab2:
       {
-        tube::TubeParams params = _ReadTubeParams();
-        if (GetParam(kTubeEngaged)->Value() <= 0.5)
+        // 1.67.0: TUBE LAB 2 is the same, with its own params (LabParam), stages and capture. The
+        // probe and the chassis page's readings come from the lab whose popup was opened last.
+        const int lab = pedalIdx == kTubePedalIdx ? 0 : 1;
+        tube::TubeStage* stages = lab == 0 ? mTubeStage : mTubeStage2;
+        sample** labChannels = lab == 0 ? mTubeChannels : mTubeChannels2;
+        const bool shown = mUiLabAudio.load(std::memory_order_relaxed) == lab;
+        stages[0].SetProbe(shown ? &mTubeProbe : nullptr);
+        tube::TubeParams params = _ReadTubeParams(lab);
+        if (GetParam(LabParam(lab, kTubeEngaged))->Value() <= 0.5)
         {
           // Switched off: the stage glides (its params are smoothed) to the delayed dry signal.
           params.mix = 0.0;
           params.outputDB = 0.0;
         }
+        // 1.62.0: power tube replacements asked for on the chassis page; channel 0 wears the tubes and
+        // channel 1 follows it.
+        if (const int replace = (lab == 0 ? mReplacePowerReq : mReplacePowerReq2).exchange(0))
+          for (int k = 0; k < tube::TubeStage::kNumPowerTubes; k++)
+            if (replace & (1 << k))
+              for (int c = 0; c < 2; c++)
+                stages[c].ReplacePowerTube(k);
+        const bool chassis = shown && mChassisOpen.load(std::memory_order_relaxed);
+        auto report = [&]() {
+          if (!shown)
+            return;
+          for (int k = 0; k < tube::TubeStage::kNumPowerTubes; k++)
+          {
+            mUiPowerLife[k].store((float)stages[0].PowerLife(k), std::memory_order_relaxed);
+            mUiPowerDead[k].store(stages[0].PowerDead(k), std::memory_order_relaxed);
+            mUiDissRatio[k].store((float)stages[0].DissipationRatio(k), std::memory_order_relaxed);
+          }
+        };
+        if (params.capture)
+        {
+          // 1.64.0: the AMP block's capture is the preamp. It's mono (as in the AMP block): the
+          // channels' average, through Drive (12 dB = unity, ramped across the block), into the
+          // capture, and its output into the Tube Lab's power amp. One stage; both channels get it.
+          if (mCapIn.size() < numFrames)
+          {
+            mCapIn.resize(numFrames);
+            mCapOut.resize(numFrames);
+          }
+          double& capGain = lab == 0 ? mCapGain : mCapGain2;
+          const double gainTo = std::pow(10.0, (GetParam(LabParam(lab, kTubeDrive))->Value() - 12.0) / 20.0);
+          for (size_t s = 0; s < numFrames; s++)
+          {
+            const double g = capGain + (gainTo - capGain) * (double)(s + 1) / (double)numFrames;
+            mCapIn[s] = (numChannels > 1 ? 0.5 * (in[0][s] + in[1][s]) : in[0][s]) * g;
+          }
+          capGain = gainTo;
+          mCapInPtr[0] = mCapIn.data();
+          mCapOutPtr[0] = mCapOut.data();
+          // TUBE LAB runs the AMP block's capture; TUBE LAB 2 its own.
+          ResamplingNAM* capture = lab == 0 ? mModel.get() : mLab2Model.get();
+          if (capture != nullptr)
+            capture->process(mCapInPtr, mCapOutPtr, (int)numFrames);
+          else
+            std::copy(mCapIn.begin(), mCapIn.begin() + numFrames, mCapOut.begin());
+          // All of the AMP block, as it would be: its noise gate and its Bass / Mid / Treble after the
+          // capture (the gate's trigger already read the chain's input this block). TUBE LAB 2's capture
+          // isn't the AMP block's, so it has neither.
+          sample** ampOut = mCapOutPtr;
+          if (lab == 0 && noiseGateActive)
+            ampOut = mNoiseGateGain.Process(ampOut, 1, numFrames);
+          if (lab == 0 && toneStackActive && mToneStack != nullptr)
+            ampOut = mToneStack->Process(ampOut, 1, (int)numFrames);
+          stages[0].SetParams(params);
+          stages[0].SetWearMaster(true);
+          stages[0].SetUiWanted(chassis);
+          labChannels[0] = stages[0].Process(ampOut, 1, numFrames)[0];
+          labChannels[1] = labChannels[0];
+          report();
+          return labChannels;
+        }
         for (size_t c = 0; c < numChannels && c < 2; c++)
         {
           sample* channel[1] = {in[c]};
-          mTubeStage[c].SetParams(params);
-          mTubeChannels[c] = mTubeStage[c].Process(channel, 1, numFrames)[0];
+          stages[c].SetParams(params);
+          stages[c].SetWearMaster(c == 0);
+          stages[c].SetUiWanted(c == 0 && chassis);
+          if (c == 1)
+            stages[1].SyncTubesFrom(stages[0]);
+          labChannels[c] = stages[c].Process(channel, 1, numFrames)[0];
         }
-        return mTubeChannels;
+        report();
+        if (chassis)
+          for (int i = 0; i < tube::TubeStage::kNumStageLevels; i++)
+            mUiStageLevel[i].store((float)stages[0].StageLevel(i), std::memory_order_relaxed);
+        return labChannels;
       }
       case kCabLabPedalIdx:
       {
@@ -3123,26 +4299,7 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         for (size_t s = 0; s < n; s++)
           mCabMono[s] = numChannels > 1 ? 0.5 * (in[0][s] + in[1][s]) : in[0][s];
 
-        cab::CabLabParams cp;
-        cp.useIR = GetParam(kCabSource)->Bool();
-        cp.speaker = GetParam(kCabSpeaker)->Int();
-        auto micFrom = [this](int on, int type, int pos, int dist, int level, int pan, int invert) {
-          cab::MicParams m;
-          m.on = on < 0 || GetParam(on)->Bool();
-          m.type = GetParam(type)->Int();
-          m.position = GetParam(pos)->Value() / 10.0;
-          m.distanceM = GetParam(dist)->Value() / 100.0;
-          m.levelDB = GetParam(level)->Value();
-          m.pan = GetParam(pan)->Value() / 100.0;
-          m.invert = invert >= 0 && GetParam(invert)->Bool();
-          return m;
-        };
-        cp.micA = micFrom(-1, kMicAType, kMicAPos, kMicADist, kMicALevel, kMicAPan, -1);
-        cp.micB = micFrom(kMicBOn, kMicBType, kMicBPos, kMicBDist, kMicBLevel, kMicBPan, kMicBInvert);
-        cp.roomLevelDB = GetParam(kRoomLevel)->Value();
-        cp.roomSize = GetParam(kRoomSize)->Value() / 10.0;
-        cp.width = GetParam(kRoomWidth)->Value() / 100.0;
-        cp.outputDB = GetParam(kCabOutput)->Value();
+        const cab::CabLabParams cp = _ReadCabLabParams();
         mCabLab.SetParams(cp);
 
         const double* irSpeaker = nullptr;
@@ -3151,7 +4308,14 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
           sample* mono[1] = {mCabMono.data()};
           irSpeaker = mCabLabIR->Process(mono, 1, n)[0];
         }
-        mCabLab.Process(mCabMono.data(), mCabL.data(), mCabR.data(), n, irSpeaker);
+        // 1.61.0: cab 2's own IR (dual cabs, 3D).
+        const double* irSpeaker2 = nullptr;
+        if (cp.lab3D && cp.dual && cp.useIR2 && mCabLabIR2 != nullptr)
+        {
+          sample* mono[1] = {mCabMono.data()};
+          irSpeaker2 = mCabLabIR2->Process(mono, 1, n)[0];
+        }
+        mCabLab.Process(mCabMono.data(), mCabL.data(), mCabR.data(), n, irSpeaker, irSpeaker2);
         // Always stereo out (1.42.0): a mono block after it folds it back itself (the grid mixes
         // a stereo source down for a mono input), but a stereo path keeps the mics' pan and the room.
         mCabChannels[0] = mCabL.data();
@@ -3468,7 +4632,10 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         if (b == kCabPedalIdx || b == kLoopReturnPedalIdx || ExtraCabIndex(b) >= 0 || b == kCabLabPedalIdx)
           out.ch = 2;
         if (b == kTubePedalIdx)
-          out.latency += mTubeStage[0].GetLatency();
+          out.latency += mTubeStage[0].GetLatency() + (_TubeTakesCapture() && mModel != nullptr ? mModel->GetLatency() : 0);
+        else if (b == chaingrid::kTubeLab2)
+          out.latency += mTubeStage2[0].GetLatency()
+                         + (_ReadTubeParams(1).capture && mLab2Model != nullptr ? mLab2Model->GetLatency() : 0);
         else if (b >= kNumBuiltInPedals && b < kNumPedals)
           out.latency += mNamPedalModel[b - kNumBuiltInPedals]->GetLatency();
         loopSendRan |= b == kLoopSendPedalIdx;
@@ -3579,21 +4746,12 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   mOutTapIn.Push(hpfPointers, (int)kNumChannelsStereo, (int)numFrames);
   if (mOutEq.Active())
     mOutEq.Process(hpfPointers, (int)kNumChannelsStereo, (int)numFrames);
-  // Mono output (1.55.0): both sides get (L + R) / 2, for playing through one speaker without losing
-  // what's panned to the other side. Off and settled, it's skipped.
-  const double monoTarget = GetParam(kOutputMono)->Bool() ? 1.0 : 0.0;
-  if (monoTarget > 0.0 || mMonoMix > 0.0)
-  {
-    const double step = 1.0 / std::max(1.0, 0.01 * sampleRate);
-    for (size_t s = 0; s < numFrames; s++)
-    {
-      mMonoMix = monoTarget > mMonoMix ? std::min(monoTarget, mMonoMix + step) : std::max(monoTarget, mMonoMix - step);
-      const double l = hpfPointers[0][s], r = hpfPointers[1][s];
-      const double half = 0.5 * mMonoMix * (r - l);
-      hpfPointers[0][s] = l + half;
-      hpfPointers[1][s] = r - half;
-    }
-  }
+  // Width and Widen (1.58.0, StereoWidth.h; Width 0% is 1.55.0's Mono): at 100% / 0% it's skipped.
+  mStereoWidth.SetTargets(GetParam(kOutputWidth)->Value() / 100.0, GetParam(kOutputWiden)->Value() / 100.0);
+  mStereoWidth.Process(hpfPointers[0], hpfPointers[1], (int)numFrames);
+  if (mOutputPageOpen.load(std::memory_order_relaxed))
+    mOutCorrelation.store(
+      (float)StereoWidth::Correlation(hpfPointers[0], hpfPointers[1], (int)numFrames), std::memory_order_relaxed);
   // sample** lpfPointers = mLowPass.Process(hpfPointers, numChannelsInternal, numFrames);
 
   // restore previous floating point state
@@ -3641,6 +4799,11 @@ void NeuralAmpModeler::OnReset()
   mGate.Reset();
   mStudioComp.SetSampleRate(sampleRate);
   mStudioComp.Reset();
+  mTrackGate.SetSampleRate(sampleRate); // 1.66.0
+  mDigiDelay.SetSampleRate(sampleRate);
+  mAnalogDelay.SetSampleRate(sampleRate);
+  mTapeEcho.SetSampleRate(sampleRate);
+  mSpringVerb.SetSampleRate(sampleRate);
   for (auto& k : mGateKeyBuf)
     k.resize(std::max(maxBlockSize, 1));
   mProEq.Reset(sampleRate);
@@ -3651,6 +4814,7 @@ void NeuralAmpModeler::OnReset()
   mRealFeel.Reset(sampleRate);
   mHumFilter.Reset(sampleRate);
   mLimiter.Reset(sampleRate); // (Its window is in samples: rebuilt for the rate.)
+  mStereoWidth.Reset(sampleRate);
   mAmpFeedGain = 1.0;
   // 1.42.0: the switch fades and gain ramps start where they're going.
   mBlockFadeInit = false;
@@ -3669,6 +4833,12 @@ void NeuralAmpModeler::OnReset()
   }
   for (auto& stage : mTubeStage)
     stage.Reset(sampleRate, maxBlockSize);
+  for (auto& stage : mTubeStage2) // 1.67.0
+    stage.Reset(sampleRate, maxBlockSize);
+  if (mStagedLab2Model != nullptr)
+    mStagedLab2Model->Reset(sampleRate, maxBlockSize);
+  else if (mLab2Model != nullptr)
+    mLab2Model->Reset(sampleRate, maxBlockSize);
   mTuner.SetSampleRate(sampleRate);
   _ResetNamPedals(sampleRate, maxBlockSize);
   mCabLab.Reset(sampleRate, maxBlockSize);
@@ -3683,6 +4853,8 @@ void NeuralAmpModeler::OnReset()
   // An IR is resampled for the rate it was loaded at; reload it if the host rate changed.
   if (mCabLabIR != nullptr && mCabLabIR->GetSampleRate() != sampleRate && mCabLabIRPath.GetLength())
     _StageCabLabIR(mCabLabIRPath);
+  if (mCabLabIR2 != nullptr && mCabLabIR2->GetSampleRate() != sampleRate && mCabLabIR2Path.GetLength())
+    _StageCabLabIR2(mCabLabIR2Path);
   for (int k = 0; k < kNumExtraCabs; k++)
     if (mExtraCabIR[k] != nullptr && mExtraCabIR[k]->GetSampleRate() != sampleRate && mExtraCabIRPath[k].GetLength())
       _StageExtraCabIR(k, mExtraCabIRPath[k]);
@@ -3711,6 +4883,16 @@ void NeuralAmpModeler::ProcessMidiMsg(const IMidiMsg& msg)
     const double x = std::clamp(value / 127.0, 0.0, 1.0);
     mExprVolumeTarget.store(x * x, std::memory_order_relaxed); // squared: a volume pedal's taper
   }
+  // Tap tempo (1.71.0): timed now, not when OnIdle gets to it (that would be up to a frame late).
+  // Every message is a tap (a latching switch sends 127, then 0).
+  if (mMidiCCIsTap[cc].load(std::memory_order_relaxed))
+  {
+    const int w = mMidiTapWrite.load(std::memory_order_relaxed);
+    mMidiTapTime[w % kMidiTapQueue].store(
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+      std::memory_order_relaxed);
+    mMidiTapWrite.store(w + 1, std::memory_order_release);
+  }
 }
 
 bool NeuralAmpModeler::_MidiIsToggle(int target) const
@@ -3725,6 +4907,19 @@ bool NeuralAmpModeler::_MidiIsToggle(int target) const
 
 void NeuralAmpModeler::_ApplyMidiMappings()
 {
+  {
+    const int w = mMidiTapWrite.load(std::memory_order_acquire);
+    if (w - mMidiTapRead > kMidiTapQueue)
+      mMidiTapRead = w - kMidiTapQueue;
+    for (; mMidiTapRead < w; mMidiTapRead++)
+      if (!mMidiLearnOn)
+        _TempoTap(mMidiTapTime[mMidiTapRead % kMidiTapQueue].load(std::memory_order_relaxed));
+  }
+  if (mTempoPushPending)
+  {
+    mTempoPushPending = false;
+    _PushTempoToDelays();
+  }
   const int seq = mMidiSeq.load(std::memory_order_acquire);
   if (mMidiLearnOn)
   {
@@ -3777,6 +4972,8 @@ void NeuralAmpModeler::_ApplyMidiMappings()
       {
         set(target, std::clamp(value / 127.0, 0.0, 1.0));
         changed = true;
+        if (target == kTempoBPM)
+          _PushTempoToDelays();
       }
     }
     if (toggles.empty() || count % 2 == 0) // An even number of presses since the last tick: no change
@@ -3870,6 +5067,8 @@ void NeuralAmpModeler::_LoadMidiMap()
       target = kMidiTargetTuner;
     else if (kind == "volume")
       target = kMidiTargetVolume;
+    else if (kind == "tap")
+      target = kMidiTargetTap;
     else if (kind == "param")
     {
       // By index (params never move), checked against the name; else the first param of that name.
@@ -3896,7 +5095,7 @@ void NeuralAmpModeler::_SaveMidiMap() const
   std::ofstream f(std::filesystem::u8path(_MidiMapPath()), std::ios::trunc);
   if (!f)
     return;
-  f << "GriffinMidiMap 1 (cc, then param <index> <name> / tuner / volume)\n";
+  f << "GriffinMidiMap 1 (cc, then param <index> <name> / tuner / volume / tap)\n";
   for (int cc = 0; cc < 128; cc++)
     for (int target : mMidiMap[cc])
     {
@@ -3904,6 +5103,8 @@ void NeuralAmpModeler::_SaveMidiMap() const
         f << cc << " tuner\n";
       else if (target == kMidiTargetVolume)
         f << cc << " volume\n";
+      else if (target == kMidiTargetTap)
+        f << cc << " tap\n";
       else if (target >= 0 && target < kNumParams)
         f << cc << " param " << target << " " << GetParam(target)->GetName() << "\n";
     }
@@ -3912,9 +5113,94 @@ void NeuralAmpModeler::_SaveMidiMap() const
 void NeuralAmpModeler::_SyncMidiVolumeFlags()
 {
   for (int cc = 0; cc < 128; cc++)
+  {
     mMidiCCIsVolume[cc].store(std::find(mMidiMap[cc].begin(), mMidiMap[cc].end(), kMidiTargetVolume)
                                 != mMidiMap[cc].end(),
                               std::memory_order_relaxed);
+    mMidiCCIsTap[cc].store(std::find(mMidiMap[cc].begin(), mMidiMap[cc].end(), kMidiTargetTap) != mMidiMap[cc].end(),
+                           std::memory_order_relaxed);
+  }
+}
+
+void NeuralAmpModeler::_TempoTap(double t)
+{
+  // Taps more than 2 s apart (slower than 30 BPM) start a new count.
+  if (mNumTaps > 0 && t - mTapTimes[mNumTaps - 1] > 2.0)
+    mNumTaps = 0;
+  if (mNumTaps == 5)
+  {
+    std::rotate(mTapTimes, mTapTimes + 1, mTapTimes + 5);
+    mNumTaps = 4;
+  }
+  mTapTimes[mNumTaps++] = t;
+  mBeatAnchor = t;
+  if (mNumTaps < 2)
+    return;
+  // The average of the last (up to 4) gaps.
+  const double beat = (mTapTimes[mNumTaps - 1] - mTapTimes[0]) / (mNumTaps - 1);
+  if (beat <= 0.0)
+    return;
+  const IParam* p = GetParam(kTempoBPM);
+  const double bpm = std::clamp(std::round(600.0 / beat) / 10.0, p->GetMin(), p->GetMax());
+  const double normalized = p->ToNormalized(bpm);
+  SetParameterValue(kTempoBPM, normalized);
+  SendParameterValueFromDelegate(kTempoBPM, normalized, true);
+  _PushTempoToDelays();
+}
+
+void NeuralAmpModeler::_PushTempoToDelays()
+{
+  static const double kBeats[] = {0.0, 1.0, 0.75, 0.5, 2.0 / 3.0, 0.25}; // Off, 1/4, 1/8., 1/8, 1/4T, 1/16
+  const double beatMs = 60000.0 / GetParam(kTempoBPM)->Value();
+  auto set = [this](int param, double value) {
+    const double normalized = GetParam(param)->ToNormalized(value);
+    SetParameterValue(param, normalized);
+    SendParameterValueFromDelegate(param, normalized, true);
+  };
+  // A time past the delay's range is halved (or doubled) until it fits: still in time.
+  auto fit = [](double ms, double lo, double hi) {
+    while (ms > hi && ms * 0.5 >= lo)
+      ms *= 0.5;
+    while (ms < lo && ms * 2.0 <= hi)
+      ms *= 2.0;
+    return std::clamp(ms, lo, hi);
+  };
+  auto timeFor = [&](int divParam) { return beatMs * kBeats[std::clamp(GetParam(divParam)->Int(), 0, 5)]; };
+  constexpr int kDelayType = 3;
+  static_assert(chaingrid::NumCopies(kDelayType) == 3, "DELAY, DELAY 2, DELAY 3");
+  for (int copy = 0; copy < 3; copy++)
+  {
+    const int divParam = kDelayTapDiv + copy;
+    if (GetParam(divParam)->Int() == 0)
+      continue;
+    const int timeParam = PedalOf(chaingrid::PedalCopyId(kDelayType, copy)).knobs[0].paramIdx;
+    const IParam* p = GetParam(timeParam);
+    set(timeParam, fit(timeFor(divParam), p->GetMin(), p->GetMax()));
+  }
+  static const int kOtherDelays[2][2] = {{kDigiTapDiv, kDigiTime}, {kAnaTapDiv, kAnaTime}};
+  for (const auto& d : kOtherDelays)
+    if (GetParam(d[0])->Int() != 0)
+      set(d[1], fit(timeFor(d[0]), GetParam(d[1])->GetMin(), GetParam(d[1])->GetMax()));
+  if (GetParam(kTapeTapDiv)->Int() != 0)
+  {
+    // The tape's longest head on the beat (head 1 = 300 - 230 x Rate/10 ms; heads 2 and 3 at 2x and 3x).
+    static const int kLongestHead[7] = {1, 2, 3, 2, 3, 3, 3}; // 1, 2, 3, 1+2, 2+3, 1+2+3, 1+3
+    const int heads = kLongestHead[std::clamp(GetParam(kTapeHeads)->Int(), 0, 6)];
+    const double head1Ms = fit(timeFor(kTapeTapDiv) / heads, 70.0, 300.0);
+    set(kTapeRate, (300.0 - head1Ms) / 230.0 * 10.0);
+  }
+  if (auto* pGraphics = GetUI())
+    pGraphics->SetAllControlsDirty();
+}
+
+double NeuralAmpModeler::_BeatPhase() const
+{
+  if (mBeatAnchor < 0.0)
+    return -1.0;
+  const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  const double beat = 60.0 / GetParam(kTempoBPM)->Value();
+  const double phase = std::fmod(now - mBeatAnchor, beat) / beat;
+  return phase < 0.0 ? phase + 1.0 : phase;
 }
 
 void NeuralAmpModeler::_SetMidiLearn(bool on)
@@ -3974,6 +5260,8 @@ std::string NeuralAmpModeler::_MidiTargetName(int target) const
     return "Tuner";
   if (target == kMidiTargetVolume)
     return "Volume pedal";
+  if (target == kMidiTargetTap)
+    return "Tap tempo";
   if (target < 0 || target >= kNumParams)
     return "?";
   for (int id = 0; id < chaingrid::kNumIds; id++)
@@ -4005,6 +5293,7 @@ std::string NeuralAmpModeler::_MidiTargetName(int target) const
 
 void NeuralAmpModeler::OnIdle()
 {
+  _PackPollZip(); // 1.70.3
 #ifdef APP_API
   _AutosaveIfDirty();
 #endif
@@ -4121,6 +5410,25 @@ void NeuralAmpModeler::OnIdle()
     SendControlMsgFromDelegate(kCtrlTagTunerDisplay, kMsgTagTunerUpdate, sizeof(tunerData), tunerData);
   }
   _UpdateTubeDebug();
+  _UpdateOutputPage();
+  _UpdateChassis();
+  if (auto* pGraphics = GetUI())
+    if (auto* page = pGraphics->GetControlWithTag(kCtrlTagSpeakerLab); page && !page->IsHidden())
+    {
+      const bool dual = GetParam(kCabDual)->Int() == 1;
+      const int cabShown = dual ? mLabSelectedCab : 0;
+      for (int m = 0; m < cab::kNumLabMics; m++)
+        for (IControl* c : mLabMicControls[m])
+        {
+          const bool hide = m != mLabSelectedMic || (!dual && c->GetParamIdx() == kLabMicCabFirst + m);
+          if (c->IsHidden() != hide)
+            c->Hide(hide);
+        }
+      for (int cab = 0; cab < 2; cab++)
+        for (IControl* c : mLabCabControls[cab])
+          if (c->IsHidden() != (cab != cabShown))
+            c->Hide(cab != cabShown);
+    }
 
   if (mNewModelLoadedInDSP)
   {
@@ -4203,6 +5511,8 @@ void NeuralAmpModeler::_LoadUiPrefs()
       mProEqView.analyzer = value != 0;
     else if (key == "out_eq_analyzer")
       mOutEqView.analyzer = value != 0;
+    else if (key == "tube_probes_always")
+      mTubeProbesAlways = value != 0;
     else if (key == "float_x")
       mSpecFloatRect.L = (float)value;
     else if (key == "float_y")
@@ -4227,7 +5537,7 @@ void NeuralAmpModeler::_SaveUiPrefs() const
     << "\nfloat_x=" << (int)mSpecFloatRect.L << "\nfloat_y=" << (int)mSpecFloatRect.T
     << "\nfloat_w=" << (int)mSpecFloatRect.W() << "\nfloat_h=" << (int)mSpecFloatRect.H()
     << "\npro_eq_analyzer=" << (mProEqView.analyzer ? 1 : 0) << "\nout_eq_analyzer=" << (mOutEqView.analyzer ? 1 : 0)
-    << "\n";
+    << "\ntube_probes_always=" << (mTubeProbesAlways ? 1 : 0) << "\n";
 }
 
 // Both rebuild the UI on the next OnIdle tick (they're called from inside a control's click).
@@ -4391,6 +5701,27 @@ bool NeuralAmpModeler::SerializeState(IByteChunk& chunk) const
   chunk.PutStr(mSlotNAMPath[other].Get());
   chunk.PutStr(mSlotIRPath[other].Get());
   chunk.PutStr(mSlotIRRExplicit[other] ? mSlotIRPath_R[other].Get() : "");
+  // 1.61.0: CAB LAB cab 2's IR, by path (last, so older builds just stop before it).
+  chunk.PutStr("###CabLabIR2V1###");
+  chunk.PutStr(mCabLabIR2Path.Get());
+  // 1.67.0: TUBE LAB 2's capture, by path (last again).
+  chunk.PutStr("###TubeLab2CaptureV1###");
+  chunk.PutStr(mLab2ModelPath.Get());
+  // 1.70.0 PACK PICKER: the pack folder and pick (last, so older builds stop before it). The model
+  // itself is still saved as mNAMPath above, so a missing pack folder just loses the dropdown.
+  chunk.PutStr("###PackV1###");
+  chunk.PutStr((mPackZipPath.empty() ? mPack.folder : mPackZipPath).c_str()); // 1.70.3: a zip pack saves the zip
+  chunk.PutStr(mPackGroup.c_str());
+  chunk.PutStr(mPackKey.c_str());
+  chunk.PutStr(mPackSize.c_str());
+  chunk.PutStr(mPackIRChoice.c_str());
+  chunk.PutStr(mPackIRSetPath.c_str());
+  {
+    const int autoIR = mPackAutoIR ? 1 : 0, hasRef = mPackHasRef ? 1 : 0;
+    chunk.Put(&autoIR);
+    chunk.Put(&hasRef);
+    chunk.Put(&mPackRefLoudness);
+  }
   return ok;
 }
 
@@ -4472,6 +5803,12 @@ int NeuralAmpModeler::UnserializeState(const IByteChunk& chunk, int startPos)
           break;
         }
       }
+    }
+    // 1.58.0: Width replaced the Mono switch; a state saved with Mono on loads as Width 0% (mono).
+    if (GetParam(kOutputMono)->Bool())
+    {
+      GetParam(kOutputMono)->Set(0.0);
+      GetParam(kOutputWidth)->Set(0.0);
     }
     OnParamReset(iplug::EParamSource::kPresetRecall);
     LEAVE_PARAMS_MUTEX
@@ -4555,6 +5892,123 @@ int NeuralAmpModeler::UnserializeState(const IByteChunk& chunk, int startPos)
         slotNAM.Set(""), slotIR.Set(""), slotIRR.Set("");
     }
     _StageInactiveSlot(1 - live, slotNAM, slotIR, slotIRR);
+  }
+
+  // 1.61.0: CAB LAB cab 2's IR. Absent (older) or empty: none, rather than the last state's.
+  {
+    WDL_String header2, path2;
+    const int p2 = _TryGetStr(chunk, header2, pos);
+    if (p2 >= 0 && strcmp(header2.Get(), "###CabLabIR2V1###") == 0)
+    {
+      const int p3 = _TryGetStr(chunk, path2, p2);
+      if (p3 >= 0)
+        pos = p3;
+      else
+        path2.Set("");
+    }
+    if (!(path2.GetLength() && _StageCabLabIR2(path2)))
+      _StageCabLabIR2(WDL_String());
+  }
+
+  // 1.67.0: TUBE LAB 2's capture. Absent (older) or empty: none.
+  {
+    WDL_String header3, path3;
+    const int p2 = _TryGetStr(chunk, header3, pos);
+    if (p2 >= 0 && strcmp(header3.Get(), "###TubeLab2CaptureV1###") == 0)
+    {
+      const int p3 = _TryGetStr(chunk, path3, p2);
+      if (p3 >= 0)
+        pos = p3;
+      else
+        path3.Set("");
+    }
+    if (!(path3.GetLength() && _StageLab2Model(path3).empty()))
+    {
+      mStagedLab2Model = nullptr;
+      mShouldRemoveLab2Model = true;
+      mLab2ModelPath.Set("");
+      if (auto* pGraphics = GetUI())
+        if (auto* label = pGraphics->GetControlWithTag(kCtrlTagLab2CaptureName))
+          static_cast<IVLabelControl*>(label)->SetStr("No capture loaded");
+    }
+  }
+
+  // 1.70.0 PACK PICKER. Absent (older states) or unreadable: no pack, no trim -- exactly as before.
+  {
+    mPack = griffinpack::Pack();
+    mPackGroup.clear();
+    mPackKey.clear();
+    mPackSize.clear();
+    mPackIRChoice.clear();
+    mPackIRSetPath.clear();
+    mPackAutoIR = true;
+    mPackHasRef = false;
+    mPackRefLoudness = 0.0;
+    mPackModelPtr = nullptr;
+    mPackTrimDB = 0.0;
+    WDL_String hdr;
+    int q = _TryGetStr(chunk, hdr, pos);
+    if (q >= 0 && strcmp(hdr.Get(), "###PackV1###") == 0)
+    {
+      WDL_String s[6];
+      bool good = true;
+      for (int i = 0; i < 6 && good; i++)
+      {
+        q = _TryGetStr(chunk, s[i], q);
+        good = q >= 0;
+      }
+      int autoIR = 1, hasRef = 0;
+      double ref = 0.0;
+      good = good && (q = chunk.Get(&autoIR, q)) >= 0 && (q = chunk.Get(&hasRef, q)) >= 0
+             && (q = chunk.Get(&ref, q)) >= 0;
+      if (good)
+      {
+        pos = q;
+        mPackAutoIR = autoIR != 0;
+        mPackHasRef = hasRef != 0;
+        mPackRefLoudness = ref;
+        mPackIRChoice = s[4].Get();
+        mPackIRSetPath = s[5].Get();
+        mPackZipPath.clear();
+        if (s[0].GetLength() && griffinpack::IsZipPath(s[0].Get()))
+        {
+          // 1.70.3: a zip pack: its cache (unpacked again here if it was cleared or the zip changed).
+          std::string err, log;
+          bool reused = false;
+          const std::string dir = griffinpack::ResolveZip(s[0].Get(), err, log, reused);
+          _PackLog("preset zip " + std::string(s[0].Get()) + "\n" + log + (err.empty() ? "" : "  error: " + err));
+          if (!dir.empty())
+          {
+            mPack = griffinpack::Scan(dir);
+            mPackZipPath = s[0].Get();
+            // The saved model was in the cache: if that copy is gone, load the same capture from this one.
+            std::error_code ec;
+            if (!std::filesystem::exists(std::filesystem::u8path(mNAMPath.Get()), ec))
+            {
+              const std::string want = griffinpack::U8(std::filesystem::u8path(mNAMPath.Get()).filename());
+              for (const auto& c : mPack.captures)
+                if (c.file == want)
+                {
+                  _StageModel(WDL_String(c.path.c_str()));
+                  break;
+                }
+            }
+          }
+        }
+        else if (s[0].GetLength())
+          mPack = griffinpack::Scan(s[0].Get()); // Empty if the folder's gone: the saved model still loads
+        mPackGroup = s[1].Get();
+        mPackKey = s[2].Get();
+        mPackSize = s[3].Get();
+        // The model was restored from mNAMPath above; if it's this pack's capture, give it its trim.
+        const griffinpack::Capture* c = mPack.FindPath(mNAMPath.Get());
+        if (c && c->hasLoudness && mPackHasRef)
+          mPackTrimDB = mPackRefLoudness - c->loudness;
+        if (c)
+          mPackModelPtr = mLastStagedModelPtr;
+        mPackGainDirty = true;
+      }
+    }
   }
 
   if (GetParam(kChainGridV1)->Value() < 0.5)
@@ -4666,7 +6120,30 @@ void NeuralAmpModeler::OnParamChangeUI(int paramIdx, EParamSource source)
   {
     bool active = GetParam(paramIdx)->Bool();
 
-    switch (paramIdx)
+    // 1.67.0: a TUBE LAB 2 param acts as the Tube Lab's while its popup is the one shown.
+    int which = paramIdx;
+    if (const int base = Lab2Base(paramIdx); base >= 0)
+      which = mUiLab == 1 ? base : -1000;
+    // 1.68.0: a chassis socket given another tube takes that tube's usual bias (a 12AU7 at a 12AX7's
+    // -1.5 V would sit nearly saturated).
+    {
+      const int lab = Lab2Base(paramIdx) >= 0 ? 1 : 0;
+      const int base = lab == 1 ? Lab2Base(paramIdx) : paramIdx;
+      if (source == EParamSource::kUI && base >= kTubeSockFirst && base <= kTubeSockLast
+          && (base - kTubeSockFirst) % kSocketFields == kSockTube)
+      {
+        const int biasParam = LabParam(lab, base - kSockTube + kSockBias);
+        const double normalized = GetParam(biasParam)->ToNormalized(tube::TypicalBias(GetParam(paramIdx)->Int()));
+        BeginInformHostOfParamChangeFromUI(biasParam);
+        SendParameterValueFromUI(biasParam, normalized);
+        EndInformHostOfParamChangeFromUI(biasParam);
+        pGraphics->ForControlWithParam(biasParam, [normalized](IControl* c) { c->SetValueFromDelegate(normalized); });
+        mChassisSignature = -1.0;
+      }
+    }
+    if (paramIdx == kTempoBPM && source == EParamSource::kUI)
+      mTempoPushPending = true;
+    switch (which)
     {
       case kNoiseGateActive: pGraphics->GetControlWithParamIdx(kNoiseGateThreshold)->SetDisabled(!active); break;
       case kEQActive:
@@ -4703,11 +6180,86 @@ void NeuralAmpModeler::OnParamChangeUI(int paramIdx, EParamSource source)
       case kTubeGain2:
       case kTubeBias2:
         if (auto* pCurve = pGraphics->GetControlWithTag(kCtrlTagTubeCurve))
-          pCurve->As<TubeCurveControl>()->SetDimmed(GetParam(kTubeEngaged)->Value() <= 0.5);
+          pCurve->As<TubeCurveControl>()->SetDimmed(GetParam(_TP(kTubeEngaged))->Value() <= 0.5);
         break;
       case kCabSource:
       case kMicBOn: _RefreshCabLabControls(pGraphics); break;
-      default: break;
+      case kCabLab3D:
+        _RefreshCabLabControls(pGraphics);
+        _SpeakerLabChanged();
+        break;
+      case kCabFormat:
+      {
+        // A new cab picked on the page: each mic keeps its spot relative to its cone (a preset load
+        // brings its own placements).
+        const int format = GetParam(kCabFormat)->Int();
+        if (source == EParamSource::kUI && mLabFormatShown >= 0 && format != mLabFormatShown)
+          _RemapLabMicsForFormat(0, mLabFormatShown, format);
+        mLabFormatShown = format;
+        _SpeakerLabChanged();
+        break;
+      }
+      case kCab2Format:
+      {
+        const int format = GetParam(kCab2Format)->Int();
+        if (source == EParamSource::kUI && mLabFormat2Shown >= 0 && format != mLabFormat2Shown)
+          _RemapLabMicsForFormat(1, mLabFormat2Shown, format);
+        mLabFormat2Shown = format;
+        _SpeakerLabChanged();
+        break;
+      }
+      case kCabDual:
+        if (GetParam(kCabDual)->Int() == 0)
+          mLabSelectedCab = 0;
+        else if (source == EParamSource::kUI)
+        {
+          // Two cabs, but no mic on the second (by default only MIC C is, and it starts off): put one
+          // there so cab 2 is heard -- MIC C if it's free, else the first mic that's off -- turned on,
+          // just off the dust cap of cab 2's first cone. Its pan stays as it was.
+          const cab::CabLabParams cp = _ReadCabLabParams();
+          bool heard = false;
+          for (int m = 0; m < cab::kNumLabMics; m++)
+            heard |= cp.lab[m].on && cp.lab[m].cab == 1;
+          if (!heard)
+          {
+            int pick = !cp.lab[2].on ? 2 : -1;
+            for (int m = 0; m < cab::kNumLabMics && pick < 0; m++)
+              if (!cp.lab[m].on)
+                pick = m;
+            if (pick >= 0)
+            {
+              auto send = [this, pGraphics](int param, double value) {
+                const double normalized = GetParam(param)->ToNormalized(value);
+                BeginInformHostOfParamChangeFromUI(param);
+                SendParameterValueFromUI(param, normalized);
+                EndInformHostOfParamChangeFromUI(param);
+                pGraphics->ForControlWithParam(param, [normalized](IControl* c) { c->SetValueFromDelegate(normalized); });
+              };
+              const cab::CabFormat& f2 = cab::GetCabFormat(cp.format2);
+              send(kLabMicCabFirst + pick, 1.0);
+              send(LabMicParam(pick, 0), 1.0);
+              _SetLabMicPosition(pick, f2.cx[0] + 0.035, f2.cy[0], 0.025);
+              mLabSelectedMic = pick;
+            }
+          }
+          mLabSelectedCab = 1; // Show the new cab
+        }
+        _SpeakerLabChanged();
+        break;
+      default:
+        if (paramIdx >= kLabMicCabFirst && paramIdx <= kLabMicCabLast && source == EParamSource::kUI)
+        {
+          // A mic moved to the other cab: same spot on the matching cone there, and the views follow it.
+          const int m = paramIdx - kLabMicCabFirst, to = GetParam(paramIdx)->Int();
+          _RemapLabMicsForFormat(to, GetParam(to == 0 ? kCab2Format : kCabFormat)->Int(),
+                                 GetParam(to == 0 ? kCabFormat : kCab2Format)->Int(), m);
+          if (m == mLabSelectedMic)
+            mLabSelectedCab = to;
+        }
+        if ((paramIdx >= kLabMicFirst && paramIdx <= kLabMicLast) || paramIdx == kCabSpeaker
+            || (paramIdx >= kCabDual && paramIdx <= kLabMicCabLast))
+          _SpeakerLabChanged();
+        break;
     }
   }
 }
@@ -4763,10 +6315,18 @@ void NeuralAmpModeler::_AllocateIOPointers(const size_t nChans)
 
 void NeuralAmpModeler::_ApplyDSPStaging()
 {
+  // 1.70.0 PACK PICKER: a pack level trim changed (e.g. a preset restored it).
+  if (mPackGainDirty.exchange(false))
+    _SetOutputGain();
   if (mCabLabIRStaged)
   {
     mCabLabIR = std::move(mStagedCabLabIR);
     mCabLabIRStaged = false;
+  }
+  if (mCabLabIR2Staged)
+  {
+    mCabLabIR2 = std::move(mStagedCabLabIR2); // (null clears it)
+    mCabLabIR2Staged = false;
   }
   for (int k = 0; k < kNumExtraCabs; k++)
     if (mExtraCabIRStaged[k])
@@ -5140,6 +6700,11 @@ void NeuralAmpModeler::_SetOutputGain()
         }
         break;
       case 0: // Raw
+        // 1.70.0 PACK PICKER: a pack capture is level-matched to the first one picked in its pack (from
+        // the .nam loudness), so switching captures keeps the volume. Any other model: no change.
+        if (mModel.get() == mPackModelPtr.load())
+          gainDB += mPackTrimDB.load();
+        break;
       default: break;
     }
   }
@@ -5184,6 +6749,10 @@ std::string NeuralAmpModeler::_StageModel(const WDL_String& modelPath)
     {
       slimmable->SetSlimmableSize(GetParam(kSlim)->Value());
     }
+    // 1.70.0 PACK PICKER: which model this is (identity only), so only a pack capture gets its level trim.
+    mLastStagedModelPtr = temp.get();
+    if (mPackStaging)
+      mPackModelPtr = temp.get();
     mStagedModel = std::move(temp);
     mNAMPath = modelPath;
 #ifdef APP_API
@@ -5444,6 +7013,15 @@ void NeuralAmpModeler::_ProcessOutput(iplug::sample** inputs, iplug::sample** ou
   // output by its lookahead, which would click), and when it's in the path, the gained signal goes
   // through it before the soft clip below.
   const bool limiterWanted = GetParam(kOutputLimiter)->Bool();
+  mLimiter.SetParams(GetParam(kLimiterCeiling)->Value(), GetParam(kLimiterRelease)->Value());
+  // The OUTPUT page's gain-reduction meter: the most reduction since it last looked.
+  auto showGR = [this]() {
+    if (!mOutputPageOpen.load(std::memory_order_relaxed))
+      return;
+    const float gr = mLimiterOn ? (float)mLimiter.BlockGainReductionDB() : 0.f;
+    if (gr < mLimiterGRShown.load(std::memory_order_relaxed))
+      mLimiterGRShown.store(gr, std::memory_order_relaxed);
+  };
   if (limiterWanted != mLimiterOn || mLimiterFadeStage != 0)
   {
     if (mLimiterBuf[0].size() < nFrames)
@@ -5458,7 +7036,10 @@ void NeuralAmpModeler::_ProcessOutput(iplug::sample** inputs, iplug::sample** ou
         lr[c][s] = gainAt(s) * (volStart + volStep * (s + 1)) * inputs[cin][s];
     }
     if (mLimiterOn)
+    {
       mLimiter.Process(lr[0], lr[1], (int)nFrames);
+      showGR();
+    }
     for (size_t s = 0; s < nFrames; s++)
     {
       if (mLimiterFadeStage == 0 && limiterWanted != mLimiterOn)
@@ -5525,6 +7106,7 @@ void NeuralAmpModeler::_ProcessOutput(iplug::sample** inputs, iplug::sample** ou
         lr[c][s] = gainAt(s) * (volStart + volStep * (s + 1)) * inputs[cin][s];
     }
     mLimiter.Process(lr[0], lr[1], (int)nFrames);
+    showGR();
     for (auto cout = 0; cout < nChansOut; cout++)
     {
       const double* src = lr[std::min((size_t)cout, (size_t)1)];
@@ -5666,6 +7248,35 @@ std::string NeuralAmpModeler::_StageNamPedal(int slot, const WDL_String& modelPa
   return "";
 }
 
+// 1.67.0: TUBE LAB 2's capture (mono in and out, like the AMP block's), staged for the audio thread.
+std::string NeuralAmpModeler::_StageLab2Model(const WDL_String& path)
+{
+  try
+  {
+    std::unique_ptr<nam::DSP> model = nam::get_dsp(std::filesystem::u8path(path.Get()));
+    if (model->NumInputChannels() != 1 || model->NumOutputChannels() != 1)
+      throw std::runtime_error("The capture must have 1 input and 1 output channel.");
+    auto temp = std::make_unique<ResamplingNAM>(std::move(model), GetSampleRate());
+    temp->Reset(GetSampleRate(), GetBlockSize());
+    if (nam::SlimmableModel* slimmable = temp->GetSlimmableModel())
+      slimmable->SetSlimmableSize(GetParam(kSlim)->Value());
+    mStagedLab2Model = std::move(temp);
+    mLab2ModelPath = path;
+#ifdef APP_API
+    mStateDirty = true;
+#endif
+  }
+  catch (std::exception& e)
+  {
+    std::cerr << "Failed to load TUBE LAB 2's capture: " << e.what() << std::endl;
+    return e.what();
+  }
+  if (auto* pGraphics = GetUI())
+    if (auto* label = pGraphics->GetControlWithTag(kCtrlTagLab2CaptureName))
+      static_cast<IVLabelControl*>(label)->SetStr(mLab2ModelPath.get_filepart());
+  return "";
+}
+
 void NeuralAmpModeler::_RemoveNamPedal(int slot)
 {
   if (slot < 0 || slot >= kNumNamPedals)
@@ -5691,6 +7302,19 @@ void NeuralAmpModeler::_ApplyNamPedalDSPStaging()
       mStagedNamPedalModel[i] = nullptr;
       changed = true;
     }
+  }
+  // 1.67.0: TUBE LAB 2's capture, the same way.
+  if (mShouldRemoveLab2Model)
+  {
+    mLab2Model = nullptr;
+    mShouldRemoveLab2Model = false;
+    changed = true;
+  }
+  if (mStagedLab2Model != nullptr)
+  {
+    mLab2Model = std::move(mStagedLab2Model);
+    mStagedLab2Model = nullptr;
+    changed = true;
   }
   if (changed)
     _UpdateLatency();
@@ -5793,6 +7417,27 @@ void NeuralAmpModeler::_ResetChainGridParams()
     GetParam(p)->Set(GetParam(p)->GetDefault());
   for (int p = kDynamicsParamsFirst; p <= kDynamicsParamsLast; p++) // 1.52.0: nor GATE or PRO COMP
     GetParam(p)->Set(GetParam(p)->GetDefault());
+  GetParam(kOutputMono)->Set(0.0); // 1.55.0: nor Mono
+  for (int p : kTubeBenchParams) // 1.58.0: nor the bench or the OUTPUT page's controls
+    GetParam(p)->Set(GetParam(p)->GetDefault());
+  for (int p : kOutputPageParams)
+    GetParam(p)->Set(GetParam(p)->GetDefault());
+  for (int p = kCabFormat; p <= kLabMicLast; p++) // 1.59.0: nor the SPEAKER LAB: their CAB LAB stays classic
+    GetParam(p)->Set(GetParam(p)->GetDefault());
+  for (int p = kCabDual; p <= kLabMicCabLast; p++) // 1.61.0: nor dual cabs (single)
+    GetParam(p)->Set(GetParam(p)->GetDefault());
+  GetParam(kTubeCanFail)->Set(0.0); // 1.62.0: nor failing tubes
+  GetParam(kTubeCapture)->Set(0.0); // 1.64.0: nor the capture in the Tube Lab
+  GetParam(kLab2Active)->Set(0.0); // 1.67.0: nor TUBE LAB 2
+  for (int p = kLab2First; p <= kLab2Last; p++)
+    GetParam(p)->Set(GetParam(p)->GetDefault());
+  for (int p = kTubeChassisFirst; p <= kLab2ChassisLast; p++) // 1.68.0: nor the chassis (empty sockets, a pair)
+    GetParam(p)->Set(GetParam(p)->GetDefault());
+  for (int p = kMorePedalParamsFirst; p <= kMorePedalParamsLast; p++) // 1.66.0: nor the new gate, delays, reverb
+    GetParam(p)->Set(GetParam(p)->GetDefault());
+  for (int p = kTempoParamsFirst; p <= kTempoParamsLast; p++) // 1.71.0: nor tap tempo
+    GetParam(p)->Set(GetParam(p)->GetDefault());
+  GetParam(kCabLab3D)->Set(0.0);
   for (int b = 0; b < chaingrid::kNumIds; b++)
   {
     if (b == chaingrid::kInput)
@@ -5898,7 +7543,8 @@ void NeuralAmpModeler::_ApplyTubePreset(int index)
   if (index < 0 || index >= kNumTubePresets)
     return;
   IGraphics* pGraphics = GetUI();
-  auto send = [this, pGraphics](int param, double value) {
+  auto send = [this, pGraphics](int baseParam, double value) {
+    const int param = _TP(baseParam); // 1.67.0: into the lab being shown
     const double normalized = GetParam(param)->ToNormalized(value);
     BeginInformHostOfParamChangeFromUI(param);
     SendParameterValueFromUI(param, normalized);
@@ -5912,6 +7558,14 @@ void NeuralAmpModeler::_ApplyTubePreset(int index)
   for (int param : kTubeCircuitPlusParams)
     send(param, 0.0);
   send(kTubeTouch, 0.0);
+  // 1.63.0: and on a stock bench (new tubes, 120 V, bias at 100%): a preset on worn tubes at 90 V
+  // isn't the sound it was voiced as.
+  for (int param : kTubeBenchParams)
+    send(param, GetParam(param)->GetDefault());
+  // 1.68.0: and with the chassis sockets empty, on a pair of power tubes.
+  for (int k = 0; k < tube::kNumSockets; k++)
+    send(SocketParam(k, kSockRole), tube::kSocketOff);
+  send(kTubeQuad, 0.0);
   for (const auto& v : kTubePresets[index].values)
     send(v.param, v.value);
   if (pGraphics)
@@ -5943,9 +7597,33 @@ void NeuralAmpModeler::_UpdateClipIndicator()
     }
 }
 
+// 1.67.0: the Tube Lab popup, debug page and chassis page now edit lab 0 (TUBE LAB) or 1 (TUBE LAB 2).
+void NeuralAmpModeler::_SetUiLab(int lab)
+{
+  if (lab == mUiLab)
+    return;
+  mUiLab = lab;
+  mUiLabAudio.store(lab, std::memory_order_relaxed);
+  for (auto& [control, base] : mLabRetarget)
+  {
+    const int idx = LabParam(lab, base);
+    control->SetParamIdx(idx);
+    control->SetValueFromDelegate(GetParam(idx)->GetNormalized());
+  }
+  mChassisSignature = -1.0;
+  mTubeHaveSignalStats = false; // The debug page's "last thing played" was the other lab's
+  if (auto* pGraphics = GetUI())
+  {
+    _RefreshTubeLabControls(pGraphics);
+    if (auto* pCurve = pGraphics->GetControlWithTag(kCtrlTagTubeCurve))
+      pCurve->As<TubeCurveControl>()->SetDimmed(GetParam(_TP(kTubeEngaged))->Value() <= 0.5);
+    pGraphics->SetAllControlsDirty();
+  }
+}
+
 void NeuralAmpModeler::_ApplyTubeTab()
 {
-  const bool open = mSelectedBlock == kTubePedalIdx;
+  const bool open = _TubeLabSelected();
   for (auto& [control, tab] : mTubeTabControls)
     if (control)
       control->Hide(!open || tab != mTubeTab);
@@ -5957,14 +7635,15 @@ void NeuralAmpModeler::_RefreshTubeLabControls(IGraphics* pGraphics)
 {
   if (pGraphics == nullptr)
     return;
-  const bool circuit = GetParam(kTubeCircuit)->Bool();
+  const bool circuit = GetParam(_TP(kTubeCircuit))->Bool();
   // {control's param, up to two switches it also depends on (-1: none)}; everything here also
   // needs the Circuit engine.
   struct Rule
   {
     int param, needs1, needs2;
   };
-  const std::array<Rule, 28> rules = {{{kTubeCathodeCap, -1, -1},
+  const std::array<Rule, 29> rules = {{{kTubeCathodeCap, -1, -1},
+                                       {kTubeQuad, kTubePower, -1},
                                        {kTubeCathodeFollower, -1, -1},
                                        {kTubeCathodeBias, kTubePower, -1},
                                        {kTubeSpeakerFeedback, kTubePower, -1},
@@ -5992,26 +7671,70 @@ void NeuralAmpModeler::_RefreshTubeLabControls(IGraphics* pGraphics)
                                        {kTubeOTSaturation, kTubePower, -1},
                                        {kTubeCoilHeat, kTubePower, kTubeSpeakerLoad},
                                        {kTubeFeelDepth, kTubePower, -1}}};
-  auto on = [this](int param) { return param < 0 || GetParam(param)->Bool(); };
+  auto on = [this](int param) { return param < 0 || GetParam(_TP(param))->Bool(); };
   // With the REAL FEEL pedal in the chain, the Real Feel controls act there, whatever the Tube Lab's
   // engine and Power Amp are doing.
-  const bool feelPedal = _RealFeelPedalPlaced();
+  const bool feelPedal = mUiLab == 0 && _RealFeelPedalPlaced(); // (REAL FEEL is TUBE LAB's)
   auto isFeel = [](int param) {
     return param == kTubeScreenSquish || param == kTubeSharedSupply || param == kTubeOTSaturation
            || param == kTubeCoilHeat || param == kTubeFeelDepth;
   };
   for (const auto& r : rules)
-    if (auto* pControl = pGraphics->GetControlWithParamIdx(r.param))
+    if (auto* pControl = pGraphics->GetControlWithParamIdx(_TP(r.param)))
       pControl->SetDisabled(!(feelPedal && isFeel(r.param)) && (!circuit || !on(r.needs1) || !on(r.needs2)));
   // The tone stack works in both engines; its knobs are greyed while it's Off.
-  const bool stackOn = GetParam(kTubeStack)->Int() > 0;
+  const bool stackOn = GetParam(_TP(kTubeStack))->Int() > 0;
   for (int param : {kTubeBass, kTubeMid, kTubeTreble})
-    if (auto* pControl = pGraphics->GetControlWithParamIdx(param))
+    if (auto* pControl = pGraphics->GetControlWithParamIdx(_TP(param)))
       pControl->SetDisabled(!stackOn);
   // 60 Hz works in both engines, with or without the power amp; Amount is greyed while it's off.
   for (int param : {kTubeRippleAmount, kTubeRippleMix})
-    if (auto* pControl = pGraphics->GetControlWithParamIdx(param))
-      pControl->SetDisabled(!GetParam(kTubeRipple)->Bool());
+    if (auto* pControl = pGraphics->GetControlWithParamIdx(_TP(param)))
+      pControl->SetDisabled(!GetParam(_TP(kTubeRipple))->Bool());
+}
+
+cab::CabLabParams NeuralAmpModeler::_ReadCabLabParams() const
+{
+  cab::CabLabParams cp;
+  cp.useIR = GetParam(kCabSource)->Bool();
+  cp.speaker = GetParam(kCabSpeaker)->Int();
+  auto micFrom = [this](int on, int type, int pos, int dist, int level, int pan, int invert) {
+    cab::MicParams m;
+    m.on = on < 0 || GetParam(on)->Bool();
+    m.type = GetParam(type)->Int();
+    m.position = GetParam(pos)->Value() / 10.0;
+    m.distanceM = GetParam(dist)->Value() / 100.0;
+    m.levelDB = GetParam(level)->Value();
+    m.pan = GetParam(pan)->Value() / 100.0;
+    m.invert = invert >= 0 && GetParam(invert)->Bool();
+    return m;
+  };
+  cp.micA = micFrom(-1, kMicAType, kMicAPos, kMicADist, kMicALevel, kMicAPan, -1);
+  cp.micB = micFrom(kMicBOn, kMicBType, kMicBPos, kMicBDist, kMicBLevel, kMicBPan, kMicBInvert);
+  cp.roomLevelDB = GetParam(kRoomLevel)->Value();
+  cp.roomSize = GetParam(kRoomSize)->Value() / 10.0;
+  cp.width = GetParam(kRoomWidth)->Value() / 100.0;
+  cp.outputDB = GetParam(kCabOutput)->Value();
+  cp.lab3D = GetParam(kCabLab3D)->Bool();
+  cp.format = std::clamp(GetParam(kCabFormat)->Int(), 0, cab::kNumCabFormats - 1);
+  for (int m = 0; m < cab::kNumLabMics; m++)
+  {
+    cab::LabMic& lm = cp.lab[m];
+    lm.on = GetParam(LabMicParam(m, 0))->Bool();
+    lm.type = std::clamp(GetParam(LabMicParam(m, 1))->Int(), 0, cab::kNumMics - 1);
+    lm.x = GetParam(LabMicParam(m, 2))->Value() / 100.0;
+    lm.y = GetParam(LabMicParam(m, 3))->Value() / 100.0;
+    lm.z = GetParam(LabMicParam(m, 4))->Value() / 100.0;
+    lm.levelDB = GetParam(LabMicParam(m, 5))->Value();
+    lm.pan = GetParam(LabMicParam(m, 6))->Value() / 100.0;
+    lm.invert = GetParam(LabMicParam(m, 7))->Bool();
+    lm.cab = std::clamp(GetParam(kLabMicCabFirst + m)->Int(), 0, 1);
+  }
+  cp.dual = GetParam(kCabDual)->Int() == 1;
+  cp.format2 = std::clamp(GetParam(kCab2Format)->Int(), 0, cab::kNumCabFormats - 1);
+  cp.speaker2 = GetParam(kCab2Speaker)->Int();
+  cp.useIR2 = GetParam(kCab2SourceIR)->Bool();
+  return cp;
 }
 
 void NeuralAmpModeler::_RefreshCabLabControls(IGraphics* pGraphics)
@@ -6020,10 +7743,13 @@ void NeuralAmpModeler::_RefreshCabLabControls(IGraphics* pGraphics)
     return;
   if (auto* c = pGraphics->GetControlWithParamIdx(kCabSpeaker))
     c->SetDisabled(GetParam(kCabSource)->Bool());
+  // 1.59.0: in the SPEAKER LAB's 3D mode the classic Mic A / Mic B knobs do nothing.
+  const bool lab3D = GetParam(kCabLab3D)->Bool();
   const bool micB = GetParam(kMicBOn)->Bool();
+  for (int param : {kMicAType, kMicAPos, kMicADist, kMicALevel, kMicAPan, kMicBOn})
+    pGraphics->ForControlWithParam(param, [lab3D](IControl* c) { c->SetDisabled(lab3D); });
   for (int param : {kMicBType, kMicBPos, kMicBDist, kMicBLevel, kMicBPan, kMicBInvert})
-    if (auto* c = pGraphics->GetControlWithParamIdx(param))
-      c->SetDisabled(!micB);
+    pGraphics->ForControlWithParam(param, [lab3D, micB](IControl* c) { c->SetDisabled(lab3D || !micB); });
 }
 
 bool NeuralAmpModeler::_StageExtraCabIR(const int cab, const WDL_String& path)
@@ -6081,8 +7807,39 @@ bool NeuralAmpModeler::_StageCabLabIR(const WDL_String& path)
   mStateDirty = true;
 #endif
   if (auto* pGraphics = GetUI())
-    if (auto* label = pGraphics->GetControlWithTag(kCtrlTagCabLabIRName))
-      static_cast<IVLabelControl*>(label)->SetStr(mCabLabIRPath.get_filepart());
+    for (int tag : {(int)kCtrlTagCabLabIRName, (int)kCtrlTagCabLabIR1Name})
+      if (auto* label = pGraphics->GetControlWithTag(tag))
+        static_cast<IVLabelControl*>(label)->SetStr(mCabLabIRPath.get_filepart());
+  return true;
+}
+
+bool NeuralAmpModeler::_StageCabLabIR2(const WDL_String& path)
+{
+  std::unique_ptr<dsp::ImpulseResponse> ir;
+  if (path.GetLength())
+  {
+    try
+    {
+      ir = std::make_unique<FastImpulseResponse>(path.Get(), GetSampleRate());
+    }
+    catch (std::exception& e)
+    {
+      std::cerr << "Failed to load CAB LAB cab 2 IR: " << e.what() << std::endl;
+      return false;
+    }
+    if (ir->GetWavState() != dsp::wav::LoadReturnCode::SUCCESS)
+      return false;
+  }
+  mCabLabIR2Staged = false;
+  mStagedCabLabIR2 = std::move(ir);
+  mCabLabIR2Staged = true;
+  mCabLabIR2Path = path;
+#ifdef APP_API
+  mStateDirty = true;
+#endif
+  if (auto* pGraphics = GetUI())
+    if (auto* label = pGraphics->GetControlWithTag(kCtrlTagCabLabIR2Name))
+      static_cast<IVLabelControl*>(label)->SetStr(path.GetLength() ? mCabLabIR2Path.get_filepart() : "No IR loaded");
   return true;
 }
 
@@ -6106,9 +7863,10 @@ IRECT NeuralAmpModeler::_ComputeTubePopupCardArea(const IRECT& winBounds) const
 
 IRECT NeuralAmpModeler::_ComputeWidePopupCardArea(const IRECT& winBounds) const
 {
-  // The 1.44.0 pedals: a plain pedal's card, wide enough for up to seven controls in a row.
+  // The 1.44.0 pedals: a plain pedal's card, wide enough for up to seven controls in a row (1.66.0: eight,
+  // for TRACK GATE).
   return _LiftAboveStrip(
-    winBounds.GetCentredInside(std::min(winBounds.W() - 40.f, 680.f), std::min(winBounds.H() * 0.55f, 280.f)), winBounds);
+    winBounds.GetCentredInside(std::min(winBounds.W() - 40.f, 740.f), std::min(winBounds.H() * 0.55f, 280.f)), winBounds);
 }
 
 IRECT NeuralAmpModeler::_ComputeDynamicsPopupCardArea(const IRECT& winBounds) const
@@ -6140,7 +7898,8 @@ IRECT NeuralAmpModeler::_ComputeAmpPopupCardArea(const IRECT& winBounds) const
 {
   // std::clamp is UB if lo > hi -- guard against a window narrower/shorter than the minimum.
   const float w = std::clamp(mAmpPopupWidth, kAmpPopupMinWidth, std::max(kAmpPopupMinWidth, winBounds.W() - 16.f));
-  const float h = std::clamp(mAmpPopupHeight, kAmpPopupMinHeight, std::max(kAmpPopupMinHeight, winBounds.H() - 16.f));
+  // 1.70.2: +40 for the PACK dropdown's row under the model dropdown.
+  const float h = std::clamp(mAmpPopupHeight + 40.f, kAmpPopupMinHeight, std::max(kAmpPopupMinHeight, winBounds.H() - 16.f));
   const IRECT centered = winBounds.GetCentredInside(w, h);
   // Biased down from dead-center: the routing rack (AMP/pedal chips) sits in the upper portion of
   // the main page behind this popup, and pure centering ignores that, leaving the card's top edge
@@ -6173,12 +7932,21 @@ void NeuralAmpModeler::_SelectBlock(int blockId)
     return chaingrid::IsPedal(id) || id == kCabBlockId || id == kAmpBlockId || id == kLoopBlockId;
   };
   const bool wasOpen = isPopupBlock(mSelectedBlock);
+  if (blockId == kTubePedalIdx || blockId == chaingrid::kTubeLab2)
+    _SetUiLab(blockId == kTubePedalIdx ? 0 : 1);
+  // 1.67.0: TUBE LAB 2 shows the Tube Lab's controls (now bound to its params).
+  const int shownId = blockId == chaingrid::kTubeLab2 ? kTubePedalIdx : blockId;
   mSelectedBlock = blockId;
   const bool popupOpen = isPopupBlock(blockId);
   const bool isAmp = blockId == kAmpBlockId;
   // True only on the actual open transition (a fresh click), not when re-applying selection state
   // after a relayout/resize -- see the AnimateGrowFrom call below for why this matters.
   const bool justOpened = popupOpen && !wasOpen;
+  // 1.68.0: opening TUBE LAB or TUBE LAB 2 opens its chassis first (its X shows the knobs underneath).
+  if (justOpened && (blockId == kTubePedalIdx || blockId == chaingrid::kTubeLab2))
+    if (IGraphics* pGraphics = GetUI())
+      if (auto* page = pGraphics->GetControlWithTag(kCtrlTagTubeChassis))
+        page->Hide(false);
 
   // Detail controls (knobs/switch) show immediately, in step with the card/backdrop -- they used
   // to wait for AnimateGrowFrom's completion callback (deferred until the card finished zooming
@@ -6192,7 +7960,11 @@ void NeuralAmpModeler::_SelectBlock(int blockId)
   for (int i = 0; i < chaingrid::kNumIds; i++)
     for (auto* c : mPedalDetailControls[i])
       if (c)
-        c->Hide(blockId != i);
+        c->Hide(shownId != i);
+  for (int lab = 0; lab < 2; lab++)
+    for (auto* c : mLabOnly[lab])
+      if (c)
+        c->Hide(shownId != kTubePedalIdx || mUiLab != lab);
   for (auto* c : mCabDetailControls)
     if (c)
       c->Hide(blockId != kCabBlockId);
@@ -6213,14 +7985,14 @@ void NeuralAmpModeler::_SelectBlock(int blockId)
   {
     const IRECT winBounds = pGraphics->GetBounds();
     const IRECT cardArea = isAmp                      ? _ComputeAmpPopupCardArea(winBounds)
-                           : (blockId == kTubePedalIdx || blockId == kCabLabPedalIdx || blockId == chaingrid::kProEq)
+                           : (shownId == kTubePedalIdx || blockId == kCabLabPedalIdx || blockId == chaingrid::kProEq)
                              ? _ComputeTubePopupCardArea(winBounds)
                            : _IsDynamicsPedal(blockId) ? _ComputeDynamicsPopupCardArea(winBounds)
                            : _IsWidePedal(blockId) ? _ComputeWidePopupCardArea(winBounds)
                                                       : _ComputePedalPopupCardArea(winBounds);
     // Every card now ends above the strip, which stays live on top. With a big card open (Amp, Tube
     // Lab, CAB LAB, PRO EQ) an expanded strip drops to its small size to leave them room.
-    const bool bigCard = popupOpen && (isAmp || blockId == kTubePedalIdx || blockId == kCabLabPedalIdx
+    const bool bigCard = popupOpen && (isAmp || shownId == kTubePedalIdx || blockId == kCabLabPedalIdx
                                        || blockId == chaingrid::kProEq);
     for (auto& s : mSpecStripCtls)
       s.control->SetTargetAndDrawRECTs(bigCard ? s.shrunk : s.full);
@@ -6314,8 +8086,34 @@ void NeuralAmpModeler::_SelectBlock(int blockId)
       static_cast<NAMSlimOverlayBackdropControl*>(mBlockPopupBackdrop)->AnimateFadeIn();
   }
 
+  // 1.67.1: CAB LAB opens into the SPEAKER LAB.
+  if (justOpened && blockId == kCabLabPedalIdx)
+    _ShowSpeakerLab(true);
+
   if (auto* pGraphics = GetUI())
     pGraphics->SetAllControlsDirty();
+}
+
+void NeuralAmpModeler::_ShowSpeakerLab(bool show)
+{
+  // The page is what you hear: 3D on while it's the one shown, classic on the card.
+  if (GetParam(kCabLab3D)->Bool() != show)
+  {
+    const double v = show ? 1.0 : 0.0;
+    BeginInformHostOfParamChangeFromUI(kCabLab3D);
+    SendParameterValueFromUI(kCabLab3D, v);
+    EndInformHostOfParamChangeFromUI(kCabLab3D);
+    if (auto* ui = GetUI())
+      ui->ForControlWithParam(kCabLab3D, [v](IControl* c) { c->SetValueFromDelegate(v); });
+  }
+  if (auto* pGraphics = GetUI())
+  {
+    _RefreshCabLabControls(pGraphics);
+    if (auto* page = pGraphics->GetControlWithTag(kCtrlTagSpeakerLab))
+      page->Hide(!show);
+    pGraphics->SetAllControlsDirty();
+  }
+  _SpeakerLabChanged();
 }
 
 proeq::Params NeuralAmpModeler::_ReadEqParams(int firstBandParam, int firstExtParam, int trimParam, int outputParam,
@@ -6337,61 +8135,84 @@ proeq::Params NeuralAmpModeler::_ReadEqParams(int firstBandParam, int firstExtPa
   return p;
 }
 
-tube::TubeParams NeuralAmpModeler::_ReadTubeParams() const
+tube::TubeParams NeuralAmpModeler::_ReadTubeParams(int lab) const
 {
   tube::TubeParams params;
-  params.driveDB = GetParam(kTubeDrive)->Value();
-  params.biasV = GetParam(kTubeBias)->Value();
-  params.bloom = GetParam(kTubeBloom)->Value() / 10.0;
-  params.bright = GetParam(kTubeBright)->Value() / 10.0;
-  params.mix = GetParam(kTubeMix)->Value() / 10.0;
-  params.outputDB = GetParam(kTubeOutput)->Value();
-  params.circuit = GetParam(kTubeCircuit)->Bool();
-  auto sel = [this](int paramIdx) { return std::clamp(GetParam(paramIdx)->Int(), 0, 5); };
+  params.driveDB = GetParam(LabParam(lab, kTubeDrive))->Value();
+  params.biasV = GetParam(LabParam(lab, kTubeBias))->Value();
+  params.bloom = GetParam(LabParam(lab, kTubeBloom))->Value() / 10.0;
+  params.bright = GetParam(LabParam(lab, kTubeBright))->Value() / 10.0;
+  params.mix = GetParam(LabParam(lab, kTubeMix))->Value() / 10.0;
+  params.outputDB = GetParam(LabParam(lab, kTubeOutput))->Value();
+  params.circuit = GetParam(LabParam(lab, kTubeCircuit))->Bool();
+  auto sel = [this, lab](int paramIdx) { return std::clamp(GetParam(LabParam(lab, paramIdx))->Int(), 0, 5); };
   params.cathodeCap = sel(kTubeCathodeCap) > 0;
   params.cathodeCapUF = params.cathodeCap ? kTubeCathodeCapUF[sel(kTubeCathodeCap)] : 22.0;
   params.plateCapPF = kTubePlateCapPF[sel(kTubePlateCap)];
-  params.plateKOhm = GetParam(kTubePlate)->Value();
-  params.sag = GetParam(kTubeSagOn)->Bool();
-  params.sagSupplyKOhm = GetParam(kTubeSagSupply)->Value();
-  params.sagTimeS = GetParam(kTubeSagTime)->Value();
-  params.stage2 = GetParam(kTubeStage2)->Bool();
-  params.gain2 = GetParam(kTubeGain2)->Value() / 10.0;
-  params.bias2V = GetParam(kTubeBias2)->Value();
+  params.plateKOhm = GetParam(LabParam(lab, kTubePlate))->Value();
+  params.sag = GetParam(LabParam(lab, kTubeSagOn))->Bool();
+  params.sagSupplyKOhm = GetParam(LabParam(lab, kTubeSagSupply))->Value();
+  params.sagTimeS = GetParam(LabParam(lab, kTubeSagTime))->Value();
+  params.stage2 = GetParam(LabParam(lab, kTubeStage2))->Bool();
+  params.gain2 = GetParam(LabParam(lab, kTubeGain2))->Value() / 10.0;
+  params.bias2V = GetParam(LabParam(lab, kTubeBias2))->Value();
   params.cathodeCap2 = sel(kTubeCap2) > 0;
   params.cathodeCap2UF = params.cathodeCap2 ? kTubeCathodeCapUF[sel(kTubeCap2)] : 0.68;
   params.plateCap2PF = kTubePlateCapPF[sel(kTubePlateCap2)];
   params.coupleNF = kTubeCoupleNF[sel(kTubeCouple)];
-  params.powerAmp = GetParam(kTubePower)->Bool();
-  params.master = GetParam(kTubeMaster)->Value() / 10.0;
-  params.powerSag = GetParam(kTubePowerSag)->Value() / 10.0;
-  params.feedback = GetParam(kTubeFeedback)->Value() / 10.0;
-  params.presence = GetParam(kTubePresence)->Value() / 10.0;
-  params.sixL6 = GetParam(kTube6L6)->Bool();
-  params.speakerLoad = GetParam(kTubeSpeakerLoad)->Bool();
-  params.screenSquish = GetParam(kTubeScreenSquish)->Bool();
-  params.sharedSupply = GetParam(kTubeSharedSupply)->Bool();
-  params.otSaturation = GetParam(kTubeOTSaturation)->Bool();
-  params.coilHeat = GetParam(kTubeCoilHeat)->Bool();
-  params.feelDepth = GetParam(kTubeFeelDepth)->Value();
-  params.economy = GetParam(kTubeEconomy)->Bool();
-  params.touch = GetParam(kTubeTouch)->Value();
-  params.ripple = GetParam(kTubeRipple)->Bool();
-  params.rippleAmount = GetParam(kTubeRippleAmount)->Value();
-  params.rippleMix = GetParam(kTubeRippleMix)->Value() / 100.0;
-  params.cathodeFollower = GetParam(kTubeCathodeFollower)->Bool();
-  params.cathodeBias = GetParam(kTubeCathodeBias)->Bool();
-  params.speakerFeedback = GetParam(kTubeSpeakerFeedback)->Bool();
-  params.resonance = GetParam(kTubeResonance)->Value() / 10.0;
-  params.highQuality = GetParam(kTubeHighQuality)->Bool();
+  params.powerAmp = GetParam(LabParam(lab, kTubePower))->Bool();
+  params.master = GetParam(LabParam(lab, kTubeMaster))->Value() / 10.0;
+  params.powerSag = GetParam(LabParam(lab, kTubePowerSag))->Value() / 10.0;
+  params.feedback = GetParam(LabParam(lab, kTubeFeedback))->Value() / 10.0;
+  params.presence = GetParam(LabParam(lab, kTubePresence))->Value() / 10.0;
+  params.sixL6 = GetParam(LabParam(lab, kTube6L6))->Bool();
+  params.speakerLoad = GetParam(LabParam(lab, kTubeSpeakerLoad))->Bool();
+  params.screenSquish = GetParam(LabParam(lab, kTubeScreenSquish))->Bool();
+  params.sharedSupply = GetParam(LabParam(lab, kTubeSharedSupply))->Bool();
+  params.otSaturation = GetParam(LabParam(lab, kTubeOTSaturation))->Bool();
+  params.coilHeat = GetParam(LabParam(lab, kTubeCoilHeat))->Bool();
+  params.feelDepth = GetParam(LabParam(lab, kTubeFeelDepth))->Value();
+  params.economy = GetParam(LabParam(lab, kTubeEconomy))->Bool();
+  params.touch = GetParam(LabParam(lab, kTubeTouch))->Value();
+  params.ripple = GetParam(LabParam(lab, kTubeRipple))->Bool();
+  params.rippleAmount = GetParam(LabParam(lab, kTubeRippleAmount))->Value();
+  params.rippleMix = GetParam(LabParam(lab, kTubeRippleMix))->Value() / 100.0;
+  params.cathodeFollower = GetParam(LabParam(lab, kTubeCathodeFollower))->Bool();
+  params.cathodeBias = GetParam(LabParam(lab, kTubeCathodeBias))->Bool();
+  params.speakerFeedback = GetParam(LabParam(lab, kTubeSpeakerFeedback))->Bool();
+  params.resonance = GetParam(LabParam(lab, kTubeResonance))->Value() / 10.0;
+  params.highQuality = GetParam(LabParam(lab, kTubeHighQuality))->Bool();
+  params.mainsV = GetParam(LabParam(lab, kTubeVariac))->Value();
+  params.powerBias = GetParam(LabParam(lab, kTubeBiasPot))->Value() / 100.0;
+  params.preampAge = GetParam(LabParam(lab, kTubePreampAge))->Value() / 100.0;
+  params.powerAge = GetParam(LabParam(lab, kTubePowerAge))->Value() / 100.0;
+  params.canFail = GetParam(LabParam(lab, kTubeCanFail))->Bool();
+  params.quad = GetParam(LabParam(lab, kTubeQuad))->Bool(); // 1.68.0
+  params.capture = params.circuit && GetParam(LabParam(lab, kTubeCapture))->Bool();
   // With the REAL FEEL pedal in the chain, the switches act there instead (the Tube Lab's own fade
   // out, so they don't act twice).
-  if (_RealFeelPedalPlaced())
+  if (lab == 0 && _RealFeelPedalPlaced()) // (The pedal is TUBE LAB's)
     params.screenSquish = params.sharedSupply = params.otSaturation = params.coilHeat = false;
-  params.toneStack = std::clamp(GetParam(kTubeStack)->Int(), 0, 2);
-  params.bass = GetParam(kTubeBass)->Value() / 10.0;
-  params.mid = GetParam(kTubeMid)->Value() / 10.0;
-  params.treble = GetParam(kTubeTreble)->Value() / 10.0;
+  params.toneStack = std::clamp(GetParam(LabParam(lab, kTubeStack))->Int(), 0, 2);
+  params.bass = GetParam(LabParam(lab, kTubeBass))->Value() / 10.0;
+  params.mid = GetParam(LabParam(lab, kTubeMid))->Value() / 10.0;
+  params.treble = GetParam(LabParam(lab, kTubeTreble))->Value() / 10.0;
+  // 1.68.0: the chassis sockets (circuit engine only: the Classic engine has no stages to add to, and
+  // with the capture as the preamp there are no preamp tubes).
+  for (int k = 0; k < tube::kNumSockets; k++)
+  {
+    tube::SocketParams& s = params.socket[k];
+    auto get = [&](int field) { return GetParam(LabParam(lab, SocketParam(k, field))); };
+    s.role = params.circuit && !params.capture ? std::clamp(get(kSockRole)->Int(), 0, tube::kNumSocketRoles - 1)
+                                               : tube::kSocketOff;
+    s.tube = std::clamp(get(kSockTube)->Int(), 0, tube::kNumTubeTypes - 1);
+    s.gain = get(kSockGain)->Value() / 10.0;
+    s.biasV = get(kSockBias)->Value();
+    const int cap = std::clamp(get(kSockCap)->Int(), 0, 5);
+    s.cathodeCapUF = cap > 0 ? kTubeCathodeCapUF[cap] : 0.0;
+    s.plateCapPF = kTubePlateCapPF[std::clamp(get(kSockPlateCap)->Int(), 0, 5)];
+    s.coupleNF = kTubeCoupleNF[std::clamp(get(kSockCouple)->Int(), 0, 5)];
+  }
   return params;
 }
 
@@ -6485,7 +8306,7 @@ void NeuralAmpModeler::_UpdateTubeDebug()
   if (pGraphics)
     mTubeDebugVisible = visible; // With the editor closed, remember whether it was open
   const bool logging = mTubeLog.IsOpen();
-  const bool wanted = visible || logging;
+  const bool wanted = visible || logging || mTubeProbesAlways;
   const auto now = steady_clock::now();
   if (wanted && !mTubeProbe.Enabled())
     mTubeStatsLastArrived = now; // Give the first measurement time to arrive before saying "no audio"
@@ -6493,9 +8314,9 @@ void NeuralAmpModeler::_UpdateTubeDebug()
   if (!wanted)
     return;
 
-  const tube::TubeParams params = _ReadTubeParams();
-  const bool engaged = GetParam(kTubeEngaged)->Value() > 0.5;
-  const bool inChain = _ReadChainGrid().Placed(kTubePedalIdx);
+  const tube::TubeParams params = _ReadTubeParams(mUiLab);
+  const bool engaged = GetParam(_TP(kTubeEngaged))->Value() > 0.5;
+  const bool inChain = _ReadChainGrid().Placed(mUiLab == 0 ? kTubePedalIdx : chaingrid::kTubeLab2);
   tube::ProbeStats stats;
   if (mTubeProbe.TakeStats(stats))
   {
@@ -6533,6 +8354,7 @@ void NeuralAmpModeler::_UpdateTubeDebug()
                                 : std::string("Live: the last 0.25 s, updated 4 times a second.");
       page->Readout()->SetLines(tube::debug::Explain(shown, params, engaged), std::move(header));
       page->Map()->SetActivity(shown);
+      page->Bench()->SetStats(stats, params.circuit, params.powerAmp); // Live (quiet: the idle current)
     }
   }
   if (now >= mTubeStatsNextRequest)
@@ -6569,12 +8391,572 @@ void NeuralAmpModeler::_UpdateTubeDebug()
   const std::string app = tube::debug::Format(
     "%.1f kHz, %d-sample buffer (%.1f ms), plugin latency %d samples. Tube Lab: %s, %s, %dx oversampled.", sr / 1e3,
     block, 1e3 * block / std::max(sr, 1.0), GetLatency(), inChain ? "on the grid" : "NOT on the grid",
-    engaged ? "on" : "bypassed", mTubeStage[0].GetOversampling());
+    engaged ? "on" : "bypassed", _UiStages()[0].GetOversampling());
   const std::string log = logging
                             ? tube::debug::Format("CSV log: %d rows to %s", mTubeLog.Rows(), mTubeLog.Path().c_str())
                             : "CSV log off. Logs are saved in " + _TubeLogDir();
   page->SetStatus(app, log);
 }
 
+// 1.64.0: the Tube Lab is on the grid with the AMP block's capture as its preamp (circuit engine).
+bool NeuralAmpModeler::_TubeTakesCapture() const
+{
+  return GetParam(kTubeCapture)->Bool() && GetParam(kTubeCircuit)->Bool() && _ReadChainGrid().Placed(kTubePedalIdx);
+}
+
+// The PREAMP CHASSIS page (1.62.0): while it's open, the audio thread reports the glow levels, and
+// the page redraws when something it shows has changed -- at most every 40 ms.
+void NeuralAmpModeler::_UpdateChassis()
+{
+  IGraphics* pGraphics = GetUI();
+  auto* page = pGraphics ? dynamic_cast<IContainerBase*>(pGraphics->GetControlWithTag(kCtrlTagTubeChassis)) : nullptr;
+  const bool open = page && !page->IsHidden();
+  mChassisOpen.store(open, std::memory_order_relaxed);
+  if (!open)
+  {
+    mChassisSignature = -1.0;
+    return;
+  }
+  for (auto& [item, control] : mChassisFields)
+    if (control->IsHidden() != (item != mChassisSelected))
+      control->Hide(item != mChassisSelected);
+  const auto now = std::chrono::steady_clock::now();
+  if (now - mChassisLastDraw < std::chrono::milliseconds(40))
+    return;
+  // A signature of everything drawn: glow levels (to ~1 dB), the params, the power tubes.
+  double sig = mChassisSelected;
+  for (int i = 0; i < tube::TubeStage::kNumStageLevels; i++)
+    sig = sig * 1.3 + std::round(20.0 * std::log10(std::max(1e-6f, mUiStageLevel[i].load())));
+  for (int p : {kTubeVariac, kTubeBloom, kTubeBias, kTubeCathodeCap, kTubePlate, kTubePlateCap, kTubeCouple, kTubeGain2,
+                kTubeBias2, kTubeCap2, kTubePlateCap2, kTubeStage2, kTubeCathodeFollower, kTubePower, kTubeCircuit,
+                kTubeCanFail, kTube6L6, kTubeEngaged, kTubeCapture, kTubeDrive, kTubeBass, kTubeMid, kTubeTreble,
+                kTubeMaster, kTubePresence, kTubeSpeakerLoad, kTubeBiasPot, kTubePowerSag})
+    sig = sig * 1.1 + GetParam(_TP(p))->Value();
+  for (int p = kTubeChassisFirst; p <= kTubeChassisLast; p++) // 1.68.0: the sockets, the quad
+    sig = sig * 1.05 + GetParam(_TP(p))->Value();
+  for (int k = 0; k < 4; k++)
+    sig = sig * 1.7 + std::round(100.0 * mUiPowerLife[k].load()) + (mUiPowerDead[k].load() ? 1000.0 : 0.0)
+          + std::round(100.0 * mUiDissRatio[k].load());
+  if (sig == mChassisSignature)
+    return;
+  mChassisSignature = sig;
+  mChassisLastDraw = now;
+  for (int i = 0; i < page->NChildren(); i++)
+  {
+    IControl* c = page->GetChild(i);
+    if (dynamic_cast<NAMTubeChassisControl*>(c) || dynamic_cast<NAMPowerTubeStatusControl*>(c)
+        || dynamic_cast<NAMDynamicTextControl*>(c) || dynamic_cast<NAMChassisLinksControl*>(c))
+      c->SetDirty(false);
+  }
+}
+
+// 1.68.0: the chassis's links (chassis::Link): the page closes and the other one opens.
+void NeuralAmpModeler::_ChassisGo(int link)
+{
+  IGraphics* pGraphics = GetUI();
+  if (!pGraphics)
+    return;
+  const int labBlock = mUiLab == 0 ? kTubePedalIdx : chaingrid::kTubeLab2;
+  switch (link)
+  {
+    case chassis::kLinkPreamp:
+    case chassis::kLinkPowerAmp:
+    case chassis::kLinkFeel:
+      // The Tube Lab's popup (for the lab shown) on that tab. It's normally open under the chassis.
+      if (mSelectedBlock != labBlock)
+        _SelectBlock(labBlock);
+      mTubeTab = link - chassis::kLinkPreamp;
+      _ApplyTubeTab();
+      break;
+    case chassis::kLinkDebug:
+      if (auto* debug = dynamic_cast<NAMTubeDebugPageControl*>(pGraphics->GetControlWithTag(kCtrlTagTubeDebug)))
+      {
+        debug->Hide(false);
+        if (debug->Scope() && debug->Map())
+        {
+          debug->Scope()->SetChannel(chassis::ProbeOf(mChassisSelected), false);
+          debug->Map()->SetSelected(mTubeScopeSettings.chA, mTubeScopeSettings.chB);
+        }
+      }
+      break;
+    case chassis::kLinkSpeakerLab: _ShowSpeakerLab(true); break;
+    case chassis::kLinkCapture:
+      // TUBE LAB uses the AMP block's capture: open it. TUBE LAB 2's own is loaded on its popup (LOAD CAPTURE).
+      if (mUiLab == 0)
+        _SelectBlock(kAmpBlockId);
+      else if (mSelectedBlock != labBlock)
+        _SelectBlock(labBlock);
+      break;
+    default: break;
+  }
+  // (Last: opening the Tube Lab's popup above opens the chassis too.)
+  if (auto* page = pGraphics->GetControlWithTag(kCtrlTagTubeChassis))
+    page->Hide(true);
+  pGraphics->SetAllControlsDirty();
+}
+
+// The PEDALS drawer (1.60.0): its panel shows or hides, and every chip re-reads where it is.
+void NeuralAmpModeler::_SetPedalDrawerOpen(bool open)
+{
+  mPedalDrawerOpen = open;
+  if (IGraphics* pGraphics = GetUI())
+  {
+    if (auto* drawer = pGraphics->GetControlWithTag(kCtrlTagPedalDrawer))
+      drawer->Hide(!open);
+    pGraphics->ForControlInGroup("UNDER_DRAWER", [open](IControl* ctrl) { ctrl->Hide(open); });
+    pGraphics->SetAllControlsDirty();
+  }
+}
+
+// SPEAKER LAB (1.59.0): redraw the views, readout and tabs, and recompute the plot -- only after a
+// change (they never animate).
+void NeuralAmpModeler::_SpeakerLabChanged()
+{
+  IGraphics* pGraphics = GetUI();
+  if (!pGraphics)
+    return;
+  auto* page = dynamic_cast<IContainerBase*>(pGraphics->GetControlWithTag(kCtrlTagSpeakerLab));
+  if (!page)
+    return; // (Hidden, it's marked anyway: opening it then draws the current state.)
+  for (int i = 0; i < page->NChildren(); i++)
+  {
+    IControl* c = page->GetChild(i);
+    if (auto* plot = dynamic_cast<NAMSpeakerLabResponseControl*>(c))
+      plot->MarkStale();
+    else if (dynamic_cast<NAMSpeakerLabViewControl*>(c) || dynamic_cast<NAMSpeakerLabTabsControl*>(c)
+             || dynamic_cast<NAMSpeakerLabReadoutControl*>(c))
+      c->SetDirty(false);
+  }
+}
+
+// A drag on one of the views: the mic's X, Y, Z params (cm), as host-visible edits.
+void NeuralAmpModeler::_SetLabMicPosition(int mic, double x, double y, double z)
+{
+  const double cm[3] = {100.0 * x, 100.0 * y, 100.0 * z};
+  IGraphics* pGraphics = GetUI();
+  for (int f = 0; f < 3; f++)
+  {
+    const int param = LabMicParam(mic, 2 + f);
+    if (std::fabs(GetParam(param)->Value() - cm[f]) < 1e-9)
+      continue;
+    const double normalized = GetParam(param)->ToNormalized(cm[f]);
+    BeginInformHostOfParamChangeFromUI(param);
+    SendParameterValueFromUI(param, normalized);
+    EndInformHostOfParamChangeFromUI(param);
+    if (pGraphics)
+      pGraphics->ForControlWithParam(param, [normalized](IControl* c) { c->SetValueFromDelegate(normalized); });
+  }
+}
+
+// Each mic keeps its offset from its nearest cone, moved to the matching cone of the new cab (the
+// last one if the new cab has fewer).
+void NeuralAmpModeler::_RemapLabMicsForFormat(int cab, int oldFormat, int newFormat, int onlyMic)
+{
+  const cab::CabFormat& from = cab::GetCabFormat(oldFormat);
+  const cab::CabFormat& to = cab::GetCabFormat(newFormat);
+  const cab::CabLabParams p = _ReadCabLabParams();
+  for (int m = 0; m < cab::kNumLabMics; m++)
+  {
+    const cab::LabMic& lm = p.lab[m];
+    if (onlyMic >= 0 ? m != onlyMic : std::clamp(lm.cab, 0, 1) != cab)
+      continue; // (Only the mics on the cab that changed)
+    int k = 0;
+    cab::LabProximityDB(lm, from, &k);
+    const int k2 = std::min(k, to.numCones - 1);
+    const double x = to.cx[k2] + (lm.x - from.cx[k]), y = to.cy[k2] + (lm.y - from.cy[k]);
+    _SetLabMicPosition(m, std::clamp(x, -0.5, 0.5), std::clamp(y, -0.5, 0.5), lm.z);
+  }
+}
+
+// The OUTPUT page's meters (1.58.0): only while it's open; the audio thread measures only then too.
+void NeuralAmpModeler::_UpdateOutputPage()
+{
+  IGraphics* pGraphics = GetUI();
+  IControl* page = pGraphics ? pGraphics->GetControlWithTag(kCtrlTagOutputPage) : nullptr;
+  const bool open = page && !page->IsHidden();
+  mOutputPageOpen.store(open, std::memory_order_relaxed);
+  if (!open)
+    return;
+  const float gr = mLimiterGRShown.exchange(0.f, std::memory_order_relaxed);
+  if (auto* c = pGraphics->GetControlWithTag(kCtrlTagLimiterGR))
+    c->As<NAMOutputMeterControl>()->SetReading(gr, GetParam(kOutputLimiter)->Bool());
+  if (auto* c = pGraphics->GetControlWithTag(kCtrlTagOutCorrelation))
+    c->As<NAMOutputMeterControl>()->SetReading(mOutCorrelation.load(std::memory_order_relaxed), true);
+}
+
 // HACK
+// 1.70.0 PACK PICKER ==========================================================
+
+// 1.70.1: the pack scan log, next to the app / plug-in binary ("pack-scan.log"); if that folder can't
+// be written, %LOCALAPPDATA%\GriffinAmplification instead. Appends; trimmed when it passes 512 KB.
+static void _PackLog(const std::string& text)
+{
+  std::string path;
+#ifdef _WIN32
+  HMODULE mod = nullptr;
+  if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCWSTR>(&_PackLog), &mod))
+  {
+    wchar_t buf[MAX_PATH * 2] = {0};
+    if (GetModuleFileNameW(mod, buf, MAX_PATH * 2))
+      path = griffinpack::U8(std::filesystem::path(buf).parent_path() / "pack-scan.log");
+  }
+#endif
+  auto write = [&](const std::string& p) {
+    if (p.empty())
+      return false;
+    std::error_code ec;
+    const auto fp = std::filesystem::u8path(p);
+    if (std::filesystem::exists(fp, ec) && std::filesystem::file_size(fp, ec) > 512 * 1024)
+      std::filesystem::remove(fp, ec);
+    std::ofstream f(fp, std::ios::app);
+    if (!f.good())
+      return false;
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    char stamp[64];
+    std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    f << "[" << stamp << "] v" << PLUG_VERSION_STR << " " << text << (text.size() && text.back() == '\n' ? "" : "\n");
+    return f.good();
+  };
+  if (!write(path))
+    if (const char* base = std::getenv("LOCALAPPDATA"))
+      write(std::string(base) + "\\" BUNDLE_NAME "\\pack-scan.log");
+}
+
+void NeuralAmpModeler::_PackOpenFolder(const std::string& folderIn)
+{
+  namespace fs = std::filesystem;
+  std::string folder = folderIn;
+  while (folder.size() > 3 && (folder.back() == '\\' || folder.back() == '/'))
+    folder.pop_back();
+  std::error_code ec;
+  // A capture (or any file) picked: use its folder. A .zip: refuse, it needs unzipping.
+  if (griffinpack::IsZipPath(folder))
+  {
+    // 1.70.3: open it directly: unpack (or reuse) its cache on a worker thread; _PackPollZip opens it.
+    std::string zip = folder;
+    const auto lz = griffinpack::Lower(zip);
+    const auto at = lz.find(".zip");
+    if (at != std::string::npos)
+      zip = zip.substr(0, at + 4); // (A folder "inside" a zip, from the folder chooser: the zip itself.)
+    if (!mPackUnpacking.empty())
+    {
+      _ShowMessageBox(GetUI(), ("Still unpacking " + mPackUnpacking + "...").c_str(), "PACK", kMB_OK);
+      return;
+    }
+    mPackUnpacking = griffinpack::U8(fs::u8path(zip).filename());
+    mPackZipFuture = std::async(std::launch::async, [zip]() {
+      PackZipJob job;
+      job.zip = zip;
+      const auto t0 = std::chrono::steady_clock::now();
+      try
+      {
+        job.dir = griffinpack::ResolveZip(zip, job.err, job.log, job.reused);
+      }
+      catch (const std::exception& e)
+      {
+        job.err = e.what();
+      }
+      job.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      return job;
+    });
+    _PackLog("unpacking (worker thread): " + zip);
+    if (GetUI())
+      GetUI()->SetAllControlsDirty();
+    return;
+  }
+  if (fs::is_regular_file(fs::u8path(folder), ec))
+    folder = griffinpack::U8(fs::u8path(folder).parent_path());
+  griffinpack::Pack pack = griffinpack::Scan(folder);
+  _PackLog(pack.log);
+  if (pack.Empty())
+  {
+    std::string msg = "No .nam captures in:\n\n" + folder + "\n\n(or in its subfolders).";
+    if (!pack.zips.empty())
+      msg += "\n\nIt has " + std::to_string(pack.zips.size()) + " .zip file(s), e.g.\n"
+             + griffinpack::U8(fs::u8path(pack.zips[0]).filename())
+             + "\nUnzip a pack first (right-click > Extract All...), then choose the unzipped folder.";
+    _ShowMessageBox(GetUI(), msg.c_str(), "PACK", kMB_OK);
+    return;
+  }
+  mPack = std::move(pack);
+  mPackZipPath = mPackOpeningZip; // 1.70.3: "" for a plain folder
+  mPackOpeningZip.clear();
+  mPackGroup.clear();
+  mPackKey.clear();
+  mPackSize.clear();
+  mPackIRChoice.clear();
+  mPackHasRef = false;
+  mPackRefLoudness = 0.0;
+  // If the loaded model is in this pack, show it as picked (no reload).
+  if (const griffinpack::Capture* c = mPack.FindPath(mNAMPath.Get()))
+  {
+    mPackGroup = c->group;
+    mPackKey = c->key;
+    mPackSize = c->size;
+  }
+#ifdef APP_API
+  mStateDirty = true;
+#endif
+  if (GetUI())
+    GetUI()->SetAllControlsDirty();
+}
+void NeuralAmpModeler::_PackPollZip()
+{
+  if (!mPackZipFuture.valid()
+      || mPackZipFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+    return;
+  PackZipJob job = mPackZipFuture.get();
+  mPackUnpacking.clear();
+  char ms[64];
+  snprintf(ms, sizeof(ms), "%.0f ms", job.ms);
+  _PackLog("zip " + job.zip + (job.reused ? " (cache reused, " : " (unpacked, ") + ms + ")\n" + job.log
+           + (job.err.empty() ? "" : "  error: " + job.err));
+  if (job.dir.empty())
+  {
+    _ShowMessageBox(GetUI(), ("Couldn't open the zip:\n\n" + job.zip + "\n\n" + job.err).c_str(), "PACK", kMB_OK);
+    if (GetUI())
+      GetUI()->SetAllControlsDirty();
+    return;
+  }
+  mPackOpeningZip = job.zip;
+  _PackOpenFolder(job.dir);
+  mPackOpeningZip.clear();
+}
+std::string NeuralAmpModeler::_PackIRPath() const
+{
+  if (!mPackIRChoice.empty())
+    for (const auto& ir : mPack.irs)
+      if (ir == mPackIRChoice)
+        return ir;
+  return mPack.defaultIR;
+}
+
+void NeuralAmpModeler::_PackSelect(const griffinpack::Capture* c)
+{
+  if (!c)
+    return;
+  // Level match: the first capture picked in this pack sets the reference; the rest are trimmed to it.
+  if (!mPackHasRef && c->hasLoudness)
+  {
+    mPackHasRef = true;
+    mPackRefLoudness = c->loudness;
+  }
+  mPackTrimDB = (mPackHasRef && c->hasLoudness) ? mPackRefLoudness - c->loudness : 0.0;
+  // Latest wins: staging replaces whatever was staged and not yet swapped in.
+  mPackStaging = true;
+  const std::string msg = _StageModel(WDL_String(c->path.c_str()));
+  mPackStaging = false;
+  if (msg.size())
+  {
+    _ShowMessageBox(GetUI(), ("Failed to load the capture:\n\n" + msg).c_str(), "PACK", kMB_OK);
+    return;
+  }
+  mPackGroup = c->group;
+  mPackKey = c->key;
+  mPackSize = c->size;
+  // The pack's IR, for amp-only captures -- only into an empty cab slot, or one the pack filled itself.
+  const std::string ir = _PackIRPath();
+  if (mPackAutoIR && c->ampOnly && !ir.empty() && ir != std::string(mIRPath.Get())
+      && (mIRPath.GetLength() == 0 || mPackIRSetPath == mIRPath.Get()))
+  {
+    if (_StageIR(WDL_String(ir.c_str())) == dsp::wav::LoadReturnCode::SUCCESS)
+      mPackIRSetPath = ir;
+  }
+  if (GetUI())
+    GetUI()->SetAllControlsDirty();
+}
+
+std::string NeuralAmpModeler::_PackLabel(int which) const
+{
+  namespace fs = std::filesystem;
+  switch (which)
+  {
+    case 0:
+    {
+      // 1.70.2: the dropdown's text: the pack, and the capture picked from it.
+      if (!mPackUnpacking.empty())
+        return "Unpacking " + mPackUnpacking + "...";
+      if (mPack.Empty())
+        return "Select pack...";
+      const std::string pack = griffinpack::U8(fs::u8path(mPackZipPath.empty() ? mPack.folder : mPackZipPath).filename());
+      const griffinpack::Capture* c = mPackKey.empty() ? nullptr : mPack.Find(mPackGroup, mPackKey, mPackSize);
+      if (!c)
+        return pack + ": pick a capture";
+      std::string s = mPackKey + (mPackSize.empty() ? "" : " - " + mPackSize);
+      if (c->path != mNAMPath.Get())
+        s += " (not loaded)";
+      return s;
+    }
+    case 1:
+    {
+      if (mPack.Empty())
+        return "capture";
+      const griffinpack::Capture* c = mPack.Find(mPackGroup, mPackKey, mPackSize);
+      if (!c || mPackKey.empty())
+        return "pick a capture";
+      return c->path == mNAMPath.Get() ? mPackKey : mPackKey + " (not loaded)";
+    }
+    case 2: return mPackSize.empty() ? std::string("size") : mPackSize;
+    case 3:
+      if (mPack.irs.empty())
+        return "IR: none";
+      return mPackAutoIR ? "IR: auto" : "IR: off";
+    default: return "";
+  }
+}
+
+void NeuralAmpModeler::_PackShowMenu(int which, IControl* pCaller)
+{
+  // 1.70.2: one menu: [the pack's captures] / packs in the library / choose a folder / rescan / IR.
+  IGraphics* ui = pCaller ? pCaller->GetUI() : nullptr;
+  if (!ui)
+    return;
+  namespace fs = std::filesystem;
+  mPackMenu.Clear();
+  mPackMenuTargets.clear();
+  auto add = [&](IPopupMenu& menu, const std::string& text, bool checked, std::function<void()> f) {
+    IPopupMenu::Item* item = menu.AddItem(text.c_str());
+    item->SetChecked(checked);
+    mPackMenuTargets.push_back({item, std::move(f)});
+  };
+  // The library's capture folders (same roots as the AMPS button).
+  const std::string griffinDir = GriffinLibraryDir();
+  std::vector<std::pair<std::string, int>> folders;
+  std::vector<std::string> zips;
+  for (const char* root : {"IRs and Amp Profiles (copied)", "tone"})
+    griffinpack::FindPackFolders(griffinDir + root, folders, zips);
+  auto addLibrary = [&](IPopupMenu& menu) {
+    for (const auto& f : folders)
+    {
+      const std::string folder = f.first;
+      const std::string name = folder.size() > griffinDir.size() ? folder.substr(griffinDir.size()) : folder;
+      add(menu, name + "  (" + std::to_string(f.second) + ")", folder == mPack.folder,
+          [this, folder]() { _PackOpenFolder(folder); });
+    }
+    for (const auto& z : zips)
+    {
+      const std::string zip = z;
+      const std::string zname = z.size() > griffinDir.size() ? z.substr(griffinDir.size()) : z;
+      add(menu, zname, z == mPackZipPath,
+          [this, zip]() { _PackOpenFolder(zip); });
+    }
+    if (folders.empty() && zips.empty())
+      add(menu, "(no capture folders found in the library)", false, []() {});
+  };
+
+  if (!mPack.Empty())
+  {
+    // The pack's captures: a submenu per group (when there's more than one), and per capture with more
+    // than one size, a submenu of its sizes.
+    const auto groups = mPack.Groups();
+    for (const auto& g : groups)
+    {
+      IPopupMenu* gsub = groups.size() > 1 ? new IPopupMenu() : nullptr;
+      IPopupMenu& gmenu = gsub ? *gsub : mPackMenu;
+      for (const auto& key : g.second)
+      {
+        const auto sizes = mPack.Sizes(g.first, key);
+        const bool picked = g.first == mPackGroup && key == mPackKey;
+        if (sizes.size() <= 1)
+        {
+          const std::string path = sizes.empty() ? std::string() : sizes[0]->path;
+          add(gmenu, key + (sizes.size() == 1 && !sizes[0]->size.empty() ? "  - " + sizes[0]->size : ""), picked,
+              [this, path]() { _PackSelect(mPack.FindPath(path)); });
+        }
+        else
+        {
+          IPopupMenu* ssub = new IPopupMenu();
+          for (const griffinpack::Capture* c : sizes)
+          {
+            const std::string path = c->path;
+            add(*ssub, c->size.empty() ? std::string("(no size)") : c->size, picked && c->size == mPackSize,
+                [this, path]() { _PackSelect(mPack.FindPath(path)); });
+          }
+          IPopupMenu::Item* item = gmenu.AddItem((key + (picked ? "  *" : "")).c_str(), ssub);
+          (void)item;
+        }
+      }
+      if (gsub)
+        mPackMenu.AddItem(g.first.c_str(), gsub);
+    }
+    mPackMenu.AddSeparator();
+    IPopupMenu* lib = new IPopupMenu();
+    addLibrary(*lib);
+    mPackMenu.AddItem("Packs in your library", lib);
+  }
+  else
+    addLibrary(mPackMenu); // No pack yet: the library's packs, right at the top.
+
+  mPackMenu.AddSeparator();
+  add(mPackMenu, "Choose a pack folder...", false, [this]() {
+    IGraphics* g = GetUI();
+    if (!g)
+      return;
+    WDL_String dir(mPack.folder.c_str());
+    g->PromptForDirectory(dir, [this](const WDL_String& fileName, const WDL_String& path) {
+      const std::string d = path.GetLength() ? path.Get() : fileName.Get();
+      _PackLog("folder chooser returned: \"" + d + "\"");
+      if (d.empty())
+      {
+        _ShowMessageBox(GetUI(),
+                        "No folder came back from the chooser.\n\nIf you picked a .zip, unzip it first (right-click > "
+                        "Extract All...), then choose the unzipped folder.",
+                        "PACK", kMB_OK);
+        return;
+      }
+      _PackOpenFolder(d);
+    });
+  });
+  add(mPackMenu, "Choose a capture file (its folder becomes the pack)...", false, [this]() {
+    IGraphics* g = GetUI();
+    if (!g)
+      return;
+    WDL_String file, path(mPack.folder.c_str());
+    g->PromptForFile(file, path, EFileAction::Open, "nam zip", [this](const WDL_String& fileName, const WDL_String& p) {
+      _PackLog("file chooser returned: \"" + std::string(fileName.Get()) + "\"");
+      if (fileName.GetLength())
+        _PackOpenFolder(fileName.Get());
+    });
+  });
+  if (!mPack.Empty())
+  {
+    add(mPackMenu, "Rescan this pack", false, [this]() { _PackOpenFolder(mPack.folder); });
+    IPopupMenu* irs = new IPopupMenu();
+    add(*irs, "Auto-pair the pack's IR (amp-only captures)", mPackAutoIR, [this]() { mPackAutoIR = !mPackAutoIR; });
+    const std::string current = _PackIRPath();
+    for (const auto& ir : mPack.irs)
+      add(*irs, griffinpack::U8(fs::u8path(ir).filename()), ir == current, [this, ir]() {
+        mPackIRChoice = ir;
+        const griffinpack::Capture* c = mPack.Find(mPackGroup, mPackKey, mPackSize);
+        if (mPackAutoIR && c && c->ampOnly && (mIRPath.GetLength() == 0 || mPackIRSetPath == mIRPath.Get()))
+          if (_StageIR(WDL_String(ir.c_str())) == dsp::wav::LoadReturnCode::SUCCESS)
+            mPackIRSetPath = ir;
+      });
+    mPackMenu.AddItem(mPack.irs.empty() ? "Cab IR (none in this pack)" : "Cab IR", irs);
+  }
+  add(mPackMenu, "Clear pack cache", false, [this]() {
+    const int n = griffinpack::ClearPackCache(mPackZipPath.empty() ? std::string() : mPack.folder);
+    _PackLog("cache cleared: " + std::to_string(n) + " pack(s) removed");
+    _ShowMessageBox(GetUI(), ("Removed " + std::to_string(n) + " unpacked pack(s) from the cache.\n\nYour zips are untouched; "
+                              "a zip is unpacked again the next time you open it.").c_str(), "PACK", kMB_OK);
+  });
+  ui->CreatePopupMenu(*pCaller, mPackMenu, pCaller->GetRECT());
+}
+void NeuralAmpModeler::_PackOnMenu(IPopupMenu* pMenu)
+{
+  const IPopupMenu::Item* item = pMenu ? pMenu->GetChosenItem() : nullptr;
+  if (!item)
+    return;
+  for (auto& target : mPackMenuTargets)
+    if (target.first == item)
+    {
+      auto f = target.second;
+      f();
+      break;
+    }
+  if (GetUI())
+    GetUI()->SetAllControlsDirty();
+}
 #include "Unserialization.cpp"
+#include "PackZip.cpp" // 1.70.3

@@ -26,6 +26,9 @@
 // * Shared supply (1.33.0, a Real Feel switch): in a real amp the preamp's B+ is the far end of the
 //   power amp's supply, through decoupling RC filters, so hard power-amp hits sag the preamp too.
 //   TubeStage feeds the power amp's screen-node voltage (relative to rest) into SetSupplyTarget.
+// * Bench (1.58.0, TubeBench.h): the Variac reaches the stage through SetSupplyTarget too; tube age
+//   and the heaters scale its perveance and put a soft emission ceiling on its plate current
+//   (SetBench). Rk stays the part the Bias knob picked, so a worn tube finds its own new bias.
 //
 // Solved with modified nodal analysis: capacitors as trapezoidal companion models, the triode as
 // a nonlinear 3-terminal element, Newton-Raphson on the 5 unknown node voltages each sample,
@@ -34,6 +37,8 @@
 
 #include <algorithm>
 #include <cmath>
+
+#include "TubeBench.h"
 
 namespace tube
 {
@@ -51,12 +56,69 @@ struct Dempwolf12AX7
   static constexpr double Ig0 = 8.025e-8;
 };
 
+// 1.68.0: the triodes the chassis's extra sockets take. Dempwolf & Zoelzer fitted only the 12AX7, so
+// the others keep its curve shape (C, gamma) and grid diode, with their own amplification factor mu
+// and G set so the plate current matches the datasheet at one typical operating point (Va, Vg, Ia).
+struct TriodeModel
+{
+  double G, C, mu, gamma, Gg, Cg, xi, Ig0;
+};
+
+enum TubeType
+{
+  k12AX7 = 0,
+  k12AT7, // ECC81: mu 60, ~4x the 12AX7's current -- hotter, less gain, more headroom
+  k12AU7, // ECC82: mu 17, low gain, a lot of headroom: the clean-boost / driver tube
+  k5751, // mu 70: a 12AX7 with ~30% less gain, smoother breakup
+  kNumTubeTypes
+};
+
+inline TriodeModel Model12AX7()
+{
+  using T = Dempwolf12AX7;
+  return {T::G, T::C, T::mu, T::gamma, T::Gg, T::Cg, T::xi, T::Ig0};
+}
+
+// The 12AX7 model with another mu, and G fitted to Ia at (Va, Vg).
+inline TriodeModel FitTriode(double mu, double va, double vg, double ia)
+{
+  TriodeModel m = Model12AX7();
+  m.mu = mu;
+  const double x = m.C * (va / mu + vg);
+  const double s = (x > 30.0 ? x : std::log1p(std::exp(x))) / m.C;
+  m.G = ia / std::pow(s, m.gamma);
+  return m;
+}
+
+inline const TriodeModel& GetTriodeModel(int type)
+{
+  static const TriodeModel models[kNumTubeTypes] = {
+    Model12AX7(),
+    FitTriode(60.0, 250.0, -2.0, 10e-3), // RCA 12AT7: 250 V, -2 V, 10 mA
+    FitTriode(17.0, 250.0, -8.5, 10.5e-3), // RCA 12AU7: 250 V, -8.5 V, 10.5 mA
+    FitTriode(70.0, 250.0, -3.0, 1.0e-3)}; // GE 5751: 250 V, -3 V, 1.0 mA
+  return models[std::clamp(type, 0, kNumTubeTypes - 1)];
+}
+
 struct TriodeCurrents
 {
   double ik = 0.0; // Cathode current (plate + grid)
   double ig = 0.0; // Grid current
   double dikDvgk = 0.0, dikDvpk = 0.0, digDvgk = 0.0;
 };
+
+// Bench (TubeBench.h): a worn or under-heated tube's plate current -- perveance times the healthy
+// one, under the emission ceiling. The grid current is left as it is.
+inline void ApplyBench(TriodeCurrents& t, const bench::State& s)
+{
+  const double ip = s.perveance * (t.ik - t.ig);
+  double slope = 1.0;
+  const double limited = s.invCeiling > 0.0 ? bench::Ceiling(ip, s.invCeiling, slope) : ip;
+  const double k = s.perveance * slope;
+  t.ik = limited + t.ig;
+  t.dikDvgk = k * (t.dikDvgk - t.digDvgk) + t.digDvgk;
+  t.dikDvpk *= k;
+}
 
 inline double Softplus(double x) { return x > 30.0 ? x : std::log1p(std::exp(x)); }
 inline double Sigmoid(double x) { return 1.0 / (1.0 + std::exp(-x)); }
@@ -91,28 +153,33 @@ inline void SoftplusPow(double x, double c, double p, double& value, double& der
 
 // Ik = G * (ln(1 + e^(C (Vpk/mu + Vgk))) / C)^gamma, Ig = Gg * (ln(1 + e^(Cg Vgk)) / Cg)^xi + Ig0.
 // Exact (slow) version; Triode() below reads the same functions from lookup tables.
-inline TriodeCurrents TriodeExact(double vgk, double vpk)
+inline TriodeCurrents TriodeExact(const TriodeModel& T, double vgk, double vpk)
 {
-  using T = Dempwolf12AX7;
   TriodeCurrents r;
   double v, d;
-  SoftplusPow(T::C * (vpk / T::mu + vgk), T::C, T::gamma, v, d);
-  r.ik = T::G * v;
-  r.dikDvgk = T::G * d;
-  r.dikDvpk = r.dikDvgk / T::mu;
-  const double xg = T::Cg * vgk;
+  SoftplusPow(T.C * (vpk / T.mu + vgk), T.C, T.gamma, v, d);
+  r.ik = T.G * v;
+  r.dikDvgk = T.G * d;
+  r.dikDvpk = r.dikDvgk / T.mu;
+  const double xg = T.Cg * vgk;
   if (xg < -25.0) // Grid far below conduction: (e^xg / Cg)^xi is < 1e-14 A; only Ig0 is left.
   {
-    r.ig = T::Ig0;
+    r.ig = T.Ig0;
     r.digDvgk = 0.0;
   }
   else
   {
-    SoftplusPow(xg, T::Cg, T::xi, v, d);
-    r.ig = T::Gg * v + T::Ig0;
-    r.digDvgk = T::Gg * d;
+    SoftplusPow(xg, T.Cg, T.xi, v, d);
+    r.ig = T.Gg * v + T.Ig0;
+    r.digDvgk = T.Gg * d;
   }
   return r;
+}
+inline TriodeCurrents TriodeExact(double vgk, double vpk)
+{
+  using T = Dempwolf12AX7;
+  static constexpr TriodeModel kModel = {T::G, T::C, T::mu, T::gamma, T::Gg, T::Cg, T::xi, T::Ig0};
+  return TriodeExact(kModel, vgk, vpk);
 }
 
 // Lookup tables for the triode. In the Dempwolf model the cathode current depends on a single
@@ -122,11 +189,22 @@ inline TriodeCurrents TriodeExact(double vgk, double vpk)
 class TriodeTables
 {
 public:
-  static const TriodeTables& Get()
+  static const TriodeTables& Get() { return For(k12AX7); }
+  // 1.68.0: one set per tube type (TubeType), each built the first time it's asked for.
+  static const TriodeTables& For(int type)
   {
-    static const TriodeTables tables; // Built once, thread-safe (C++11 static init), then read-only.
-    return tables;
+    switch (std::clamp(type, 0, kNumTubeTypes - 1))
+    {
+      // Built once, thread-safe (C++11 static init), then read-only. Heap-allocated: 512 kB each.
+      case k12AT7: { static const TriodeTables* t = new TriodeTables(GetTriodeModel(k12AT7)); return *t; }
+      case k12AU7: { static const TriodeTables* t = new TriodeTables(GetTriodeModel(k12AU7)); return *t; }
+      case k5751: { static const TriodeTables* t = new TriodeTables(GetTriodeModel(k5751)); return *t; }
+      default: { static const TriodeTables* t = new TriodeTables(GetTriodeModel(k12AX7)); return *t; }
+    }
   }
+
+  const TriodeModel& Model() const { return mModel; }
+  double InvMu() const { return mInvMu; }
 
   // Returns false outside the tabulated range (the caller then uses the exact model).
   bool Cathode(double u, double& ik, double& dik) const { return _Read(mIk, mDik, kUMin, kUMax, u, ik, dik); }
@@ -134,7 +212,7 @@ public:
   {
     if (vgk < kGMin)
     {
-      ig = Dempwolf12AX7::Ig0;
+      ig = mModel.Ig0;
       dig = 0.0;
       return true;
     }
@@ -146,19 +224,20 @@ private:
   static constexpr double kUMin = -8.0, kUMax = 8.0; // Below kUMin, Ik < 1e-17 A
   static constexpr double kGMin = -3.0, kGMax = 6.0; // Below kGMin, Ig is Ig0 to 1e-15 A
 
-  TriodeTables()
+  explicit TriodeTables(const TriodeModel& T)
+  : mModel(T)
+  , mInvMu(1.0 / T.mu) // Multiplied, not divided, in the Newton loop
   {
-    using T = Dempwolf12AX7;
     for (int i = 0; i < kSize; i++)
     {
       const double u = kUMin + (kUMax - kUMin) * i / (kSize - 1);
-      SoftplusPow(T::C * u, T::C, T::gamma, mIk[i], mDik[i]);
-      mIk[i] *= T::G;
-      mDik[i] *= T::G;
+      SoftplusPow(T.C * u, T.C, T.gamma, mIk[i], mDik[i]);
+      mIk[i] *= T.G;
+      mDik[i] *= T.G;
       const double vg = kGMin + (kGMax - kGMin) * i / (kSize - 1);
-      SoftplusPow(T::Cg * vg, T::Cg, T::xi, mIg[i], mDig[i]);
-      mIg[i] = mIg[i] * T::Gg + T::Ig0;
-      mDig[i] *= T::Gg;
+      SoftplusPow(T.Cg * vg, T.Cg, T.xi, mIg[i], mDig[i]);
+      mIg[i] = mIg[i] * T.Gg + T.Ig0;
+      mDig[i] *= T.Gg;
     }
   }
 
@@ -179,6 +258,8 @@ private:
     return true;
   }
 
+  TriodeModel mModel;
+  double mInvMu;
   double mIk[kSize], mDik[kSize], mIg[kSize], mDig[kSize];
 };
 
@@ -186,9 +267,9 @@ inline TriodeCurrents Triode(const TriodeTables& t, double vgk, double vpk)
 {
   TriodeCurrents r;
   double ik, dik, ig, dig;
-  constexpr double invMu = 1.0 / Dempwolf12AX7::mu; // Multiplied, not divided, in the Newton loop
+  const double invMu = t.InvMu();
   if (!t.Cathode(vpk * invMu + vgk, ik, dik) || !t.Grid(vgk, ig, dig))
-    return TriodeExact(vgk, vpk);
+    return TriodeExact(t.Model(), vgk, vpk);
   r.ik = ik;
   r.dikDvgk = dik;
   r.dikDvpk = dik * invMu;
@@ -238,6 +319,9 @@ public:
   // it 0.85 V under its grid at ~1 mA, as theirs do. The stack's load: ~100k at the guitar's mids.
   static constexpr double kRk = 220e3, kRs = 100e3, kAcLoad = 100e3, kSupply = 350.0;
 
+  // 1.68.0: the tube in it (a chassis socket can hold another type); Configure after a change.
+  void SetTubeType(int type) { mTables = &TriodeTables::For(type); }
+
   // The resting point for the gain stage's resting plate voltage (the stack carries no current at
   // rest). Moves the state there too unless keepState (a knob being turned: the follower carries on
   // from where it is, only its reference moves).
@@ -281,7 +365,7 @@ private:
   // move (volts) and the Jacobian j = {f1 by Vk, f1 by Vg, f2 by Vk, f2 by Vg}.
   double _Step(double vp, double& vg, double& vk, double gl, double (&j)[4]) const
   {
-    const TriodeCurrents t = Triode(vg - vk, kSupply - vk);
+    const TriodeCurrents t = Triode(*mTables, vg - vk, kSupply - vk);
     const double f1 = vk * (1.0 / kRk) + (vk - mRestK) * gl - t.ik;
     const double f2 = vg - vp + kRs * t.ig;
     const double j11 = 1.0 / kRk + gl + t.dikDvgk + t.dikDvpk, j12 = -t.dikDvgk;
@@ -299,6 +383,7 @@ private:
   }
 
   double mVg = 0.0, mVk = 0.0, mRestK = 0.0;
+  const TriodeTables* mTables = &TriodeTables::Get();
 };
 
 struct CircuitParams
@@ -322,13 +407,16 @@ struct CircuitParams
   // A cathode follower on the plate (1.45.0, see CathodeFollower): the stage's output is then
   // the follower's cathode instead of the coupling cap.
   bool cathodeFollower = false;
+  // 1.68.0: the tube types (TubeType) of the stage and of its follower (the chassis sockets).
+  int tubeType = k12AX7;
+  int followerTube = k12AX7;
 
   bool operator==(const CircuitParams& o) const
   {
     return biasV == o.biasV && cinFarads == o.cinFarads && cathodeCap == o.cathodeCap && ckFarads == o.ckFarads
            && raOhms == o.raOhms && sag == o.sag && rsOhms == o.rsOhms && sagTimeS == o.sagTimeS
            && sourceOhms == o.sourceOhms && plateCapFarads == o.plateCapFarads
-           && cathodeFollower == o.cathodeFollower;
+           && cathodeFollower == o.cathodeFollower && tubeType == o.tubeType && followerTube == o.followerTube;
   }
   bool operator!=(const CircuitParams& o) const { return !(*this == o); }
 };
@@ -348,16 +436,17 @@ public:
 
   // Rk that puts the stage at rest at `biasV` (grid-to-cathode) with plate load `raOhms`, plus the
   // resting plate current. Solved by bisection on the plate current (monotonic).
-  static void SolveBias(double biasV, double raOhms, double& rkOut, double& ipOut)
+  static void SolveBias(double biasV, double raOhms, double& rkOut, double& ipOut,
+                        const TriodeTables& tables = TriodeTables::Get())
   {
     const double vk = -biasV;
-    const double ig = Triode(biasV, 0.0).ig; // Grid current at a negative bias is ~Ig0 regardless of Vpk
+    const double ig = Triode(tables, biasV, 0.0).ig; // Grid current at a negative bias is ~Ig0 regardless of Vpk
     double lo = 0.0, hi = kBPlus / raOhms;
     for (int i = 0; i < 60; i++)
     {
       const double mid = 0.5 * (lo + hi);
       const double vpk = kBPlus - raOhms * mid - vk;
-      const double ip = Triode(biasV, vpk).ik - ig;
+      const double ip = Triode(tables, biasV, vpk).ik - ig;
       if (mid - ip < 0.0)
         lo = mid;
       else
@@ -420,7 +509,7 @@ public:
       return;
     const bool capSwitched = p.cathodeCap != mParams.cathodeCap;
     const bool plateCapChanged = p.plateCapFarads != mParams.plateCapFarads;
-    const bool followerOn = p.cathodeFollower && !mParams.cathodeFollower;
+    const bool followerOn = p.cathodeFollower && (!mParams.cathodeFollower || p.followerTube != mParams.followerTube);
     mParams = p;
     _UpdateComponents();
     if (followerOn)
@@ -516,6 +605,8 @@ public:
   double RestingPlateCurrent() const { return mIpq; }
   // Plate voltage relative to its resting value: what the next stage's coupling cap passes on.
   double PlateSwing() const { return mV[kP] - mVPRest; }
+  // 1.68.0: what drives the next stage: the plate swing, or its follower's cathode swing when it has one.
+  double DriveSwing() const { return mParams.cathodeFollower ? mCf.Output() : PlateSwing(); }
   // Small-signal output resistance at the plate (Ra || rp): the next stage's source resistance.
   double OutputResistance() const { return mRout; }
 
@@ -531,8 +622,16 @@ public:
   // plate resistor still carries current into the output coupling cap and the next stage.
   double PlateCurrent() const
   {
-    const TriodeCurrents t = Triode(mV[kG] - mV[kK], mV[kP] - mV[kK]);
+    TriodeCurrents t = Triode(*mTables, mV[kG] - mV[kK], mV[kP] - mV[kK]);
+    if (mBenchOn)
+      ApplyBench(t, mBench);
     return t.ik - t.ig;
+  }
+  // Bench (TubeBench.h): perveance and the emission ceiling (mains comes in through SetSupplyTarget).
+  void SetBench(const bench::State& s)
+  {
+    mBench = s;
+    mBenchOn = s.perveance != 1.0 || s.invCeiling > 0.0;
   }
   // The input coupling cap's charge relative to rest. Its slow part (TubeStage low-passes it) is
   // how much colder than its set bias the grid sits after grid current on hard hits: blocking.
@@ -588,8 +687,10 @@ private:
 
   void _UpdateComponents()
   {
+    mTables = &TriodeTables::For(mParams.tubeType);
+    mCf.SetTubeType(mParams.followerTube);
     double ipq = 0.0;
-    SolveBias(mParams.biasV, mParams.raOhms, mRk, ipq);
+    SolveBias(mParams.biasV, mParams.raOhms, mRk, ipq, *mTables);
     mCin.Init(mParams.cinFarads, mT);
     mCgk.Init(kCgk, mT);
     mCgp.Init(kCgp, mT);
@@ -607,12 +708,12 @@ private:
       mCfHpA = (k - 1.0) / (k + 1.0);
     }
     {
-      const TriodeCurrents t = Triode(mParams.biasV, mVPRest + mParams.biasV);
+      const TriodeCurrents t = Triode(*mTables, mParams.biasV, mVPRest + mParams.biasV);
       const double rp = 1.0 / std::max(t.dikDvpk, 1e-12);
       mRout = mParams.raOhms * rp / (mParams.raOhms + rp);
       // The cap bypasses Rk in parallel with the resistance looking into the cathode, (Ra + rp) /
       // (mu + 1); its full gain starts where its reactance falls below that parallel combination.
-      const double rkIn = (mParams.raOhms + rp) / (Dempwolf12AX7::mu + 1.0);
+      const double rkIn = (mParams.raOhms + rp) / (mTables->Model().mu + 1.0);
       const double rPar = mRk * rkIn / (mRk + rkIn);
       mCathodeCornerHz = mParams.cathodeCap ? 1.0 / (2.0 * 3.14159265358979 * rPar * mParams.ckFarads) : 0.0;
     }
@@ -696,9 +797,9 @@ private:
   void _SolveDC()
   {
     double ipq = 0.0;
-    SolveBias(mParams.biasV, mParams.raOhms, mRk, ipq);
+    SolveBias(mParams.biasV, mParams.raOhms, mRk, ipq, *mTables);
     mVRail = kBPlus;
-    const double ig0 = Dempwolf12AX7::Ig0;
+    const double ig0 = mTables->Model().Ig0;
     mV[kA] = -ig0 * kRgl;
     mV[kG] = mV[kA] - ig0 * kRstop;
     mV[kK] = (ipq + ig0) * mRk;
@@ -719,8 +820,17 @@ private:
     mCfHpX = mCfHpY = 0.0;
   }
 
-  // Newton-Raphson on the node equations: sum of currents leaving each node = 0.
+  // Newton-Raphson on the node equations: sum of currents leaving each node = 0. Built twice, with
+  // and without the bench (1.58.0), so a stock tube's Newton loop doesn't carry it (it cost ~3%).
   void _Solve(double vin, int maxIterations, bool dc = false)
+  {
+    if (mBenchOn)
+      _SolveT<true>(vin, maxIterations, dc);
+    else
+      _SolveT<false>(vin, maxIterations, dc);
+  }
+  template <bool kBench>
+  void _SolveT(double vin, int maxIterations, bool dc)
   {
     // Linear part (conductance matrix) and sources for this sample. The per-sample (non-DC) case
     // reuses the precomputed matrix and only builds the capacitor history sources.
@@ -783,13 +893,15 @@ private:
     stampR(kO, -1, 1.0 / kRl);
     }
 
-    const TriodeTables& tables = TriodeTables::Get();
+    const TriodeTables& tables = *mTables;
     int it = 0;
     for (; it < maxIterations; it++)
     {
       const double vgk = mV[kG] - mV[kK];
       const double vpk = mV[kP] - mV[kK];
-      const TriodeCurrents t = Triode(tables, vgk, vpk);
+      TriodeCurrents t = Triode(tables, vgk, vpk);
+      if (kBench)
+        ApplyBench(t, mBench);
       const double ip = t.ik - t.ig;
 
       double f[kNumNodes];
@@ -1004,5 +1116,8 @@ private:
   CathodeFollower mCf; // Used when mParams.cathodeFollower
   double mCfHpX = 0.0, mCfHpY = 0.0, mCfHpA = 0.0, mCfHpB = 1.0; // Its output's coupling high-pass
   int mLastIterations = 0;
+  bench::State mBench; // See SetBench
+  bool mBenchOn = false;
+  const TriodeTables* mTables = &TriodeTables::Get(); // The stage's tube (mParams.tubeType)
 };
 } // namespace tube

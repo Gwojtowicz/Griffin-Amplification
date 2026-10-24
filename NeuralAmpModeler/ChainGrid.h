@@ -59,7 +59,15 @@ constexpr int kProEq = kFirstLatePedal + 10;
 // 1.52.0: GATE and PRO COMP (Dynamics.h).
 constexpr int kGate = kFirstLatePedal + 11;
 constexpr int kStudioComp = kFirstLatePedal + 12;
-constexpr int kNumLatePedals = 13;
+// 1.66.0: TRACK GATE, DIGI DELAY, ANALOG DLY, TAPE ECHO, SPRING VERB (MorePedals.h).
+constexpr int kTrackGate = kFirstLatePedal + 13;
+constexpr int kDigiDelay = kFirstLatePedal + 14;
+constexpr int kAnalogDelay = kFirstLatePedal + 15;
+constexpr int kTapeEcho = kFirstLatePedal + 16;
+constexpr int kSpringVerb = kFirstLatePedal + 17;
+// 1.67.0: TUBE LAB 2, a second Tube Lab (its own params, stages and capture), for dual amps.
+constexpr int kTubeLab2 = kFirstLatePedal + 18;
+constexpr int kNumLatePedals = 19;
 // Every id: blocks 0..kInput-1, Input, the extra pedals, then the late pedals.
 constexpr int kNumIds = kFirstLatePedal + kNumLatePedals;
 constexpr int kOutput = kNumIds;

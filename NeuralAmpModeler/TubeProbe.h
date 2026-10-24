@@ -43,7 +43,10 @@ enum ProbeChannel
   kProbePARail, // Power amp B+ (V)
   kProbePAScreen, // Power tube screens (V)
   kProbeOutput, // Tube Lab output (normalized)
-  kNumProbes
+  // 1.68.0: the chassis sockets V5 and V6's plates (V), while they're gain stages. After the others, so
+  // saved scope channels keep their meaning; the circuit map doesn't show them (the scope does).
+  kProbeSocketPlate0,
+  kNumProbes = kProbeSocketPlate0 + 2
 };
 
 struct ProbeInfo
@@ -58,7 +61,8 @@ inline const ProbeInfo& GetProbeInfo(int channel)
     {"V1 plate current", "mA"},   {"Preamp B+", "V"},       {"V1 blocking", "V"},    {"V2 grid-cathode", "V"},
     {"V2 plate", "V"},            {"V2 blocking", "V"},     {"Tone stack out", "FS"}, {"Power grid 1", "V"},
     {"Power grid 2", "V"},        {"Power plate 1", "V"},   {"Power plate 2", "V"},  {"Power tube 1 current", "mA"},
-    {"Power tube 2 current", "mA"}, {"Power B+", "V"},      {"Screens", "V"},        {"Output", "FS"}};
+    {"Power tube 2 current", "mA"}, {"Power B+", "V"},      {"Screens", "V"},        {"Output", "FS"},
+    {"V5 plate (socket)", "V"},   {"V6 plate (socket)", "V"}};
   return kInfo[std::clamp(channel, 0, kNumProbes - 1)];
 }
 
@@ -94,6 +98,7 @@ struct ProbeStats
   int64_t paGridConducting = 0, paCutoff = 0;
   double paCurrentMax = 0.0;
   double paRailMin = 1e9, paScreenMin = 1e9;
+  double paCurrentSum[2] = {0.0, 0.0}, paDissSum[2] = {0.0, 0.0}; // Per power tube: A and W, summed
 
   // Operating points at rest (copied in at the handoff, so the UI can explain them).
   bool circuit = true, stage2 = false, powerAmp = false;
@@ -103,6 +108,13 @@ struct ProbeStats
   double cathodeCornerHz[2] = {0.0, 0.0}; // Where the bypass cap's full gain starts (0 = no cap)
   double blockRecoverMs[2] = {0.0, 0.0}; // Input / interstage cap x grid leak
   double paBias = 0.0, paIdleMA = 0.0, paRailRest = 450.0, paScreenRest = 445.0, feedbackDB = 0.0;
+  // Bench (1.58.0, TubeBench.h): the Variac now and where it's going, the heaters and cathodes, each
+  // section's emission reserve and perveance ([preamp, power]), the power tubes' bias supply now (V;
+  // 0 with cathode bias), resting cathode voltage (cathode bias), rated watts and bias pot.
+  double mainsV = 120.0, mainsTargetV = 120.0, heaterV = 6.3, cathodeK = 1050.0;
+  double reserve[2] = {8.0, 8.0}, perveance[2] = {1.0, 1.0};
+  double paBiasNow = 0.0, paCathodeRest = 0.0, paRatedW = 25.0, paBiasTrim = 1.0;
+  bool cathodeBias = false, sixL6 = false;
 
   void ResetCounters()
   {
@@ -131,6 +143,8 @@ struct ProbeStats
     paGridConducting = paCutoff = 0;
     paCurrentMax = 0.0;
     paRailMin = paScreenMin = 1e9;
+    for (int t = 0; t < 2; t++)
+      paCurrentSum[t] = paDissSum[t] = 0.0;
   }
 
   double Percent(int64_t count, int64_t of) const { return of > 0 ? 100.0 * count / of : 0.0; }
@@ -158,6 +172,21 @@ struct ProbeStats
     paRailRest = o.paRailRest;
     paScreenRest = o.paScreenRest;
     feedbackDB = o.feedbackDB;
+    mainsV = o.mainsV;
+    mainsTargetV = o.mainsTargetV;
+    heaterV = o.heaterV;
+    cathodeK = o.cathodeK;
+    for (int t = 0; t < 2; t++)
+    {
+      reserve[t] = o.reserve[t];
+      perveance[t] = o.perveance[t];
+    }
+    paBiasNow = o.paBiasNow;
+    paCathodeRest = o.paCathodeRest;
+    paRatedW = o.paRatedW;
+    paBiasTrim = o.paBiasTrim;
+    cathodeBias = o.cathodeBias;
+    sixL6 = o.sixL6;
   }
 };
 

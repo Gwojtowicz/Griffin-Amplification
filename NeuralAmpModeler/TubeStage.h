@@ -75,13 +75,16 @@ constexpr double kVoltsPerUnit = 1.0;
 // (~352-384 kHz) for twice the CPU, for the hottest settings: a hard-clipping Stage 2 makes harmonics
 // past the 4x rate's Nyquist that fold into the band (a 2.5 kHz note at Drive 30 / Gain 2 9: aliasing
 // -38 dB at 4x, -52 dB at 8x). Both on cancel out.
+// 1.63.0: a hot setting (the second gain stage on) runs at 8x whatever the 8x switch says -- two cascaded
+// clipping stages at 4x left -51 dB of aliasing on a high E, at Economy's 2x -40 dB (audible grit);
+// at 8x -67 dB. Economy still halves it (to 4x).
 constexpr int kMaxOversample = 8;
 constexpr int kLatencySamples = 15;
 constexpr int kMaxFIRTaps = kMaxOversample * kLatencySamples + 1;
-inline int OversampleFor(double hostRate, bool economy = false, bool highQuality = false)
+inline int OversampleFor(double hostRate, bool economy = false, bool highQuality = false, bool hot = false)
 {
   int factor = hostRate >= 176000.0 ? 1 : hostRate >= 88000.0 ? 2 : 4;
-  if (highQuality)
+  if (highQuality || hot)
     factor *= 2;
   return economy ? std::max(1, factor / 2) : factor;
 }
@@ -231,6 +234,42 @@ private:
   int mPos = 0;
 };
 
+// 1.68.0: the chassis's extra preamp sockets, V5 and V6, cascaded after Stage 2 (or V1) in that order, before
+// the cathode follower and the tone stack. Each holds a tube (TubeType) doing one job:
+// * Gain: a common-cathode gain stage like V2, driven through its own Gain pot and coupling cap.
+// * Follower: a cathode follower on the gain stage before it (its output then drives what's next).
+// * Boost: a gain stage with its cathode unbypassed -- local feedback: about a third of the gain,
+//   cleaner, tighter, more headroom (Cap is ignored).
+// They hang off the preamp's supply with V1 and V2. Off, a socket is empty: no sound, no CPU.
+constexpr int kNumSockets = 2;
+enum SocketRole
+{
+  kSocketOff = 0,
+  kSocketGain,
+  kSocketFollower,
+  kSocketBoost,
+  kNumSocketRoles
+};
+
+struct SocketParams
+{
+  int role = kSocketOff;
+  int tube = k12AX7;
+  double gain = 0.5; // 0..1 pot position into it (audio taper)
+  double biasV = -1.5;
+  double cathodeCapUF = 0.68; // 0 = none
+  double plateCapPF = 470.0;
+  double coupleNF = 22.0;
+  bool IsGain() const { return role == kSocketGain || role == kSocketBoost; }
+};
+
+// The bias each socket tube is usually run at in a preamp (what the chassis sets when you change type).
+inline double TypicalBias(int tube)
+{
+  static const double v[kNumTubeTypes] = {-1.5, -1.5, -5.0, -2.0};
+  return v[std::clamp(tube, 0, kNumTubeTypes - 1)];
+}
+
 struct TubeParams
 {
   double driveDB = 12.0; // Gain into the grid
@@ -296,6 +335,67 @@ struct TubeParams
   bool ripple = false;
   double rippleAmount = 5.0;
   double rippleMix = 1.0; // 1.40.0: the grind's dry/wet, 0..1
+  // Bench (1.58.0, TubeBench.h; circuit engine only): the Variac (wall volts, 120 stock), the power
+  // tubes' bias pot (idle current relative to stock), and the preamp's and power tubes' age (0 new ..
+  // 1 worn out).
+  double mainsV = 120.0;
+  double powerBias = 1.0;
+  double preampAge = 0.0;
+  double powerAge = 0.0;
+  // 1.62.0: power tubes can fail: run past their rated plate dissipation (red-plating), they wear out
+  // and die (see _UpdateTubeLife). Off: they never do.
+  bool canFail = false;
+  // 1.64.0: the AMP block's capture is the preamp (circuit engine): the input arriving here is already
+  // the capture's output (the plugin runs it), and it goes straight to the tone stack (if one's on)
+  // and the power amp, in place of the preamp tubes. Everything after the preamp is unchanged.
+  bool capture = false;
+  // 1.68.0: the chassis sockets V5, V6 (see SocketParams), and the power amp as a quad (four power tubes,
+  // see PowerAmp.h).
+  bool quad = false;
+  SocketParams socket[kNumSockets];
+
+  // The preamp's gain stages are numbered 0 (V1), 1 (V2) and 2 + k (socket k). The one a socket
+  // follows: the last gain socket before it, else V2 if it's on, else V1.
+  int GainBefore(int k) const
+  {
+    for (int j = k - 1; j >= 0; j--)
+      if (socket[j].IsGain())
+        return 2 + j;
+    return stage2 ? 1 : 0;
+  }
+  int LastGain() const { return GainBefore(kNumSockets); }
+  // The socket whose follower sits on gain stage `stage` (the first one, if two follow it), or -1.
+  int FollowerSocketOn(int stage) const
+  {
+    for (int k = 0; k < kNumSockets; k++)
+      if (socket[k].role == kSocketFollower && GainBefore(k) == stage)
+        return k;
+    return -1;
+  }
+  // Whether a cathode follower sits on gain stage `stage`: a follower socket after it, or the
+  // Follower switch (V3) on the last one.
+  bool Followed(int stage) const
+  {
+    return FollowerSocketOn(stage) >= 0 || (cathodeFollower && stage == LastGain());
+  }
+  int FollowerTube(int stage) const
+  {
+    const int k = FollowerSocketOn(stage);
+    return k >= 0 ? socket[k].tube : k12AX7;
+  }
+  // Any cascaded stage after V1: the circuit then runs at the higher oversampling (OversampleFor).
+  bool Hot() const
+  {
+    if (!circuit)
+      return false;
+    if (stage2)
+      return true;
+    for (const SocketParams& s : socket)
+      if (s.IsGain())
+        return true;
+    return false;
+  }
+
   static const tonestack::Components& StackParts(int type)
   {
     return type == 2 ? tonestack::kMarshall : tonestack::kFender;
@@ -318,6 +418,8 @@ struct TubeParams
     a.cathodeBias = cathodeBias;
     a.speakerFeedback = speakerFeedback;
     a.resonance = resonance;
+    a.biasTrim = powerBias;
+    a.tubesPerSide = quad ? 2 : 1;
     return a;
   }
 
@@ -340,7 +442,8 @@ struct TubeParams
     c.rsOhms = sagSupplyKOhm * 1e3;
     c.sagTimeS = sagTimeS;
     c.plateCapFarads = plateCapPF * 1e-12;
-    c.cathodeFollower = cathodeFollower && !stage2; // It follows the last gain stage
+    c.cathodeFollower = Followed(0); // The Follower switch follows the last gain stage
+    c.followerTube = FollowerTube(0);
     return c;
   }
 
@@ -356,7 +459,27 @@ struct TubeParams
     c.plateCapFarads = plateCap2PF * 1e-12;
     c.sag = false;
     c.sourceOhms = sourceOhms;
-    c.cathodeFollower = cathodeFollower;
+    c.cathodeFollower = stage2 ? Followed(1) : cathodeFollower;
+    c.followerTube = FollowerTube(1);
+    return c;
+  }
+
+  // 1.68.0: socket k as a gain stage (Gain or Boost), driven from a source of `sourceOhms`. Like
+  // stage 2, its supply comes from stage 1 (set per sample).
+  CircuitParams ToSocket(int k, double sourceOhms) const
+  {
+    const SocketParams& s = socket[k];
+    CircuitParams c = ToCircuit();
+    c.biasV = s.biasV;
+    c.cinFarads = s.coupleNF * 1e-9;
+    c.cathodeCap = s.role == kSocketGain && s.cathodeCapUF > 0.0;
+    c.ckFarads = (s.cathodeCapUF > 0.0 ? s.cathodeCapUF : 0.68) * 1e-6;
+    c.plateCapFarads = s.plateCapPF * 1e-12;
+    c.sag = false;
+    c.sourceOhms = sourceOhms;
+    c.tubeType = s.tube;
+    c.cathodeFollower = Followed(2 + k);
+    c.followerTube = FollowerTube(2 + k);
     return c;
   }
 };
@@ -395,7 +518,7 @@ private:
   void _Configure()
   {
     const double sampleRate = mSampleRate;
-    mOversample = OversampleFor(sampleRate, mParams.economy, mParams.highQuality);
+    mOversample = OversampleFor(sampleRate, mParams.economy, mParams.highQuality, mParams.Hot());
     mLatency = mOversample > 1 ? kLatencySamples : 0;
     if (mOversample > 1)
     {
@@ -430,9 +553,22 @@ private:
     mTouchRefDecay = DBToAmp(-kTouchRefDecayDBPerSecond / sampleRate);
     mRipple.Reset(sampleRate);
     mTouchGainCoef = 1.0 - std::exp(-1.0 / (kTouchGlideSeconds * sampleRate));
+    // Bench: no glide from a reset (the circuits settle at rest where the Variac already is).
+    mBenchMains = mBenchHeat = _BenchMainsTarget();
+    mPopDecay = std::exp(-1.0 / (0.008 * sampleRate));
+    mWarmStep = 1.0 / (2.0 * sampleRate);
+    for (int k = 0; k < kNumPowerTubes; k++)
+      mPower.SetTubeDead(k, mPowerDead[k]); // (A failed tube stays failed through a reset)
+    mBenchAge[0] = mParams.preampAge;
+    mBenchAge[1] = mParams.powerAge;
+    mBenchAgeCoef = 1.0 - std::exp(-1.0 / (kBenchAgeGlideS * sampleRate));
+    mBenchSupplyCoef = 1.0 - std::exp(-1.0 / (bench::kSupplyTauS * sampleRate));
+    mBenchHeatCoef = 1.0 - std::exp(-1.0 / (bench::kHeaterTauS * sampleRate));
+    _ApplyBench();
     mCircuit.Reset(os, mParams.ToCircuit());
     mCircuit2.Reset(os, mParams.ToCircuit2(mCircuit.OutputResistance()));
-    mCircuit.SetRestingExtraLoad(mParams.stage2 ? mCircuit2.RestingPlateCurrent() : 0.0);
+    _SetSockets(mParams, nullptr);
+    mCircuit.SetRestingExtraLoad(_RestingExtraLoad(mParams));
     mCircuit.SetExtraLoad(0.0);
     mPower.Reset(os, mParams.ToPowerAmp());
     mStack.Reset(os, TubeParams::StackParts(mParams.toneStack), mSmoothed.bass, mSmoothed.mid, mSmoothed.treble);
@@ -455,6 +591,8 @@ private:
     mTarget.output = DBToAmp(p.outputDB);
     mBloom = p.bloom;
     mTarget.gain2 = TubeParams::PotToGain(p.gain2);
+    for (int k = 0; k < kNumSockets; k++)
+      mTarget.socketGain[k] = TubeParams::PotToGain(p.socket[k].gain);
     mTarget.bass = p.bass;
     mTarget.mid = p.mid;
     mTarget.treble = p.treble;
@@ -468,12 +606,13 @@ private:
     const bool partFlip = p.circuit
                           && (p.cathodeCap != mParams.cathodeCap || p.sag != mParams.sag || p.stage2 != mParams.stage2
                               || (p.stage2 && p.cathodeCap2 != mParams.cathodeCap2) || p.powerAmp != mParams.powerAmp
-                              || (p.powerAmp && p.sixL6 != mParams.sixL6)
+                              || (p.powerAmp && (p.sixL6 != mParams.sixL6 || p.quad != mParams.quad))
                               || (p.powerAmp && p.speakerLoad != mParams.speakerLoad) // 1.45.0: it stepped (-13 dB)
                               || p.cathodeFollower != mParams.cathodeFollower
                               || (p.powerAmp && (p.cathodeBias != mParams.cathodeBias
                                                  || p.speakerFeedback != mParams.speakerFeedback)))
-                          || p.toneStack != mParams.toneStack;
+                          || p.toneStack != mParams.toneStack || p.capture != mParams.capture
+                          || (p.circuit && _SocketsFlip(p));
     if (engineFlip || partFlip)
     {
       mFadeFrom = !mParams.circuit ? FadeFrom::Classic : FadeFrom::Circuit;
@@ -481,6 +620,10 @@ private:
       mFadeCircuit = mCircuit;
       mFadeCircuit2 = mCircuit2;
       mFadeStage2 = mParams.stage2;
+      for (int k = 0; k < kNumSockets; k++)
+        if (mSocketMask & (1 << k))
+          mFadeSocket[k] = mSocket[k];
+      mFadeSocketMask = mSocketMask;
       mFadePower = mPower;
       mFadePowerOn = mParams.powerAmp;
       mFadeStack = mStack;
@@ -499,13 +642,15 @@ private:
       mCircuit2.Reset(mOversampledRate, c2);
     else
       mCircuit2.SetParams(c2);
-    mCircuit.SetRestingExtraLoad(p.stage2 ? mCircuit2.RestingPlateCurrent() : 0.0);
-    if (!p.stage2)
+    // The sockets likewise (1.68.0): from rest when one starts working or gets a new tube.
+    _SetSockets(p, engineFlip && p.circuit ? nullptr : &mParams);
+    mCircuit.SetRestingExtraLoad(_RestingExtraLoad(p));
+    if (!p.stage2 && mSocketMask == 0)
       mCircuit.SetExtraLoad(0.0);
 
     // The power amp starts from rest when switched in (or the circuit engine is, or the tubes are
     // swapped); otherwise its knobs change like pots.
-    if (p.powerAmp && (!mParams.powerAmp || (engineFlip && p.circuit) || p.sixL6 != mParams.sixL6
+    if (p.powerAmp && (!mParams.powerAmp || (engineFlip && p.circuit) || p.sixL6 != mParams.sixL6 || p.quad != mParams.quad
                        || p.cathodeBias != mParams.cathodeBias || p.speakerFeedback != mParams.speakerFeedback))
       mPower.Reset(mOversampledRate, p.ToPowerAmp());
     else
@@ -536,8 +681,11 @@ public:
     {
       const double economyGain = _EconomyGain();
       _SmoothParams();
+      _BenchGlide();
       const double dry = _DelayDry(x[s]);
-      const double wet = _Awake() ? mRipple.Process(_ProcessSample(x[s] * _WakeGain())) : dry;
+      double wet = _Awake() ? mRipple.Process(_ProcessSample(x[s] * _WakeGain())) : dry;
+      if (mPopEnv > 0.0 || mFailGain != 1.0)
+        wet = _FailEffects(wet);
       if (mPrerollLeft > 0)
       {
         mPrerollLeft--;
@@ -552,6 +700,13 @@ public:
         const double t = pos < mWarmupMute ? 0.0 : (double)(pos - mWarmupMute + 1) / (mWarmupTotal - mWarmupMute);
         mBuffer[s] = static_cast<iplug::sample>(mBuffer[s] * t * t * (3.0 - 2.0 * t));
       }
+      if (mUiWanted)
+      {
+        // The chassis page's glow: each preamp tube's signal this block (V1 its grid drive, V2 its
+        // plate, V3 and V4 the preamp's output).
+        mLevelAcc[0] = std::max(mLevelAcc[0], std::fabs(static_cast<double>(x[s])) * mSmoothed.drive);
+        mLevelAcc[2] = std::max(mLevelAcc[2], std::fabs(mLastPre));
+      }
       if (probing)
       {
         ProbeStats& st = mProbe->Accum();
@@ -563,6 +718,23 @@ public:
         mProbe->Frame()[kProbeOutput] = static_cast<float>(out);
         mProbe->Push();
       }
+    }
+    _UpdateTubeLife(numFrames);
+    if (mUiWanted)
+    {
+      for (int i = 0; i < kNumStageLevels; i++)
+      {
+        mLevel[i] = mLevelAcc[i];
+        mLevelAcc[i] = 0.0;
+      }
+      mLevel[3] = mLevel[2];
+      // A follower socket shows the signal of the stage it follows.
+      for (int k = 0; k < kNumSockets; k++)
+        if (mParams.socket[k].role == kSocketFollower)
+        {
+          const int stage = mParams.GainBefore(k);
+          mLevel[4 + k] = stage == 0 ? mLevel[2] : stage == 1 ? mLevel[1] : mLevel[4 + stage - 2];
+        }
     }
     if (probing)
     {
@@ -604,6 +776,7 @@ private:
   struct Smoothed
   {
     double drive = 1.0, bias = -1.5, bright = 0.0, mix = 1.0, output = 1.0, gain2 = 0.25;
+    double socketGain[kNumSockets] = {0.25, 0.25}; // 1.68.0: each socket's Gain pot
     double bass = 0.5, mid = 0.5, treble = 0.5; // Tone stack knobs glide like turned pots
     double touch = 0.0; // Touch's expansion exponent (see _TouchGain)
   };
@@ -654,6 +827,11 @@ private:
     mSmoothed.mix += mSmoothCoef * (mTarget.mix - mSmoothed.mix);
     mSmoothed.output += mSmoothCoef * (mTarget.output - mSmoothed.output);
     mSmoothed.gain2 += mSmoothCoef * (mTarget.gain2 - mSmoothed.gain2);
+    if (mSocketMask != 0)
+      for (int k = 0; k < kNumSockets; k++)
+        mSmoothed.socketGain[k] += mSmoothCoef * (mTarget.socketGain[k] - mSmoothed.socketGain[k]);
+    else
+      std::copy(std::begin(mTarget.socketGain), std::end(mTarget.socketGain), std::begin(mSmoothed.socketGain));
     mSmoothed.bass += mSmoothCoef * (mTarget.bass - mSmoothed.bass);
     mSmoothed.mid += mSmoothCoef * (mTarget.mid - mSmoothed.mid);
     mSmoothed.treble += mSmoothCoef * (mTarget.treble - mSmoothed.treble);
@@ -740,7 +918,8 @@ private:
     mAsleep = false;
     mCircuit.Reset(mOversampledRate, mParams.ToCircuit());
     mCircuit2.Reset(mOversampledRate, mParams.ToCircuit2(mCircuit.OutputResistance()));
-    mCircuit.SetRestingExtraLoad(mParams.stage2 ? mCircuit2.RestingPlateCurrent() : 0.0);
+    _SetSockets(mParams, nullptr);
+    mCircuit.SetRestingExtraLoad(_RestingExtraLoad(mParams));
     mCircuit.SetExtraLoad(0.0);
     mPower.Reset(mOversampledRate, mParams.ToPowerAmp());
     mStack.Reset(mOversampledRate, TubeParams::StackParts(mParams.toneStack), mSmoothed.bass, mSmoothed.mid,
@@ -788,12 +967,17 @@ private:
     if (mFadeRemaining > 0)
       _UpdateStackKnobs(mFadeStack);
 
-    // Treble pre-emphasis into the grid (like a bright cap across the volume pot).
-    mBrightLP += mBrightCoef * (x - mBrightLP);
-    double emphasized = x + 2.0 * mSmoothed.bright * (x - mBrightLP);
-    const double touchGain = _TouchGain(x);
-    if (touchGain != 1.0)
-      emphasized *= touchGain;
+    // Treble pre-emphasis into the grid (like a bright cap across the volume pot). With the capture as
+    // the preamp (1.64.0), there's no grid here: the capture's output goes in as it is.
+    double emphasized = x, touchGain = 1.0;
+    if (!(mParams.capture && mParams.circuit))
+    {
+      mBrightLP += mBrightCoef * (x - mBrightLP);
+      emphasized = x + 2.0 * mSmoothed.bright * (x - mBrightLP);
+      touchGain = _TouchGain(x);
+      if (touchGain != 1.0)
+        emphasized *= touchGain;
+    }
 
     // Upsample by zero-stuffing (which divides the level by kOversample, hence the gain), process
     // each oversampled sample, and decimate on the first phase -- so the total delay is a whole
@@ -822,18 +1006,31 @@ private:
 
   double _ProcessOversampled(double x)
   {
-    const double y = mParams.circuit ? _Circuit(mCircuit, mCircuit2, mParams.stage2, mStack, mParams.toneStack,
-                                                mPower, mParams.powerAmp, x)
+    const double y = mParams.circuit ? _Circuit(mCircuit, mCircuit2, mParams.stage2, mSocket, mSocketMask, mStack,
+                                                mParams.toneStack, mPower, mParams.powerAmp, x)
                                      : _Stack(mStack, mParams.toneStack, _Classic(x));
     if (mProbing)
       _Probe(x, y);
+    if (mLifeTracking)
+    {
+      // Each power tube's plate dissipation, summed for the block (see _UpdateTubeLife).
+      mDissAcc[0] += mPower.Dissipation1();
+      mDissAcc[1] += mPower.Dissipation2();
+      mDissN++;
+    }
+    if (mUiWanted && mParams.stage2)
+      mLevelAcc[1] = std::max(mLevelAcc[1], std::fabs(mCircuit2.PlateSwing()) * 0.01);
+    if (mUiWanted && mSocketMask != 0 && mParams.circuit)
+      for (int k = 0; k < kNumSockets; k++)
+        if (mSocketMask & (1 << k))
+          mLevelAcc[4 + k] = std::max(mLevelAcc[4 + k], std::fabs(mSocket[k].PlateSwing()) * 0.01);
     if (mFadeRemaining <= 0)
       return y;
     // Mid-crossfade after a switch flip: blend in from whatever was playing before.
     const double old = mFadeFrom == FadeFrom::Classic
                          ? _Stack(mFadeStack, mFadeStackType, _Classic(x))
-                         : _Circuit(mFadeCircuit, mFadeCircuit2, mFadeStage2, mFadeStack, mFadeStackType, mFadePower,
-                                    mFadePowerOn, x);
+                         : _Circuit(mFadeCircuit, mFadeCircuit2, mFadeStage2, mFadeSocket, mFadeSocketMask, mFadeStack,
+                                    mFadeStackType, mFadePower, mFadePowerOn, x);
     const double g = static_cast<double>(mFadeRemaining--) / mFadeLength;
     return y + g * (old - y);
   }
@@ -841,25 +1038,31 @@ private:
   // Circuit engine: the whole stage is simulated, so bias (via Rk), blocking, the cathode bypass
   // cap, Miller roll-off and sag all come out of the circuit itself. The tone stack sits between
   // the preamp and the power amp, as in a real amp.
-  double _Circuit(TriodeStageCircuit& stage1, TriodeStageCircuit& stage2, bool useStage2, tonestack::TMBStack& stack,
-                  int stackType, PushPullPowerAmp& power, bool usePower, double x)
+  double _Circuit(TriodeStageCircuit& stage1, TriodeStageCircuit& stage2, bool useStage2, TriodeStageCircuit* sockets,
+                  int socketMask, tonestack::TMBStack& stack, int stackType, PushPullPowerAmp& power, bool usePower,
+                  double x)
   {
-    const double pre = _Stack(stack, stackType, _Preamp(stage1, stage2, useStage2, x));
+    // (1.64.0: with the capture as the preamp, x is already its output.)
+    const double pre =
+      _Stack(stack, stackType, mParams.capture ? x : _Preamp(stage1, stage2, useStage2, sockets, socketMask, x));
     mLastPre = pre;
+    const double mains = mBenchMains; // Bench: the Variac moves the preamp's supply too
     if (!usePower)
     {
-      if (stage1.SupplyShared())
-        stage1.SetSupplyTarget(1.0); // Power amp switched out: the preamp's supply settles back
+      if (stage1.SupplyShared() || mains != 1.0)
+        stage1.SetSupplyTarget(mains); // Power amp switched out: the preamp's supply settles back
       return pre;
     }
     const double out = power.Process(pre);
     // Shared supply: the preamp hangs off the power amp's screen node (as in most amps: B+, then the
     // screens, then the phase inverter and preamp nodes), so its rail follows that node's sag.
-    if (mParams.sharedSupply || stage1.SupplyShared())
-      stage1.SetSupplyTarget(mParams.sharedSupply ? PushPullPowerAmp::SharedSupplyScale(
-                                                      power.ScreenVoltage() / power.RestingScreenVoltage(),
-                                                      power.Strength())
-                                                  : 1.0);
+    if (mParams.sharedSupply || stage1.SupplyShared() || mains != 1.0)
+      stage1.SetSupplyTarget(
+        (mParams.sharedSupply
+           ? PushPullPowerAmp::SharedSupplyScale(
+               power.ScreenVoltage() / (power.RestingScreenVoltage() * power.BenchMains()), power.Strength())
+           : 1.0)
+        * mains);
     return out;
   }
 
@@ -876,18 +1079,85 @@ private:
   static double _Quantize(double knob) { return std::round(knob * 1000.0) / 1000.0; }
 
   // The preamp stage(s).
-  double _Preamp(TriodeStageCircuit& stage1, TriodeStageCircuit& stage2, bool useStage2, double x)
+  double _Preamp(TriodeStageCircuit& stage1, TriodeStageCircuit& stage2, bool useStage2, TriodeStageCircuit* sockets,
+                 int socketMask, double x)
   {
     const double y1 = stage1.Process(x * mSmoothed.drive);
-    if (!useStage2)
+    if (!useStage2 && socketMask == 0)
       return y1 / std::sqrt(mSmoothed.drive);
-    // Stage 2: shares stage 1's B+ (and reports its current draw back as extra supply load), and
-    // is driven by stage 1's plate swing through the Gain 2 pot. Both stages invert; Process
-    // re-inverts its own stage, so flip once more for stage 1's.
-    stage2.SetRail(stage1.RailVoltage());
-    const double y2 = stage2.Process(mSmoothed.gain2 * stage1.PlateSwing());
-    stage1.SetExtraLoad(stage2.SupplyCurrent());
-    return -y2 / std::sqrt(mSmoothed.drive);
+    // Stage 2 and the gain sockets (1.68.0), in a cascade: each shares stage 1's B+ (and reports its
+    // current draw back as extra supply load), and is driven by the stage before it -- its plate
+    // swing, or its follower's cathode -- through its own gain pot. Every stage inverts; Process
+    // re-inverts its own stage, so flip once more for each stage driving the next.
+    const double rail = stage1.RailVoltage();
+    const TriodeStageCircuit* last = &stage1;
+    double y = y1, extra = 0.0;
+    bool inverted = false;
+    if (useStage2)
+    {
+      stage2.SetRail(rail);
+      y = stage2.Process(mSmoothed.gain2 * last->DriveSwing());
+      extra = stage2.SupplyCurrent();
+      last = &stage2;
+      inverted = true;
+    }
+    for (int k = 0; k < kNumSockets; k++)
+      if (socketMask & (1 << k))
+      {
+        sockets[k].SetRail(rail);
+        y = sockets[k].Process(mSmoothed.socketGain[k] * last->DriveSwing());
+        extra += sockets[k].SupplyCurrent();
+        last = &sockets[k];
+        inverted = !inverted;
+      }
+    stage1.SetExtraLoad(extra);
+    return (inverted ? -y : y) / std::sqrt(mSmoothed.drive);
+  }
+
+  // 1.68.0: the sockets' circuits for p (see SocketParams): each gain socket is set up after the stage
+  // driving it (its source resistance is that stage's output). From rest when there's no `old` (a
+  // reset), or one starts working or takes another tube; otherwise its parts change like pots.
+  static constexpr double kFollowerOutOhms = 1e3; // A cathode follower's output: about 1 / gm
+  TriodeStageCircuit& _GainStage(int i) { return i == 0 ? mCircuit : i == 1 ? mCircuit2 : mSocket[i - 2]; }
+  void _SetSockets(const TubeParams& p, const TubeParams* old)
+  {
+    int mask = 0;
+    for (int k = 0; k < kNumSockets; k++)
+    {
+      if (!p.socket[k].IsGain())
+        continue;
+      mask |= 1 << k;
+      const int prev = p.GainBefore(k);
+      const double source = p.Followed(prev) ? kFollowerOutOhms : _GainStage(prev).OutputResistance();
+      const CircuitParams c = p.ToSocket(k, source);
+      if (!old || !old->socket[k].IsGain() || old->socket[k].tube != p.socket[k].tube)
+        mSocket[k].Reset(mOversampledRate, c);
+      else
+        mSocket[k].SetParams(c);
+    }
+    mSocketMask = mask;
+  }
+  // What stage 1's supply carries at rest besides stage 1: stage 2 and the gain sockets.
+  double _RestingExtraLoad(const TubeParams& p) const
+  {
+    double amps = p.stage2 ? mCircuit2.RestingPlateCurrent() : 0.0;
+    for (int k = 0; k < kNumSockets; k++)
+      if (mSocketMask & (1 << k))
+        amps += mSocket[k].RestingPlateCurrent();
+    return amps;
+  }
+  // A socket change the sound should crossfade over (rather than step): one starting or stopping, a
+  // new job or tube, a cathode bypass cap in or out.
+  bool _SocketsFlip(const TubeParams& p) const
+  {
+    for (int k = 0; k < kNumSockets; k++)
+    {
+      const SocketParams &a = p.socket[k], &b = mParams.socket[k];
+      if (a.role != b.role || (a.role != kSocketOff && a.tube != b.tube)
+          || (a.role == kSocketGain && (a.cathodeCapUF > 0.0) != (b.cathodeCapUF > 0.0)))
+        return true;
+    }
+    return false;
   }
 
   // Classic engine: the Koren LUT plus the Bloom bias shift.
@@ -952,6 +1222,10 @@ private:
       if (std::min(i1, i2) < kCutoffFraction * mPower.IdleAmps())
         st.paCutoff++;
       st.paCurrentMax = std::max(st.paCurrentMax, std::max(i1, i2));
+      st.paCurrentSum[0] += i1;
+      st.paCurrentSum[1] += i2;
+      st.paDissSum[0] += mPower.Dissipation1();
+      st.paDissSum[1] += mPower.Dissipation2();
       st.paRailMin = std::min(st.paRailMin, mPower.RailVoltage());
       st.paScreenMin = std::min(st.paScreenMin, mPower.ScreenVoltage());
     }
@@ -970,6 +1244,9 @@ private:
       f[kProbeV2Block] = static_cast<float>(mBlockLP[1]);
     }
     f[kProbeStackOut] = static_cast<float>(mLastPre);
+    for (int k = 0; k < kNumSockets; k++)
+      if (mSocketMask & (1 << k))
+        f[kProbeSocketPlate0 + k] = static_cast<float>(mSocket[k].PlateVoltage());
     if (mParams.powerAmp)
     {
       f[kProbePAGrid1] = static_cast<float>(mPower.Grid1());
@@ -1023,6 +1300,204 @@ private:
     s.paRailRest = PushPullPowerAmp::kBPlus;
     s.paScreenRest = mPower.RestingScreenVoltage();
     s.feedbackDB = mPower.FeedbackDB();
+    // Bench.
+    s.mainsV = mBenchMains * bench::kMainsNominal;
+    s.mainsTargetV = _BenchMainsTarget() * bench::kMainsNominal;
+    s.heaterV = mBenchHeat * bench::kHeaterNominal;
+    s.cathodeK = bench::CathodeK(mBenchHeat);
+    s.reserve[0] = bench::Reserve(mBenchHeat, mBenchAge[0]);
+    s.reserve[1] = bench::Reserve(mBenchHeat, mBenchAge[1]);
+    s.perveance[0] = bench::Perveance(mBenchAge[0]);
+    s.perveance[1] = bench::Perveance(mBenchAge[1]);
+    s.paBiasNow = mPower.BiasSupply();
+    s.paCathodeRest = mPower.RestingCathodeVoltage();
+    s.paRatedW = mPower.RatedWatts();
+    s.paBiasTrim = mParams.powerBias;
+    s.cathodeBias = mParams.cathodeBias;
+    s.sixL6 = mParams.sixL6;
+  }
+
+public:
+  // Power tube life (1.62.0) ========================================================================
+  // Each power tube's life (1 new .. 0 failed), whether it's failed, and its plate dissipation as a
+  // share of its rating (smoothed, ~0.3 s). Read by the plugin after Process, on the audio thread.
+  // 1.68.0: four sockets (V9..V12); a pair uses the first two.
+  static constexpr int kNumPowerTubes = 4;
+  double PowerLife(int k) const { return mPowerLife[k]; }
+  bool PowerDead(int k) const { return mPowerDead[k]; }
+  double DissipationRatio(int k) const { return mDissRatio[k]; }
+  // A new tube in socket k (it warms up over a couple of seconds).
+  void ReplacePowerTube(int k)
+  {
+    mPowerLife[k] = 1.0;
+    if (mPowerDead[k])
+    {
+      mPowerDead[k] = false;
+      mPower.SetTubeDead(k, false);
+      mFadePower.SetTubeDead(k, false);
+      mFailGain = 0.0; // Warming up: fades back in (see _FailEffects)
+    }
+  }
+  // The other channel's stage follows this one's tubes (only channel 0 wears them).
+  void SyncTubesFrom(const TubeStage& o)
+  {
+    for (int k = 0; k < kNumPowerTubes; k++)
+    {
+      mPowerLife[k] = o.mPowerLife[k];
+      mDissRatio[k] = o.mDissRatio[k];
+      if (o.mPowerDead[k] && !mPowerDead[k])
+        _FailPowerTube(k);
+      else if (!o.mPowerDead[k] && mPowerDead[k])
+        ReplacePowerTube(k);
+    }
+  }
+  void SetWearMaster(bool master) { mWearMaster = master; }
+  // The chassis page wants the glow levels (and the dissipation readings).
+  void SetUiWanted(bool wanted) { mUiWanted = wanted; }
+  // Each preamp tube's signal level last block (V1 grid volts, V2 plate swing / 100 V, V3/V4 the
+  // preamp's output in full scale, V5, V6 (the sockets, 1.68.0) plate swing / 100 V), for the chassis
+  // page's glow.
+  static constexpr int kNumStageLevels = 4 + kNumSockets;
+  double StageLevel(int i) const { return mLevel[std::clamp(i, 0, kNumStageLevels - 1)]; }
+  double StageRk(int i) const { return i == 0 ? mCircuit.Rk() : mCircuit2.Rk(); }
+  // 1.68.0: a gain socket's cathode resistor (what its Bias picked), 0 if it isn't a gain stage.
+  double SocketRk(int k) const { return (mSocketMask & (1 << k)) ? mSocket[k].Rk() : 0.0; }
+
+private:
+  // Red plating wears a power tube out: per second, 0.02 x (excess / 10%)^2 of its life, where excess
+  // is how far its average plate dissipation is over its rating -- at 110% about a minute, at 130% a
+  // few seconds -- and up to 2.5x faster with the heaters over-run by the Variac (135 V). Under its
+  // rating a tube doesn't wear at all. Accelerated a lot (a real tube takes minutes to hours of red
+  // plating), so you can hear it happen. A failed tube goes open (see PowerAmp::SetTubeDead).
+  void _UpdateTubeLife(size_t numFrames)
+  {
+    // Measured while tubes can fail or the chassis page shows the readings; worn only if they can fail.
+    const bool tracking = (mParams.canFail || mUiWanted) && mParams.circuit && mParams.powerAmp;
+    if (!tracking && !mLifeTracking)
+      return;
+    mLifeTracking = tracking;
+    if (mDissN > 0)
+    {
+      const double rated = std::max(1.0, mPower.RatedWatts());
+      const double dt = static_cast<double>(numFrames) / mSampleRate;
+      const double coef = 1.0 - std::exp(-dt / 0.3);
+      // 1.68.0: tube k is on side k % 2 (a quad's V11, V12 share V9's and V10's sides); each wears at its
+      // own rate (no two tubes are alike: the quad's second pair a little faster and slower).
+      const int tubes = mParams.quad ? kNumPowerTubes : 2;
+      for (int k = 0; k < tubes; k++)
+      {
+        const double ratio = mPowerDead[k] ? 0.0 : mDissAcc[k % 2] / mDissN / rated;
+        mDissRatio[k] += coef * (ratio - mDissRatio[k]);
+        if (!mWearMaster || mPowerDead[k] || !tracking || !mParams.canFail)
+          continue;
+        const double excess = mDissRatio[k] - 1.0;
+        if (excess <= 0.0)
+          continue;
+        const double heat = 1.0 + 12.0 * std::max(0.0, mBenchHeat - 1.0);
+        static constexpr double kWearSpread[kNumPowerTubes] = {1.0, 1.0, 1.15, 0.88};
+        mPowerLife[k] -= dt * 0.02 * (excess / 0.1) * (excess / 0.1) * heat * kWearSpread[k];
+        if (mPowerLife[k] <= 0.0)
+        {
+          mPowerLife[k] = 0.0;
+          _FailPowerTube(k);
+        }
+      }
+      mDissAcc[0] = mDissAcc[1] = 0.0;
+      mDissN = 0;
+    }
+  }
+
+  void _FailPowerTube(int k)
+  {
+    mPowerDead[k] = true;
+    mPowerLife[k] = 0.0;
+    mPower.SetTubeDead(k, true);
+    mFadePower.SetTubeDead(k, true);
+    mPopEnv = 1.0; // The bang as it goes (see _FailEffects)
+  }
+
+  // The failure's pop (a sharp crack, then a burst of noise dying away in ~30 ms) and the warm-up
+  // after a replacement (the output fading back in over ~2 s).
+  double _FailEffects(double wet)
+  {
+    if (mPopEnv > 0.0)
+    {
+      mPopRng = mPopRng * 1664525u + 1013904223u;
+      const double noise = (static_cast<double>(mPopRng >> 8) / 8388608.0) - 1.0;
+      wet += mPopEnv * (0.6 * noise + (mPopEnv > 0.999 ? 0.8 : 0.0));
+      mPopEnv *= mPopDecay;
+      if (mPopEnv < 1e-4)
+        mPopEnv = 0.0;
+    }
+    if (mFailGain != 1.0)
+    {
+      mFailGain = std::min(1.0, mFailGain + mWarmStep);
+      wet *= mFailGain * mFailGain * (3.0 - 2.0 * mFailGain);
+    }
+    return wet;
+  }
+
+  // Bench (TubeBench.h) =============================================================================
+  // The Variac's setting as a ratio of 120 V.
+  double _BenchMainsTarget() const { return std::clamp(mParams.mainsV, 60.0, 160.0) / bench::kMainsNominal; }
+
+  // Per host sample: the supplies follow the Variac within a fraction of a second, the cathodes'
+  // temperature over seconds, and the age knobs glide (a jump clicked); the circuits get the new
+  // state every kBenchUpdateSamples while anything moves. Settled at stock, it's skipped entirely.
+  void _BenchGlide()
+  {
+    const double target = _BenchMainsTarget();
+    const double ages[2] = {mParams.preampAge, mParams.powerAge};
+    auto glide = [](double& v, double to, double coef, double snap) {
+      v += coef * (to - v);
+      if (std::fabs(v - to) < snap)
+        v = to;
+    };
+    const bool settled =
+      mBenchMains == target && mBenchHeat == target && mBenchAge[0] == ages[0] && mBenchAge[1] == ages[1];
+    if (settled && !mBenchDirty)
+      return;
+    if (!settled)
+    {
+      glide(mBenchMains, target, mBenchSupplyCoef, 1e-7);
+      glide(mBenchHeat, target, mBenchHeatCoef, 1e-6);
+      glide(mBenchAge[0], ages[0], mBenchAgeCoef, 1e-6);
+      glide(mBenchAge[1], ages[1], mBenchAgeCoef, 1e-6);
+    }
+    const bool nowSettled =
+      mBenchMains == target && mBenchHeat == target && mBenchAge[0] == ages[0] && mBenchAge[1] == ages[1];
+    if (--mBenchCount > 0 && !mBenchDirty && !nowSettled)
+      return;
+    mBenchCount = kBenchUpdateSamples;
+    _ApplyBench();
+  }
+
+  // The bench state for each section (stock: exactly none).
+  void _ApplyBench()
+  {
+    mBenchDirty = false;
+    auto stateFor = [this](double age, double peakAmps) {
+      bench::State s;
+      s.mains = mBenchMains;
+      if (mBenchHeat == 1.0 && age <= 0.0)
+        return s;
+      s.perveance = bench::Perveance(age);
+      s.invCeiling = 1.0 / (bench::Reserve(mBenchHeat, age) * peakAmps);
+      return s;
+    };
+    const bench::State pre = stateFor(mBenchAge[0], kPreampPeakAmps);
+    const bench::State power = stateFor(mBenchAge[1], kPowerPeakAmps);
+    mCircuit.SetBench(pre);
+    mCircuit2.SetBench(pre);
+    mPower.SetBench(power);
+    mFadeCircuit.SetBench(pre);
+    mFadeCircuit2.SetBench(pre);
+    mFadePower.SetBench(power);
+    for (int k = 0; k < kNumSockets; k++)
+    {
+      mSocket[k].SetBench(pre);
+      mFadeSocket[k].SetBench(pre);
+    }
   }
 
   // How far (fraction of the conduction voltage) and how far at most (volts) bloom shifts the bias.
@@ -1053,7 +1528,8 @@ private:
   double _EconomyGain()
   {
     // Flipped (even back again mid-fade): start the switch once the last one has finished.
-    if (mEconomyStage == 0 && OversampleFor(mSampleRate, mParams.economy, mParams.highQuality) != mOversample)
+    if (mEconomyStage == 0
+        && OversampleFor(mSampleRate, mParams.economy, mParams.highQuality, mParams.Hot()) != mOversample)
     {
       mEconomyStage = 1;
       mEconomyCount = 0;
@@ -1120,6 +1596,8 @@ private:
 
   TubeParams mParams;
   TriodeStageCircuit mCircuit, mCircuit2;
+  TriodeStageCircuit mSocket[kNumSockets]; // 1.68.0: the chassis sockets (gain ones in mSocketMask)
+  int mSocketMask = 0;
   PushPullPowerAmp mPower;
   tonestack::TMBStack mStack;
 
@@ -1133,6 +1611,8 @@ private:
   FadeFrom mFadeFrom = FadeFrom::Classic;
   TriodeStageCircuit mFadeCircuit, mFadeCircuit2;
   bool mFadeStage2 = false;
+  TriodeStageCircuit mFadeSocket[kNumSockets];
+  int mFadeSocketMask = 0;
   PushPullPowerAmp mFadePower;
   bool mFadePowerOn = false;
   tonestack::TMBStack mFadeStack;
@@ -1141,6 +1621,28 @@ private:
 
   std::vector<iplug::sample> mBuffer;
   iplug::sample* mBufPtr[1] = {nullptr};
+
+  // Bench (see _BenchGlide): the supplies' and the cathodes' share of the Variac (ratios of 120 V),
+  // their glides, and the most current each section's circuit asks of its tubes (what the emission
+  // reserve is measured against: a 12AX7 on a 100k plate load peaks under 2 mA, B+ / Ra being 2.5 mA,
+  // and the power tubes here peak around 0.1 A with a hard strum; measured with the debug probes).
+  static constexpr int kBenchUpdateSamples = 16;
+  static constexpr double kPreampPeakAmps = 2e-3, kPowerPeakAmps = 0.12;
+  static constexpr double kBenchAgeGlideS = 0.15;
+  double mBenchMains = 1.0, mBenchHeat = 1.0, mBenchSupplyCoef = 1.0, mBenchHeatCoef = 1.0;
+  double mBenchAge[2] = {0.0, 0.0}, mBenchAgeCoef = 1.0; // Preamp, power tubes (gliding)
+  int mBenchCount = 0;
+  bool mBenchDirty = false;
+
+  // Power tube life (see _UpdateTubeLife) and the chassis page's glow levels.
+  double mPowerLife[kNumPowerTubes] = {1.0, 1.0, 1.0, 1.0};
+  bool mPowerDead[kNumPowerTubes] = {false, false, false, false};
+  double mDissAcc[2] = {0.0, 0.0}, mDissRatio[kNumPowerTubes] = {}; // (Accumulated per side, the ratio per tube)
+  int mDissN = 0;
+  bool mLifeTracking = false, mWearMaster = true, mUiWanted = false;
+  double mPopEnv = 0.0, mPopDecay = 0.999, mFailGain = 1.0, mWarmStep = 1e-5;
+  uint32_t mPopRng = 22222u;
+  double mLevel[kNumStageLevels] = {}, mLevelAcc[kNumStageLevels] = {};
 
   // Debug probes (see SetProbe). Not owned.
   TubeProbe* mProbe = nullptr;

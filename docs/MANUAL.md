@@ -12,6 +12,22 @@ speaker, Resonance) to exaggerated "Real Feel" effects, and it uses almost no CP
 off. It has a debug page with an oscilloscope on its circuit, a live schematic, a plain-English readout
 of what each setting does, and a CSV log.
 
+The two **LABS** have their own section in the AMP NEST, apart from the pedals:
+- **TUBE LAB** opens on its **chassis**: the whole amp in 3D, turned with the mouse. Its six preamp
+  tubes, four power tubes, transformers, turret-board parts and front panel can all be clicked and set,
+  and each leads to its tab, the debug scope or the SPEAKER LAB. Two of the preamp tubes are sockets
+  you fill: another gain stage, a cathode follower or a boost, on a 12AX7, 12AT7, 12AU7 or 5751.
+  **4 Tubes** makes the power amp a quad. It also has a bench (a Variac, a power-tube bias pot, tube
+  age), power tubes that red-plate and fail, and **AMP Capture**, which runs the AMP block's capture
+  as the Tube Lab's preamp so all of its power amp and physics work on any capture.
+
+![The Tube Lab's chassis in 3D](images/tube-lab-chassis.png)
+- **CAB LAB** has the **SPEAKER LAB**: 4x12, 2x12, 1x12 or 4x10 cabs, one or two at once, and up to
+  four mics placed in X, Y and Z, each hearing every cone with its real delay and angle.
+
+The pedals open from a drawer you drag them out of. The **OUTPUT** page has the limiter's Ceiling and
+Release, and stereo Width / Widen.
+
 For dynamics there's a **GATE** that stays solid after a high-gain amp (it can listen to your clean
 guitar wherever it sits) and a **PRO COMP** studio compressor (Clean, Opto or FET).
 
@@ -31,15 +47,24 @@ describes every version, with measurements.
   - [Real Feel switches](#real-feel-switches)
   - [60 Hz: supply ripple, grind and hum](#60-hz-supply-ripple-grind-and-hum-1390-grind-1400)
   - [Circuit+ (1.45.0)](#circuit-1450): cathode follower, cathode bias, speaker feedback, Resonance, 8x
+  - [The bench: Variac, bias pot, tube age](#the-bench-variac-bias-pot-tube-age-1580)
+  - [Power tubes that fail](#power-tubes-that-fail-1620)
+  - [AMP Capture: a capture as the preamp](#amp-capture-a-capture-as-the-preamp-1640)
+  - [Presets](#presets-1630)
   - [Oversampling](#oversampling) (and the solver's cost, sleep when off)
   - [Levels](#levels)
   - [The Classic engine](#the-classic-engine)
   - [Debug page: seeing what the circuit does](#debug-page-seeing-what-the-circuit-does)
+  - [The chassis: the amp in 3D, sockets and a quad](#the-chassis-the-amp-in-3d-sockets-and-a-quad-1620-3d-1680)
 - [EQ and live spectrum](#eq-and-live-spectrum-1460)
 - [Themes](#themes-1480)
 - [Audio buffer and your interface](#audio-buffer-and-your-interface-1510)
 - [CAB LAB](#cab-lab)
+  - [SPEAKER LAB: cabs and mics in 3D](#speaker-lab-cabs-and-mics-in-3d-1590)
+  - [Dual cabs](#dual-cabs-1610)
 - [GATE and PRO COMP](#gate-and-pro-comp-1520)
+- [OUTPUT page: limiter and stereo width](#output-page-limiter-and-stereo-width-1580)
+- [LABS and the PEDALS drawer](#labs-and-the-pedals-drawer-1600)
 - [Other blocks](#other-blocks)
 - [Building](#building)
 - [A/B slots and the cab IR](#ab-slots-and-the-cab-ir)
@@ -583,6 +608,152 @@ long, so the latency stays 15 samples.
 - The same test found an old bug: **Spkr Load clicked at -13 dB**. It had no crossfade; it now has
   one (-58 dB).
 
+### The bench: Variac, bias pot, tube age (1.58.0)
+
+[`TubeBench.h`](../NeuralAmpModeler/TubeBench.h), on the debug page's BENCH row. These are the things an
+amp tech changes on the bench rather than on the front panel. Stock (120 V, bias 100%, new tubes) is
+exactly the sound without them: every part is skipped.
+
+- **Variac** (90-135 V): the wall voltage, as `m = V / 120`. Everything the power transformer makes
+  follows it:
+  - the power amp's B+ supply target `V_supply · m`, so the screens follow too
+  - the fixed-bias supply `V_bias · m`, which comes off the same transformer, so the tubes stay
+    roughly as hot as they were
+  - the phase inverter's headroom: its tabulated transfer `S(u)` becomes `k · S(u / k)` with `k = m`
+  - the preamp's rail, through the same `SetSupplyTarget` path as Shared B+ (a 0.1 s decoupling RC)
+
+  The supplies glide to a new setting with a 0.25 s time constant.
+- **Heaters and emission.** The heater voltage is `6.3 · m`.
+  - The cathode's temperature follows the heater power, roughly `T = T0 · √(Vh / 6.3)` with
+    `T0 = 1050 K`. It lags with a 4 s time constant.
+  - An oxide cathode emits by **Richardson's law**, `J ∝ T² · e^(−W/kT)`. Relative to rated:
+    `E(h) = (T/T0)² · e^(W/k·(1/T0 − 1/T))`, with `W/k = 7000 K`. That gives `E` = 0.27 at 90 V,
+    0.44 at 100 V and 1.65 at 135 V.
+  - A healthy tube can emit `R0 = 8` times the most current its circuit asks for:
+    2 mA for a 12AX7 on a 100k load, 0.12 A for the power tubes here (measured with the probes).
+- **Tube age** (0-100%, preamp and power separately):
+  - Perveance: `P = 1 − 0.3 · age`, so a worn-out tube keeps 70% of its gain and current.
+  - Emission reserve: `R = R0 · (1 − 0.85 · age) · E(h)`.
+- **The emission ceiling.** The reserve becomes a soft limit on each tube's current,
+  `i' = i / (1 + (i/c)⁴)^(1/4)`, with `c = R · I_peak` and slope `di'/di = (1 + (i/c)⁴)^(−5/4)`.
+  - It runs inside the circuits' Newton solves (the preamp's on its plate current, the pentodes' in
+    `_Tube`), so the solves stay exact.
+  - Two square roots and a division per evaluation cost about 40% of the Tube Lab, so wherever
+    `x = (i/c)⁴ < 0.05` (almost everywhere) a cubic series is used instead:
+    `(1+x)^(−1/4) ≈ 1 − x/4 + 5x²/32 − 15x³/128`, error under 1e-6.
+  - The Newton loops are compiled twice (a template on whether the bench is in), so a stock tube's
+    loop carries none of it.
+- **Bias pot** (50-150% of stock idle current): the fixed bias, or the cathode resistor with cathode
+  bias, is re-solved by bisection for `I_idle · trim`. It is set at 120 V with new tubes, as you'd set
+  it on the bench, so worn tubes or a lowered Variac then idle wherever the circuit puts them. The
+  output is normalized at the stock bias, so a cold bias sounds colder instead of being made up.
+- **Readout** (debug page):
+  - mains volts, heater volts, cathode temperature
+  - each section's reserve and perveance (healthy / peaks soften / peaks limited / starved)
+  - the preamp's B+ range, the power B+ and screens at their lowest, and the bias supply
+  - each power tube's average current and plate dissipation `(Vp − Vk) · Ip`, against its rating
+    (EL34 25 W, 6L6 30 W), on a bar from cold to RED PLATING. With nothing playing, the average
+    current is the idle.
+
+Measured on the user's settings (a -19 dBFS strum into the Tube Lab), as level and level-matched
+difference from stock:
+
+| Setting | Level | Difference |
+|---|---|---|
+| Variac 90 V | -1.5 dB | -28 dB |
+| Variac 135 V | +0.6 dB | -35 dB |
+| Bias 50% | -2.4 dB | -26 dB |
+| Power age 100% | -1.3 dB | -32 dB |
+| 90 V with both tube sets worn out | -5.2 dB (peaks -8.4) | -17 dB |
+
+A clean power amp mostly shows the Variac as headroom and level, as a real one at that volume does.
+All bench moves glide, and switching between settings on a held note was click-free.
+
+### Power tubes that fail (1.62.0)
+
+With **Power tubes can fail** on (the chassis page; off by default), each power tube wears while its
+plate dissipation is over its rating:
+
+- The dissipation `D_k = (Vp_k − Vk) · Ip_k` is averaged per block, smoothed over 0.3 s, and taken
+  as a share `ρ` of the rating.
+- When `ρ > 1` (red-plating), the life left falls by
+  `dL/dt = 0.02 · ((ρ − 1) / 0.1)² · (1 + 12 · max(0, h − 1))` per second. That's about a minute at
+  110%, a few seconds at 130%, and up to 2.5x faster with the heaters over-run (135 V). Under its
+  rating a tube doesn't wear at all.
+- This is accelerated a lot (real red-plating takes minutes to hours) so you can hear it happen.
+- At `L = 0` the tube goes **open**: its current and slopes are zero in the power amp's solve
+  (`SetTubeDead`). The amp carries on through the other tube alone: every other half-cycle crosses
+  over, thin and fizzy. With both gone it's silent.
+- The failure is a bang: a sharp crack, then noise decaying over about 8 ms.
+- **REPLACE** puts in a new tube, and the output warms back up over 2 s (smoothstep).
+- Channel 0 wears the tubes; channel 1 follows it.
+
+Measured (user's EL34 settings):
+- At stock, the tubes sit at 59% of their rating and never wear.
+- At 135 V with the bias pot at 150%, one fails in 24 s and its partner 3 s later: with one tube
+  gone, B+ rises and the other runs hotter.
+- 6L6s last about 107 s at the same settings.
+
+### AMP Capture: a capture as the preamp (1.64.0)
+
+A neural capture is a fixed snapshot of one amp at one setting. It has no bias, caps or tubes inside
+to change. **AMP Capture** puts the capture where the Tube Lab's preamp tubes are, so everything the
+Tube Lab does after its preamp works on it:
+- the tone stack, if one is on
+- the phase inverter and push-pull power amp: Master, Sag, Feedback, Presence, EL34/6L6
+- the bench, Real Feel, the speaker load, and failing tubes
+
+How it runs:
+- The AMP block's model runs inside the Tube Lab's block on the mono mix of its input, through
+  **Drive** as an input gain (`10^((Drive − 12)/20)`, so 12 dB is unity, ramped across the block).
+- The AMP block's own noise gate and Bass / Mid / Treble follow, as in the AMP block.
+- The result goes into the oversampled Tube Lab with the preamp skipped (no bright cap, Touch or
+  triodes), straight to the tone stack and the power amp's phase inverter. A capture's output peaks
+  in the same range the circuit preamp's does (0.4-1.5 of the power amp's normalized input at the
+  presets' settings), so it goes in at unity, and **Master** sets how hard it drives the power tubes.
+- The AMP block on the grid steps aside (its chip says AMP IN LAB), so the capture runs once.
+
+Checked through the whole plugin:
+- With the Tube Lab's power amp off, it matches the AMP block alone at 0.00 dB. The rest of the
+  difference, -26 dB, is the Tube Lab's resampling filters and 15 Hz output coupling cap.
+- With it on, the Variac (90 V) and bias pot (60%) change a capture's sound by -39 and -27 dB
+  level-matched.
+
+It's most real with preamp or DI captures. A full-amp capture already has a power amp in it.
+
+### Presets (1.63.0)
+
+The ten presets (PRESETS on the card) were voiced at the level the Tube Lab really gets here: hard
+picks around -19 dBFS, soft ones -31. They used to be voiced with a signal about 9 dB hotter. At a
+real playing level that left the drive presets under-driven (800 Lead broke up less than Plexi
+Crunch, Tweed Breakup barely at all) and let their levels jump by up to 16 dB.
+
+How they were voiced:
+- Each preset was measured on test tones and on a strum filtered like a real pickup (a resonance
+  near 4 kHz, then 12 dB/oct). The synthetic strum alone was 7 dB too bright to judge fizz by.
+- The measurements went through a real 4x12 IR (JCM900 1960, BLENDED 3).
+- A coordinate search moved each preset's own knobs toward targets for its name:
+  - how much it breaks up: distortion on a hard and a soft pick at 110 Hz
+  - its low end: 80-250 Hz against 500-2000 Hz
+  - its top end: 4-8 kHz against 1-3 kHz, compared with the clean preset's own value through the
+    same IR
+- Each Output then matches the preset's RMS to the dry strum's (Tight Boost: +6 dB, it's a boost).
+
+| Preset | Hard pick | Soft pick |
+|---|---|---|
+| Blackface Clean | 2.5% | 0.6% |
+| Tweed Breakup | 10% | 1% |
+| Top Boost Chime | 12% | 2% |
+| Plexi Crunch | 32% | 11% |
+| 800 Lead | saturated | saturated |
+| Modern High Gain | saturated | saturated |
+| Singing Lead | saturated | saturated |
+
+Two things worth knowing:
+- A "fizz" measure from the 7th harmonic up of a 110 Hz tone measures the distortion's body
+  (770 Hz-3 kHz), not fizz. Fizz is judged at 4-8 kHz, after the cab.
+- A preset also resets the bench to stock, since that's what it was voiced on.
+
 ### Oversampling
 
 Each saturating stage creates harmonics well above the host's Nyquist frequency. If the stages ran
@@ -594,6 +765,19 @@ Tube Lab runs at about 176-192 kHz whatever the host rate:
 | 44.1 / 48 kHz | 4x | 61 | 15 samples |
 | 88.2 / 96 kHz | 2x | 31 | 15 samples |
 | 176.4 / 192 kHz | 1x | none | 0 |
+
+The **8x** switch doubles the factor and **Economy** halves it. Since 1.63.1 a hot setting (Stage 2
+on) doubles it by itself: two cascaded clipping stages make harmonics past the 4x rate's Nyquist. On
+a high E (1318.5 Hz, chosen so its harmonics don't land on 48 kHz's multiples) at the 800 Lead preset,
+the inharmonic (aliased) energy relative to the note was:
+
+| Oversampling | Aliasing |
+|---|---|
+| 2x (Economy, before 1.63.1) | -40 dB |
+| 4x (Economy, now) | -43 dB |
+| 8x (now the default with Stage 2 on) | -53 dB |
+
+With the second stage on, the Tube Lab costs about 13% of a core instead of 7% on the test PC.
 
 How it works:
 - Upsampling is zero-stuffing followed by a Kaiser-windowed (β = 7) sinc low-pass with gain × factor.
@@ -745,6 +929,81 @@ How it measures:
 - It only measures channel 0, and only while the page is open or the log is on. Measuring costs about
   6% of the Tube Lab's CPU and changes nothing in the sound: the output is bit-for-bit identical with
   it on or off.
+
+### The chassis: the amp in 3D, sockets and a quad (1.62.0, 3D 1.68.0)
+
+[`TubeChassisControls.h`](../NeuralAmpModeler/TubeChassisControls.h). It opens when you open TUBE LAB or
+TUBE LAB 2; its X shows the knobs underneath, and **CHASSIS** beside the tabs brings it back.
+
+![The chassis: V5 as a 12AT7 gain stage, V6 a follower, four power tubes](images/tube-lab-chassis.png)
+
+- **3D:** the chassis, its parts and the Variac on the bench are boxes and cylinders, lit from above,
+  projected in perspective and drawn back to front. Drag to turn it all the way round, use the wheel to
+  zoom, and press RESET VIEW (or double-click empty space) to go back.
+- **The signal path:** a wire runs from the input jack through every working tube to the phase
+  inverter, the power tubes and the output transformer, then out of the speaker jack. Each leg lights
+  with the level its stage passes on.
+- **Links:** click anything to see what it is and set it in the side panel. Double-click it, or use
+  its GO TO buttons, to go to:
+  - the PREAMP, POWER AMP or FEEL tab
+  - the debug scope, set to that tube's node
+  - the SPEAKER LAB (output transformer, speaker jack)
+  - the AMP capture (input jack)
+
+![Turned round: the tube row from V1 to V12, the front panel and the Variac](images/tube-lab-chassis-turned.png)
+
+- **The preamp tubes:** six, in signal order along the back: V1 input, V2 gain stage, the sockets V5
+  and V6, V3 cathode follower, V4 phase inverter. Each glows by its heater: brightness `∝ h⁴`, the
+  colour running from dull red at 0.75 to yellow-white at 1.125. Each pulses with its own stage's
+  peak signal, measured per block on the audio thread only while the page is open. A stage that's off
+  sits cold.
+- **The sockets V5 and V6** ([`TubeStage.h`](../NeuralAmpModeler/TubeStage.h) `SocketParams`) are
+  cascaded after V2.
+  - Each has a **Job**:
+    - **Empty:** no sound, no CPU.
+    - **Gain:** a common-cathode stage like V2 (the same circuit solve), driven by the stage before
+      it through its own Gain pot and coupling cap.
+    - **Follower:** a cathode follower on the stage before it. What follows is then driven from the
+      follower's cathode.
+    - **Boost:** a gain stage with its cathode unbypassed.
+  - Each has a **Tube:** 12AX7, 12AT7 (mu 60), 12AU7 (mu 17) or 5751 (mu 70). The other types keep the
+    12AX7 model's curve shape and grid diode, with their own mu. Their `G` is fitted so the plate
+    current matches the datasheet at one operating point (`FitTriode` in
+    [`TubeCircuit.h`](../NeuralAmpModeler/TubeCircuit.h)). Changing the tube sets Bias to where that
+    tube usually runs (12AU7: -5 V).
+  - Gain sockets share the preamp's supply with V1 and V2. The Follower switch (V3) follows the last
+    gain stage, sockets included.
+  - Each gain socket costs about 0.7% of a core.
+  - The debug scope has their plates as channels.
+- **The power tubes V9-V12:** a pair uses V9 and V10. **4 Tubes** (also on the POWER AMP tab) makes it
+  a quad, as in a 100 W head ([`PowerAmp.h`](../NeuralAmpModeler/PowerAmp.h)):
+  - two tubes per side in parallel, into half the load (1.7k plate to plate)
+  - a supply with half the resistance and twice the caps
+  - a bigger output transformer: a 30 Hz corner, saturating at twice the flux
+
+  Each tube sees the same voltages as in the pair, so small signals are as loud. What changes is
+  the supply and transformer holding up longer, which is clearest with OT Iron on. Each tube wears
+  on its own. A failed tube in a quad halves its side: that side pushes half as hard, lopsided and
+  fizzy. In a pair, the side goes silent.
+- **The turret board:** the preamp's parts, drawn as the parts:
+  - orange-drop input and coupling caps
+  - electrolytic bypass caps
+  - silver-mica plate caps
+  - carbon-comp plate and cathode resistors, with their EIA colour bands for the actual value (the
+    cathode resistors' come from the solved Rk)
+  - the Gain 2 pot
+
+  Clicking a part or tube says what it does and puts its control beside it.
+- **The Variac** sits on the bench beside the chassis, 90-135 V with red past 125 V; drag it or
+  wheel over it.
+- **The power tubes' health:** life, dissipation and state, with REPLACE.
+- **Drawing cost:** the page redraws only when a signature of what it shows changes (levels to
+  about 1 dB, the parts' values, the tubes' health), at most every 40 ms, and while you turn it.
+  Closed, it costs nothing.
+
+**ALWAYS ON** (1.58.0, the debug page's bottom row) keeps the probes running with the page closed, so
+it opens with live readouts and scope history. Measured: about 3% more of a core the whole time
+(Tube Lab 18.7% → 21.9%). It asks before switching on. It's remembered in ui.ini.
 
 ## EQ and live spectrum (1.46.0)
 
@@ -924,6 +1183,67 @@ How it works:
 The speaker and mic curves approximate spec charts and are not measurements. The placement physics
 (delays, fall-off, proximity, phase) is real.
 
+### SPEAKER LAB: cabs and mics in 3D (1.59.0)
+
+The **SPEAKER LAB** button on the CAB LAB card opens CAB LAB's 3D mode (presets from before it stay in
+the classic mode above, bit-identical).
+
+- **Cab formats:** 4x12 (closed back), 2x12, 1x12 and 4x10 (open back). Each has its cones where
+  they really sit (a 4x12's at ±16.5 cm), its cone radius (12": 0.12 m, 10": 0.10 m) and its dust
+  caps 2-2.5 cm behind the grille. A mild cabinet character goes on top of the speaker voicing: the
+  closed back's low resonance, an open back's lighter lows. A new **4x10 Jensen P10R** voicing is
+  added.
+- **Mics:** up to four, each placed in X / Y (cm across the baffle from its centre) and Z (cm out
+  from the grille). There are ten types: the six before, plus e609, e906, M160 ribbon and C414. Each
+  mic hears every cone separately. For a cone at `(cx, cy)`, with sideways offset `r` and
+  `z' = z + recess`:
+  - **Distance** `d = √(r² + z'²)`: the arrival is delayed by `d / 343 m/s`.
+  - **Level:** the on-axis pressure of a vibrating piston, `(√(d² + a²) − d)`. It's flat within the
+    cone's radius and falls 6 dB per doubling past it. It's normalized to 1 at 5 cm for any cone
+    size, so a close mic hears its own cone about 15 dB over the next.
+  - **Where it points on the cone:** `s = r / √(r² + (z' + a)²)`. That's 0 on the dust cap and about
+    0.7 at the edge up close, and the sine of the off-axis angle far away. It sets a treble shelf
+    `2 − 15.5·s` dB above 2.5 kHz (one-pole split): the bright cap, the darker edge, beaming off
+    axis.
+  - **The mic's polar pattern**, aimed at the baffle: `A + (1 − A)·cos φ` (cardioid 0.5,
+    supercardioid 0.37, hypercardioid 0.25, figure-8 0). Off-axis treble loss of 2-6 dB at 90°
+    (most for dynamics) is added to the shelf.
+  - **Proximity effect** comes from the nearest cone, as in the classic mode.
+  - **Mismatched cones:** they differ slightly in level and time (±30 µs), as real speakers do.
+
+  So a mic between two cones comb-filters: an SM57 between a 4x12's top cones, 10 cm out, has
+  notches near 3-6 kHz. Two mics at different distances phase-cancel like real ones.
+- **Gliding:** placement is recomputed every 32 samples and ramped (delay, level, shelf), so dragging
+  a mic doesn't zipper: what's left is -62 dB under the signal. One power-of-two delay line feeds
+  every read.
+- **CPU:** 2.2% of a core with two mics on a 4x12, 2.8% with four; mics that are off cost nothing.
+- **The page:**
+  - FRONT (drag X / Y, wheel for Z)
+  - SIDE (Z on a square-root axis, so the first centimetres get room)
+  - 3D (perspective, orbit, with path lines from each mic to each cone)
+  - RESPONSE (each mic and the sum)
+  - a readout of the selected mic's distance, angle, delay, level and treble from each cone
+
+  The plot is the same math evaluated as complex transfer functions: `Σ_k g_k·(LP + s_k·(1 − LP))·e^(−jωτ_k)`
+  through the mic's biquads, the proximity shelf and the speaker. It matches the audio's impulse
+  response to a median 0.02 dB (it differs only above about 8 kHz in comb-filtered spots, where the
+  audio's linear-interpolated delays are a little darker). The views redraw only when something
+  changes.
+
+### Dual cabs (1.61.0)
+
+**Cabs: Single / Dual** puts a second cab beside the first.
+- **Cab 2** has its own size, speaker voicing and source: the model, or **its own IR** (saved by
+  path in `###CabLabIR2V1###`).
+- **Mics:** each mic is on one cab (its Cab field), placed in that cab's coordinates. Moving a mic to
+  the other cab keeps its spot on the matching cone. Pans stay per mic.
+- **Signal:** the same signal feeds both cabs; each has its own speaker filter, character and delay
+  line.
+- **Colours:** cab 1 is gold and cab 2 is teal throughout: tabs, badges, the size row and the 3D
+  view, which stands both side by side at their real sizes.
+- **Switching to Dual** turns a mic on for cab 2 if none is.
+- **The RESPONSE plot** follows the selected cab, with both together dashed.
+
 ## GATE and PRO COMP (1.52.0)
 
 Two blocks in the AMP NEST pedal list (at the end), placed on the grid like any pedal.
@@ -1000,6 +1320,104 @@ with the peak since the last UI frame, so a short hit always shows. The params a
 enum (`kGateActive`..`kSCompScHpf`, then `kGridCell41/42`), saved by name, and states from before
 1.52.0 load with both blocks off the grid. The AMP block's built-in Gate (the original one-knob gate) and
 the original COMP pedals are unchanged.
+
+## TRACK GATE, delays and spring reverb (1.66.0)
+
+Five pedals in `MorePedals.h`, each after a classic pedal's behaviour (not its circuit). They open
+in the wide pedal popup, ring out when switched off (except the gate), and cost nothing off the grid.
+
+**TRACK GATE.** A peak detector (instant attack, 10 ms decay) in dB, with 4 dB of hysteresis and a
+Hold count. Closed, the target gain is a downward expander,
+`max(Range, min(0, (env - threshold) * (Ratio - 1)))` dB, and the gain glides there in dB. The models
+differ in the release:
+
+- **Classic**: the Release knob, 5 ms to 1.5 s (`0.005 * 300^knob`).
+- **Tracking**: the release follows the note. The detector's slope (dB/s, smoothed over 50 ms) is
+  how fast the note is dying. The release time is `clamp(40 / rate, 25 ms, 2 s)`, times
+  `0.5 + 2.5 * knob`. Before that factor, a note fading at 20 dB/s closes over 2 s, and a palm-muted stop at 800 dB/s closes
+  in 50 ms.
+- **Smart**: like Tracking, but only the noisy band is gated. The signal is split with two
+  complementary one-poles (250 Hz and 3 kHz), so `low + mid + high` is exactly the input. Hiss gates
+  `high`, Mid gates `mid + high`, Full gates everything.
+
+Key In listens to the clean input (the same copy GATE uses).
+
+**DIGI DELAY.** A Hermite-interpolated delay line with a one-pole in the repeats: 7 kHz, or 2.8 kHz
+with a `tanh` in the loop for Warm. Mod adds a 0.6 Hz, 1.5 ms sweep, a quarter cycle apart between L
+and R. Reverse reads at `T + 2p` behind the write point, where p counts 0..T-1 in each window, so the
+window plays backwards, with 10 ms fades at its ends. A time change crossfades between the old and new
+read points over 30 ms.
+
+**ANALOG DLY.** The bucket-brigade chip's bandwidth falls as its clock slows for longer delays:
+`clamp(2400 * (300 / T)^0.45, 1500, 6500)` Hz, two poles. The loop is `tanh(1.4 * (x + regen * wet)) / 1.4`
+with regen up to 1.12, so past about 9 the loop gain is over 1 and it oscillates at a bounded level.
+Time glides over 80 ms (the swoop). Mod moves the delay by `width * 0.4%` of the time.
+
+**TAPE ECHO.** One tape loop per channel, read by three heads at 1, 2 and 3 times head 1's delay
+(`300 - 230 * rate` ms). The tape's bandwidth is `3.2 + 4.5 * rate` kHz (two poles), and recording
+goes through `tanh(k * x) / k` with `k = 1 + 3 * saturate`. Wow and flutter are uniform noise through
+two one-poles each (0.8 Hz and 12 Hz), scaled to unit size: up to 1.5 ms of drift and 0.08 ms of
+flutter. Several heads at once are scaled by `1 / sqrt(heads)`. The built-in spring is SPRING VERB's
+tank at Dwell 3.5 and a 2 s decay.
+
+**SPRING VERB.** Per side, two springs (loops of 33 and 41 ms on the left, 37 and 45.5 ms on the
+right). Each spring is a delay loop with 24 first-order allpasses (`a` 0.62 to 0.68), a one-pole
+low-pass (2.5-7 kHz, Tone) and a 180 Hz high-pass inside it. The allpasses delay low frequencies
+more than high ones, which is the spring's dispersion: an impulse comes back as a falling chirp each
+round trip. The loop gain gives an RT60 of `1 + 3 * decay` seconds. Dwell is the drive into the
+transducer: gain `0.6 + 6 * dwell^2`, rolled off at 5 kHz, then `tanh`. The springs' read points wobble
+by 3 samples at 0.9 Hz.
+
+## TUBE LAB 2: dual amps (1.67.0)
+
+TUBE LAB 2 is a second Tube Lab: its own `tube::TubeStage` pair (`mTubeStage2`) and its own capture
+(`mLab2Model`, staged like the NAM pedals' captures). Its params are a copy of every Tube Lab sound
+param, `kLab2First + i` for `kTubeLabParams[i]`, made with `IParam::Init` so the ranges, defaults and
+display texts match. `LabParam(lab, p)` gives lab 0's or lab 1's copy of `p`, and
+`_ReadTubeParams(lab)` reads either lab. The audio case is shared: `lab` picks the params, stages,
+output buffers, capture and power-tube replace requests.
+
+The UI is shared too. The popup, the debug page and the chassis page are built once, for TUBE LAB.
+Opening TUBE LAB 2 calls `_SetUiLab(1)`, which re-binds every control on a `kTubeLabParams` param to
+lab 1's copy (`SetParamIdx`, then its value). The functions that read Tube Lab params for the UI (the
+greying rules, presets, the curve, the debug readout, the chassis view) go through `_TP(p)`,
+`LabParam(mUiLab, p)`. The few controls only one lab has (`mLabOnly`) show for it alone: TUBE LAB's
+AMP Capture switch, and TUBE LAB 2's Capture switch, LOAD CAPTURE and file name. The audio thread
+attaches the probe to, and reports the chassis readings from, the lab in `mUiLabAudio`. REAL FEEL's
+controls stay TUBE LAB's.
+
+## OUTPUT page: limiter and stereo width (1.58.0)
+
+Open it with **OUTPUT** under Master Out, OUT on the grid, or a click on the OUT meter.
+
+- **Limiter** ([`OutputLimiter.h`](../NeuralAmpModeler/OutputLimiter.h)): the lookahead limiter described
+  below, now with a **Ceiling** (-12 to -1 dBFS; its required gain is `ceiling / peak`) and a
+  **Release** (5-500 ms, the one-pole's time constant). There's a gain-reduction meter (the most
+  reduction in each block, falling instantly and recovering over about 0.3 s). Checked: Master Out
+  +12 dB at Ceilings of -1, -6 and -12 dBFS gives peaks of exactly -1.00, -6.00 and -12.00.
+- **Width and Widen** ([`StereoWidth.h`](../NeuralAmpModeler/StereoWidth.h)): mid/side on the output,
+  after the Output EQ and before Master Out, with `M = (L + R)/2` and `S = (L − R)/2`.
+  - **Width** scales the side: `S' = W·(S + c)`. 0% is mono (it replaces 1.55.0's Mono switch, and a
+    preset saved with Mono on loads as 0%); 200% doubles it.
+  - **Widen** adds a copy of the middle to the side: `c = 0.7·Widen·HP₂₅₀(M delayed 11 ms)`, so
+    `L = M + S'` and `R = M − S'`. Each side gets complementary combs, which sounds wide. The bass
+    stays centred (the high-pass). The mono sum `(L + R)/2 = M` is exactly unchanged (tested to
+    1e-17), unlike a Haas delay.
+  - There's a correlation meter `Σ L·R / √(Σ L² · Σ R²)`; on the test chain, Widen 100% takes it
+    from +0.36 to +0.07.
+  - At 100% / 0% it's skipped.
+
+## LABS and the PEDALS drawer (1.60.0)
+
+- **LABS:** the AMP NEST has a LABS section with a slot each for TUBE LAB and CAB LAB, drawn as amp
+  heads with a jewel lamp. They look the same on the grid, so they stand out from the pedals.
+- **PEDALS drawer:** the PEDALS button opens a drawer over the AMP NEST panel with every pedal off
+  the grid. Drag one onto the grid (the drawer stays open), drag one off the grid to put it back, or
+  click one for its settings.
+- **CAB** can leave the grid too since 1.61.1. It then waits in the drawer's first slot.
+- **CPU when off:** measured through the whole plugin on the user's chain, everything on is 7.8% of
+  a core, every block switched off 0.51%, an empty grid 0.41%. A switched-off block costs next to
+  nothing.
 
 ## Other blocks
 
@@ -1195,7 +1613,10 @@ params on load. After the capture-pedal paths come `###CabLabIRV1###` (CAB LAB's
 `###ExtraCabIRsV1###` (a count, then CAB 2 / CAB 3's IR paths), and since 1.42.0
 `###CabIRRightV1###` (the right-channel cab IR's path, or empty) and `###ABSlotsV1###` (the index
 of the A/B slot that isn't live, then its model, cab IR and right-channel IR paths; `ABSlot` is
-the live one). A state without a section clears what it holds. The autosave is in
+the live one). The 1.66.0 pedals have grid ids 43-47 and their params are saved by name (`TrackGate*`,
+`DigiDelay*`, `AnalogDelay*`, `TapeEcho*`, `SpringVerb*`). Since 1.61.0 a section, `###CabLabIR2V1###`, holds CAB LAB cab 2's IR path, and since 1.67.0 a last one,
+`###TubeLab2CaptureV1###`, TUBE LAB 2's capture path. A
+state without a section clears what it holds. The autosave is in
 `%LOCALAPPDATA%\GriffinAmplification\autosave.namstate`.
 
 ## Credits
@@ -1205,5 +1626,7 @@ the live one). A state without a section clears what it holds. The autosave is i
   app is forked from. It is built with [iPlug2](https://iplug2.github.io).
 - K. Dempwolf and U. Zoelzer, "A Physically-motivated Triode Model for Circuit Simulations", DAFx 2011.
 - N. Koren, "Improved VT models for SPICE simulations" (triode and pentode equations).
+- O. W. Richardson's thermionic emission law, `J = A·T²·e^(−W/kT)` (the bench's heater model).
+- The on-axis pressure of a baffled circular piston, `p ∝ √(d² + a²) − d` (the SPEAKER LAB's distance law).
 - P. McLeod and G. Wyvill, "A Smarter Way to Find Pitch" (tuner).
 - R. Bristow-Johnson, "Audio EQ Cookbook" (biquads).

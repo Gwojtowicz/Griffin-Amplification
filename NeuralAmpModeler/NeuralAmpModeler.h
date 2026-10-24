@@ -7,6 +7,7 @@
 #include "../AudioDSPTools/dsp/ImpulseResponse.h"
 #include "FastImpulseResponse.h" // The cab IRs are made as these (1.35.0): FFT convolution
 #include "OutputLimiter.h"
+#include "StereoWidth.h"
 #include "../AudioDSPTools/dsp/NoiseGate.h"
 #include "../AudioDSPTools/dsp/dsp.h"
 #include "../AudioDSPTools/dsp/wav.h"
@@ -22,6 +23,8 @@
 #include "ChainGrid.h"
 
 #include "IPlug_include_in_plug_hdr.h"
+#include <future>
+#include "PackScanner.h" // 1.70.0 PACK PICKER
 
 // TEMP drag-debug log, defined in NeuralAmpModelerControls.h.
 inline void NAMDragLog(const char* fmt, ...);
@@ -31,6 +34,7 @@ inline void NAMDragLog(const char* fmt, ...);
 #include "NewPedals.h"
 #include "ProEQ.h"
 #include "Dynamics.h"
+#include "MorePedals.h"
 #include "Spectrum.h"
 #include "RealFeel.h"
 #include "MainsHum.h"
@@ -421,9 +425,134 @@ enum EParams
   kGridIn41,
   kGridCell42,
   kGridIn42,
-  kOutputMono, // 1.55.0: both outputs carry the L+R mix (switch under Master Out)
+  kOutputMono, // 1.55.0: both outputs carry the L+R mix. 1.58.0: replaced by Width (loads as Width 0%)
+  // Tube Lab bench (1.58.0, TubeBench.h; on the debug page): the Variac (V), the power tubes' bias pot
+  // (% of stock idle current) and the preamp's and power tubes' age (%).
+  kTubeVariac,
+  kTubeBiasPot,
+  kTubePreampAge,
+  kTubePowerAge,
+  // OUTPUT page (1.58.0): the limiter's Ceiling (dBFS) and Release (ms), and the output's stereo
+  // Width and Widen (StereoWidth.h).
+  kLimiterCeiling,
+  kLimiterRelease,
+  kOutputWidth,
+  kOutputWiden,
+  // SPEAKER LAB (1.59.0, CabLab.h): CAB LAB's 3D placement mode, the cab's format, and four mics of
+  // {On, Type, X, Y, Z, Level, Pan, Invert} each (see LabMicParam).
+  kCabLab3D,
+  kCabFormat,
+  kLabMicFirst,
+  kLabMicLast = kLabMicFirst + 4 * 8 - 1,
+  // Dual cabs (1.61.0): Single / Dual, cab 2's format, speaker and source (its own IR, see
+  // mCabLabIR2), and which cab each mic is on.
+  kCabDual,
+  kCab2Format,
+  kCab2Speaker,
+  kCab2SourceIR,
+  kLabMicCabFirst,
+  kLabMicCabLast = kLabMicCabFirst + 3,
+  // 1.62.0: the Tube Lab's power tubes can fail (red-plating wears them out; TubeStage.h).
+  kTubeCanFail,
+  // 1.64.0: the AMP block's capture as the Tube Lab's preamp (the AMP block then steps aside).
+  kTubeCapture,
+  // 1.66.0 pedals (MorePedals.h; grid ids chaingrid::kTrackGate .. kSpringVerb), then their grid params.
+  kTGActive,
+  kTGEngaged,
+  kTGModel, // Tracking / Classic / Smart
+  kTGThreshold,
+  kTGRelease,
+  kTGHold,
+  kTGRange,
+  kTGRatio,
+  kTGNoise, // Smart: Hiss / Mid / Full
+  kTGKey,
+  kDigiActive,
+  kDigiEngaged,
+  kDigiMode, // Standard / Mod / Warm / Reverse
+  kDigiTime,
+  kDigiFeedback,
+  kDigiLevel,
+  kAnaActive,
+  kAnaEngaged,
+  kAnaTime,
+  kAnaRegen,
+  kAnaMix,
+  kAnaMod,
+  kAnaRate,
+  kAnaWidth,
+  kTapeActive,
+  kTapeEngaged,
+  kTapeHeads,
+  kTapeRate,
+  kTapeIntensity,
+  kTapeEcho,
+  kTapeReverb,
+  kTapeWow,
+  kTapeDrive,
+  kSprActive,
+  kSprEngaged,
+  kSprDwell,
+  kSprTone,
+  kSprMix,
+  kSprDecay,
+  kGridCell43,
+  kGridIn43,
+  kGridCell44,
+  kGridIn44,
+  kGridCell45,
+  kGridIn45,
+  kGridCell46,
+  kGridIn46,
+  kGridCell47,
+  kGridIn47,
+  // TUBE LAB 2 (1.67.0, grid id chaingrid::kTubeLab2): its Active (on the grid), then a copy of each
+  // of the Tube Lab's sound params, in kTubeLabParams' order (see LabParam), then its grid params.
+  kLab2Active,
+  kLab2First,
+  kLab2Last = kLab2First + 52 - 1,
+  kGridCell48,
+  kGridIn48,
+  // 1.68.0: the chassis: its two preamp sockets V5, V6 (TubeStage.h SocketParams), kSocketFields each (see
+  // SocketParam), and the quad switch (four power tubes); TUBE LAB's, then TUBE LAB 2's copies in the same
+  // order (see LabParam).
+  kTubeSockFirst,
+  kTubeSockLast = kTubeSockFirst + 2 * 7 - 1,
+  kTubeQuad,
+  kLab2SockFirst,
+  kLab2SockLast = kLab2SockFirst + 2 * 7 - 1,
+  kLab2Quad,
+  // 1.71.0: tap tempo. The tempo, then each delay's note value for it (Off = taps leave it alone; see
+  // _PushTempoToDelays): DELAY, DELAY 2, DELAY 3, DIGI DELAY, ANALOG DLY, TAPE ECHO.
+  kTempoBPM,
+  kDelayTapDiv,
+  kDelay2TapDiv,
+  kDelay3TapDiv,
+  kDigiTapDiv,
+  kAnaTapDiv,
+  kTapeTapDiv,
   kNumParams
 };
+
+// A chassis socket's param (1.68.0): socket k (0, 1 = V5, V6), field one of these (TUBE LAB's; LabParam
+// gives TUBE LAB 2's).
+enum SocketField
+{
+  kSockRole = 0, // Off / Gain / Follower / Boost
+  kSockTube, // 12AX7 / 12AT7 / 12AU7 / 5751
+  kSockGain,
+  kSockBias,
+  kSockCap,
+  kSockPlateCap,
+  kSockCouple,
+  kSocketFields
+};
+constexpr int SocketParam(int k, int field) { return kTubeSockFirst + k * kSocketFields + field; }
+static_assert(kTubeSockLast - kTubeSockFirst + 1 == 2 * kSocketFields, "2 sockets x kSocketFields");
+// The chassis's own params, TUBE LAB's and TUBE LAB 2's (each block the same length, in the same order).
+constexpr int kTubeChassisFirst = kTubeSockFirst, kTubeChassisLast = kTubeQuad;
+constexpr int kLab2ChassisFirst = kLab2SockFirst, kLab2ChassisLast = kLab2Quad;
+static_assert(kLab2ChassisLast - kLab2ChassisFirst == kTubeChassisLast - kTubeChassisFirst, "same layout");
 
 // An EQ band's param: first = kProEqBandFirst or kOutEqBandFirst, field 0 On, 1 Freq, 2 Gain, 3 Q.
 constexpr int EqBandParam(int first, int band, int field) { return first + band * 4 + field; }
@@ -433,13 +562,53 @@ constexpr int EqBandExtParam(int first, int band, int field) { return first + ba
 // A grid block's cell and input-cable params, by block id (not Input).
 constexpr int kLateGridCell[] = {kGridCell32, kGridCell33, kGridCell34, kGridCell35,
                                  kGridCell36, kGridCell37, kGridCell38, kGridCell39, kGridCell40,
-                                 kGridCell41, kGridCell42};
+                                 kGridCell41, kGridCell42, kGridCell43, kGridCell44, kGridCell45,
+                                 kGridCell46, kGridCell47, kGridCell48};
 constexpr int kLateGridIn[] = {kGridIn32, kGridIn33, kGridIn34, kGridIn35, kGridIn36,
-                               kGridIn37, kGridIn38, kGridIn39, kGridIn40, kGridIn41, kGridIn42};
+                               kGridIn37, kGridIn38, kGridIn39, kGridIn40, kGridIn41, kGridIn42,
+                               kGridIn43, kGridIn44, kGridIn45, kGridIn46, kGridIn47, kGridIn48};
 // The 1.44.0 pedals' params, first to last (older states load them at their defaults).
 constexpr int kNewPedalParamsFirst = kSkyActive, kNewPedalParamsLast = kApexBright;
 // The 1.52.0 GATE and PRO COMP params, first to last (older states load them at their defaults).
 constexpr int kDynamicsParamsFirst = kGateActive, kDynamicsParamsLast = kSCompScHpf;
+// The 1.66.0 pedals' params, first to last (older states load them at their defaults).
+constexpr int kMorePedalParamsFirst = kTGActive, kMorePedalParamsLast = kSprDecay;
+// The 1.71.0 tap tempo params, first to last (older states load them at their defaults).
+constexpr int kTempoParamsFirst = kTempoBPM, kTempoParamsLast = kTapeTapDiv;
+// 1.67.0: every Tube Lab param TUBE LAB 2 has its own copy of (all but Active and the old Slot). LAB 2's
+// copy of kTubeLabParams[i] is kLab2First + i.
+constexpr int kTubeLabParams[] = {kTubeEngaged, kTubeDrive, kTubeBias, kTubeBloom, kTubeBright,
+                                  kTubeMix, kTubeOutput, kTubeCircuit, kTubeCathodeCap, kTubePlate,
+                                  kTubePlateCap, kTubeSagOn, kTubeSagSupply, kTubeSagTime, kTubeStage2,
+                                  kTubeGain2, kTubeBias2, kTubeCap2, kTubePlateCap2, kTubeCouple,
+                                  kTubePower, kTubeMaster, kTubePowerSag, kTubeFeedback, kTubePresence,
+                                  kTube6L6, kTubeSpeakerLoad, kTubeStack, kTubeBass, kTubeMid,
+                                  kTubeTreble, kTubeScreenSquish, kTubeSharedSupply, kTubeOTSaturation, kTubeCoilHeat,
+                                  kTubeFeelDepth, kTubeEconomy, kTubeTouch, kTubeRipple, kTubeRippleAmount,
+                                  kTubeRippleMix, kTubeCathodeFollower, kTubeCathodeBias, kTubeSpeakerFeedback, kTubeResonance,
+                                  kTubeHighQuality, kTubeVariac, kTubeBiasPot, kTubePreampAge, kTubePowerAge,
+                                  kTubeCanFail, kTubeCapture};
+constexpr int kNumLabParams = (int)(sizeof(kTubeLabParams) / sizeof(int));
+static_assert(kNumLabParams == kLab2Last - kLab2First + 1, "TUBE LAB 2 copies every kTubeLabParams entry");
+// A Tube Lab param of lab 0 (TUBE LAB) or lab 1 (TUBE LAB 2). Any other param is its own.
+constexpr int LabParam(int lab, int p)
+{
+  if (lab == 0)
+    return p;
+  if (p >= kTubeChassisFirst && p <= kTubeChassisLast) // 1.68.0: the chassis's
+    return kLab2ChassisFirst + (p - kTubeChassisFirst);
+  for (int i = 0; i < kNumLabParams; i++)
+    if (kTubeLabParams[i] == p)
+      return kLab2First + i;
+  return p;
+}
+// TUBE LAB's param that a TUBE LAB 2 param copies, or -1.
+constexpr int Lab2Base(int p)
+{
+  if (p >= kLab2ChassisFirst && p <= kLab2ChassisLast)
+    return kTubeChassisFirst + (p - kLab2ChassisFirst);
+  return p >= kLab2First && p <= kLab2Last ? kTubeLabParams[p - kLab2First] : -1;
+}
 static_assert(sizeof(kLateGridCell) / sizeof(int) == chaingrid::kNumParamSlots - kNumGridSlots32,
               "every id past 31 needs its grid params");
 constexpr int GridCellParam(int id)
@@ -465,6 +634,34 @@ constexpr int kNumPositionalParams = kTubeActive;
 // The Tube Lab's Circuit+ controls (1.45.0; presets and old states turn them off).
 constexpr int kTubeCircuitPlusParams[] = {kTubeCathodeFollower, kTubeCathodeBias, kTubeSpeakerFeedback,
                                           kTubeResonance};
+
+// The SPEAKER LAB page's shared state (SpeakerLabControls.h): reading the params, moving a mic, the
+// selection and the 3D camera.
+namespace speakerlab
+{
+struct Model
+{
+  std::function<cab::CabLabParams()> params;
+  std::function<void(int mic, double x, double y, double z)> setMic; // metres
+  std::function<void(int mic)> select;
+  std::function<void(int cab)> selectCab; // 1.61.0
+  int* selected = nullptr;
+  int* selectedCab = nullptr; // 1.61.0
+  float* yaw = nullptr;
+  float* pitch = nullptr;
+  std::function<void()> redrawViews; // After an orbit (no param changes)
+};
+} // namespace speakerlab
+
+// A SPEAKER LAB mic's param: mic 0..3, field 0 On, 1 Type, 2 X, 3 Y, 4 Z (cm), 5 Level, 6 Pan, 7 Invert.
+constexpr int kNumLabMicFields = 8;
+constexpr int LabMicParam(int mic, int field) { return kLabMicFirst + mic * kNumLabMicFields + field; }
+
+// The Tube Lab bench (1.58.0): older states load it at stock, and (since 1.63.0) so do Tube Lab presets:
+// they were voiced on a stock bench.
+constexpr int kTubeBenchParams[] = {kTubeVariac, kTubeBiasPot, kTubePreampAge, kTubePowerAge};
+// The OUTPUT page's 1.58.0 controls (older states load them at their defaults).
+constexpr int kOutputPageParams[] = {kLimiterCeiling, kLimiterRelease, kOutputWidth, kOutputWiden};
 
 // The Tube Lab's Real Feel switches (presets and old states turn them off).
 constexpr int kTubeRealFeelParams[] = {kTubeScreenSquish, kTubeSharedSupply, kTubeOTSaturation, kTubeCoilHeat,
@@ -560,10 +757,20 @@ enum ECtrlTags
   kCtrlTagCabLabIRName,
   kCtrlTagTubeDebug,
   kCtrlTagOutEqPage, // 1.46.0: the Output EQ page
+  kCtrlTagOutputPage, // 1.58.0: the OUTPUT page and its meters
+  kCtrlTagSpeakerLab, // 1.59.0: the SPEAKER LAB page
+  kCtrlTagPedalDrawer, // 1.60.0: the PEDALS drawer's panel
+  kCtrlTagCabLabIR2Name, // 1.61.0: CAB LAB cab 2's IR name (SPEAKER LAB page)
+  kCtrlTagCabLabIR1Name, // ...and cab 1's, on the same page
+  kCtrlTagTubeChassis, // 1.62.0: the PREAMP CHASSIS page
+  kCtrlTagLab2CaptureName, // 1.67.0: TUBE LAB 2's capture file name
+  kCtrlTagLimiterGR,
+  kCtrlTagOutCorrelation,
   kCtrlTagCab2IRName, // 1.36.0: CAB 2 / CAB 3's loaded IR names
   kCtrlTagCab3IRName,
   kCtrlTagTuneButton, // 1.43.0: MIDI-learnable (the tuner page)
   kCtrlTagMidiLearn, // 1.43.0: the MIDI learn overlay
+  kCtrlTagTapButton, // 1.71.0: MIDI-learnable (tap tempo)
   kNumCtrlTags
 };
 
@@ -876,10 +1083,11 @@ private:
   //    footswitch sends 127, then 0. Several switches on one CC toggle as a group: if any of them
   //    (in the chain) is on, all go off, else all come on -- so they can't get out of step.
   //  - Anything else follows the CC's value, 0..127 across its range.
-  static constexpr int kMidiTargetTuner = -2, kMidiTargetVolume = -3;
+  static constexpr int kMidiTargetTuner = -2, kMidiTargetVolume = -3, kMidiTargetTap = -4;
   static constexpr int kMidiNoTarget = INT_MIN;
   std::vector<int> mMidiMap[128]; // UI thread
   std::atomic<bool> mMidiCCIsVolume[128] = {}; // The audio thread's copy of the volume targets
+  std::atomic<bool> mMidiCCIsTap[128] = {}; // ...and of the tap tempo targets
   std::atomic<int> mMidiCCCount[128] = {};
   std::atomic<int> mMidiCCValue[128] = {};
   std::atomic<int> mMidiLastCC{-1}, mMidiLastValue{0}, mMidiSeq{0};
@@ -895,6 +1103,19 @@ private:
   void _SaveMidiMap() const;
   std::string _MidiMapPath() const;
   void _SyncMidiVolumeFlags();
+  // Tap tempo (1.71.0). A MIDI tap is timed when it arrives, on the audio thread (steady clock, in s),
+  // and queued here; OnIdle hands the queue to _TempoTap. Taps more than 2 s apart start over.
+  static constexpr int kMidiTapQueue = 16;
+  std::atomic<double> mMidiTapTime[kMidiTapQueue] = {};
+  std::atomic<int> mMidiTapWrite{0};
+  int mMidiTapRead = 0; // UI thread
+  double mTapTimes[5] = {}; // The last taps, oldest first (UI thread)
+  int mNumTaps = 0;
+  double mBeatAnchor = -1.0; // When a beat fell (the last tap), for the BPM light; < 0 = none yet
+  bool mTempoPushPending = false; // The BPM was dragged or typed: _PushTempoToDelays in OnIdle
+  void _TempoTap(double t);
+  void _PushTempoToDelays();
+  double _BeatPhase() const;
   void _SetMidiLearn(bool on);
   void _MidiLearnAssign(int target, int cc, bool add);
   bool mMidiLearnAdd = false; // The selection was Shift-clicked: add it to the CC instead of replacing
@@ -908,6 +1129,13 @@ private:
   dsp::noise_gate::Gain mNoiseGateGain;
   // The model actually being used:
   std::unique_ptr<ResamplingNAM> mModel;
+  // 1.64.0: the capture run inside the Tube Lab (kTubeCapture): its mono input and output, and the
+  // input gain's ramp (Drive, re 12 dB).
+  std::vector<iplug::sample> mCapIn, mCapOut;
+  iplug::sample* mCapInPtr[1] = {nullptr};
+  iplug::sample* mCapOutPtr[1] = {nullptr};
+  double mCapGain = 1.0;
+  bool _TubeTakesCapture() const; // The Tube Lab is running the AMP block's capture (so the AMP block doesn't)
   // And the IR (left channel, or the only channel if no R-channel IR is loaded)
   std::unique_ptr<dsp::ImpulseResponse> mIR;
   // Optional right-channel IR for a stereo (dual-mic/cab) cab sim. If null, the right channel
@@ -1053,8 +1281,15 @@ private:
   // Their popups are wider than a plain pedal's (more controls).
   static bool _IsWidePedal(int id)
   {
-    return id >= chaingrid::kSkyVerb && id <= chaingrid::kApexPreamp;
+    return (id >= chaingrid::kSkyVerb && id <= chaingrid::kApexPreamp)
+           || (id >= chaingrid::kTrackGate && id <= chaingrid::kSpringVerb);
   }
+  // 1.66.0 pedals (MorePedals.h).
+  pedals::TrackGate mTrackGate;
+  pedals::DigitalDelay mDigiDelay;
+  pedals::AnalogDelay mAnalogDelay;
+  pedals::TapeEcho mTapeEcho;
+  pedals::SpringVerb mSpringVerb;
   iplug::igraphics::IRECT _ComputeWidePopupCardArea(const iplug::igraphics::IRECT& winBounds) const;
   pedals::Phaser mPhaser;
   // REAL FEEL pedal (chaingrid::kRealFeel): its DSP and output buffers, and the Shared B+ gain last
@@ -1089,8 +1324,33 @@ private:
   iplug::sample* mTubeChannels[2] = {nullptr, nullptr};
   // Last "Tube Lab is in the chain" state ProcessBlock saw, so latency is updated on change.
   bool mTubeWasInChain = false;
-  // Every Tube Lab sound param, as the stage takes them (also read by the debug page and log).
-  tube::TubeParams _ReadTubeParams() const;
+  // Every Tube Lab sound param, as the stage takes them (also read by the debug page and log), of
+  // lab 0 (TUBE LAB) or lab 1 (TUBE LAB 2).
+  tube::TubeParams _ReadTubeParams(int lab = 0) const;
+  // TUBE LAB 2 (1.67.0): its stages, output, capture (its own .nam, staged like the NAM pedals') and
+  // capture input gain.
+  tube::TubeStage mTubeStage2[2];
+  iplug::sample* mTubeChannels2[2] = {nullptr, nullptr};
+  bool mTube2WasInChain = false;
+  double mCapGain2 = 1.0;
+  std::unique_ptr<ResamplingNAM> mLab2Model, mStagedLab2Model;
+  WDL_String mLab2ModelPath;
+  std::atomic<bool> mShouldRemoveLab2Model{false};
+  std::string _StageLab2Model(const WDL_String& path); // "" or the error
+  // The Tube Lab popup, debug page and chassis page edit one lab at a time: mUiLab, the one whose
+  // popup was opened last. Every control bound to a kTubeLabParams param is re-bound to that lab's
+  // copy (mLabRetarget: {control, TUBE LAB's param}); mLabOnly[lab] show only for that lab. The audio
+  // thread feeds the probe and the chassis readings from mUiLabAudio's stages.
+  int mUiLab = 0;
+  std::atomic<int> mUiLabAudio{0};
+  std::vector<std::pair<iplug::igraphics::IControl*, int>> mLabRetarget;
+  std::vector<iplug::igraphics::IControl*> mLabOnly[2];
+  void _SetUiLab(int lab);
+  // 1.67.1: CAB LAB opens into the SPEAKER LAB (3D on); its CAB LAB button goes to the classic card (3D off).
+  void _ShowSpeakerLab(bool show);
+  int _TP(int base) const { return LabParam(mUiLab, base); }
+  tube::TubeStage* _UiStages() { return mUiLab == 0 ? mTubeStage : mTubeStage2; }
+  bool _TubeLabSelected() const { return mSelectedBlock == kTubePedalIdx || mSelectedBlock == chaingrid::kTubeLab2; }
   // An EQ's settings from its params (EqBandParam); disabled = every band off, output 0 dB.
   proeq::Params _ReadEqParams(int firstBandParam, int firstExtParam, int trimParam, int outputParam, bool enabled) const;
   // The EQ views' analyzer/freeze/selection (1.47.0): PRO EQ's popup, the Output EQ page, the strip.
@@ -1104,6 +1364,25 @@ private:
   TubeScopeSettings mTubeScopeSettings;
   tube::debug::TubeDebugLog mTubeLog;
   bool mTubeDebugVisible = false; // Kept across relayouts
+  bool mTubeProbesAlways = false; // 1.58.0: ALWAYS ON (ui.ini tube_probes_always)
+  // 1.62.0: the PREAMP CHASSIS page: its readings (written on the audio thread after the Tube Lab, read
+  // in OnIdle) and its requests (a power tube to replace: bit k).
+  std::atomic<bool> mChassisOpen{false};
+  // Glow levels: V1..V4, then the sockets V5..V8 (1.68.0; TubeStage::StageLevel).
+  // Power tubes: V9..V12 (1.68.0: four, for the quad).
+  std::atomic<float> mUiStageLevel[tube::TubeStage::kNumStageLevels] = {};
+  std::atomic<float> mUiPowerLife[4] = {1.f, 1.f, 1.f, 1.f}, mUiDissRatio[4] = {};
+  std::atomic<bool> mUiPowerDead[4] = {false, false, false, false};
+  std::atomic<int> mReplacePowerReq{0}, mReplacePowerReq2{0}; // TUBE LAB's, TUBE LAB 2's
+  void _UpdateChassis(); // OnIdle
+  // 1.68.0: the chassis's links to the other pages (chassis::Link).
+  void _ChassisGo(int link);
+  int mChassisSelected = 0; // chassis::Item
+  // The side panel's controls, each with the chassis::Item it belongs to (OnIdle shows the selected one's).
+  std::vector<std::pair<int, iplug::igraphics::IControl*>> mChassisFields;
+  float mChassisYaw = -0.35f, mChassisPitch = 0.7f; // 1.68.0: the 3D view's camera, kept across relayouts
+  double mChassisSignature = 0.0; // What the page last drew (see _UpdateChassis)
+  std::chrono::steady_clock::time_point mChassisLastDraw{};
   std::chrono::steady_clock::time_point mTubeStatsNextRequest{}, mTubeStatsLastArrived{}, mTubeLastSignalTime{};
   std::chrono::steady_clock::time_point mTubeLogStart{};
   double mTubeLogLastRowS = -1e9;
@@ -1132,6 +1411,11 @@ private:
   bool _StageExtraCabIR(int cab, const WDL_String& path);
   std::atomic<bool> mCabLabIRStaged = false;
   WDL_String mCabLabIRPath;
+  // 1.61.0: CAB LAB's second cab's IR (dual cabs), staged like the first.
+  std::unique_ptr<dsp::ImpulseResponse> mCabLabIR2, mStagedCabLabIR2;
+  std::atomic<bool> mCabLabIR2Staged = false;
+  WDL_String mCabLabIR2Path;
+  bool _StageCabLabIR2(const WDL_String& path); // Empty path: none
   std::vector<double> mCabMono, mCabL, mCabR;
   iplug::sample* mCabChannels[2] = {nullptr, nullptr};
   // Loads an IR for the CAB LAB (UI thread). Returns true on success.
@@ -1199,13 +1483,35 @@ private:
   bool mLimiterOn = false;
   int mLimiterFadeStage = 0, mLimiterFadeCount = 0; // 0 idle, 1 fading out, 3 silent to block end, 2 fading in
   std::vector<double> mLimiterBuf[2];
-  // Mono output (kOutputMono): how far the output is folded to L+R (0 stereo .. 1 mono), gliding
-  // over ~10 ms when the switch moves so it doesn't click.
-  double mMonoMix = 0.0;
+  // Output Width / Widen (kOutputWidth, kOutputWiden; StereoWidth.h).
+  StereoWidth mStereoWidth;
+  // For the OUTPUT page's meters, only while it's open (mOutputPageOpen, set from OnIdle): the most
+  // limiter gain reduction since the page last looked (dB, <= 0; the UI swaps in 0) and the output's
+  // stereo correlation.
+  std::atomic<bool> mOutputPageOpen{false};
+  std::atomic<float> mLimiterGRShown{0.f}, mOutCorrelation{1.f};
   int _TotalLatency() const { return mGridLatency + (mLimiterOn ? mLimiter.Latency() : 0); }
   std::chrono::steady_clock::time_point mClipShownUntil{};
   bool mClipShown = false;
   void _UpdateClipIndicator();
+  void _UpdateOutputPage(); // 1.58.0: the OUTPUT page's meters (OnIdle)
+  // SPEAKER LAB (1.59.0): its params as the DSP sees them, the page's refresh after a change, a mic's
+  // placement from a drag, and the selected mic (its controls are the ones showing) and 3D camera.
+  cab::CabLabParams _ReadCabLabParams() const;
+  void _SpeakerLabChanged();
+  void _SetLabMicPosition(int mic, double x, double y, double z);
+  void _RemapLabMicsForFormat(int cab, int oldFormat, int newFormat, int onlyMic = -1);
+  // 1.60.0: the PEDALS drawer (over the grid) is open.
+  bool mPedalDrawerOpen = false;
+  void _SetPedalDrawerOpen(bool open);
+  int mLabSelectedMic = 0;
+  int mLabSelectedCab = 0; // 1.61.0: the cab the FRONT / SIDE views and the cab row show
+  int mLabFormat2Shown = -1;
+  std::vector<iplug::igraphics::IControl*> mLabCabControls[2]; // Each cab's row on the page
+  speakerlab::Model mLabModel;
+  float mLabYaw = -0.55f, mLabPitch = 0.32f;
+  int mLabFormatShown = -1; // The format the mics were last placed for (see OnParamChangeUI)
+  std::vector<iplug::igraphics::IControl*> mLabMicControls[4]; // Each mic's controls on the page
 
   // Tuner: analyzes the raw input signal, independent of the rest of the chain.
   Tuner mTuner;
@@ -1321,6 +1627,36 @@ private:
   // Tube Lab presets (TubePresets.h): sets every Tube Lab sound param, as if turned in the UI.
   void _ApplyTubePreset(int index);
   iplug::igraphics::IPopupMenu mTubePresetMenu;
+  // 1.70.0 PACK PICKER (PackScanner.h, PackPickerControl.h): switch between the captures of one
+  // unzipped pack folder from the AMP block. Everything here is UI-thread state except the atomics,
+  // which the audio thread reads in _SetOutputGain / _ApplyDSPStaging.
+  griffinpack::Pack mPack;
+  std::string mPackGroup, mPackKey, mPackSize; // The capture picked in the pack ("" = none)
+  bool mPackAutoIR = true; // Pair the pack's IR with amp-only captures
+  std::string mPackIRChoice; // The pack IR to pair ("" = the pack's default)
+  std::string mPackIRSetPath; // The cab IR the pack itself last loaded ("" = none): the only one it replaces
+  bool mPackHasRef = false; // Level match: the loudness of the first capture picked in this pack
+  double mPackRefLoudness = 0.0;
+  bool mPackStaging = false; // _StageModel is staging a pack capture (UI thread)
+  void* mLastStagedModelPtr = nullptr; // The model _StageModel last staged (identity only, never dereferenced)
+  std::atomic<void*> mPackModelPtr{nullptr}; // The pack capture's model: only it gets the level trim
+  std::atomic<double> mPackTrimDB{0.0}; // Its trim (Raw output mode only; the other modes already level)
+  std::atomic<bool> mPackGainDirty{false}; // Recompute the output gain on the audio thread
+  iplug::igraphics::IPopupMenu mPackMenu;
+  std::vector<std::pair<const void*, std::function<void()>>> mPackMenuTargets; // {menu item, what it does}
+  void _PackOnMenu(iplug::igraphics::IPopupMenu* pMenu);
+  // 1.70.3: .zip packs, unpacked on a worker thread into PackCache (PackZip.cpp).
+  struct PackZipJob { std::string zip, dir, err, log; bool reused = false; double ms = 0.0; };
+  std::future<PackZipJob> mPackZipFuture;
+  std::string mPackUnpacking; // The zip being unpacked ("" = none): the dropdown says so
+  std::string mPackZipPath; // The zip the open pack came from ("" = a plain folder): what presets save
+  std::string mPackOpeningZip; // Set while _PackOpenFolder opens a zip's cache folder
+  void _PackPollZip(); // UI thread (OnIdle): picks up a finished unpack
+  void _PackOpenFolder(const std::string& folder);
+  void _PackSelect(const griffinpack::Capture* c);
+  std::string _PackIRPath() const;
+  std::string _PackLabel(int which) const; // 0 PACK, 1 capture, 2 size, 3 IR
+  void _PackShowMenu(int which, iplug::igraphics::IControl* pCaller);
   // Greys out the Tube Lab's circuit-row controls that don't currently apply: all of them in the
   // Classic engine, and the cap/supply knobs while their section switch is off.
   void _RefreshTubeLabControls(iplug::igraphics::IGraphics* pGraphics);

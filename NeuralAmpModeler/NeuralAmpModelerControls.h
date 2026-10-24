@@ -407,6 +407,9 @@ public:
   {
   }
 
+  // 1.58.0: a click on OUT (not on its port) opens the OUTPUT page.
+  void SetOutClick(std::function<void()> f) { mOutClick = std::move(f); }
+
   // Highlights the cell a dragged block would land in (-1 for none).
   void SetDropPreview(int cell)
   {
@@ -518,6 +521,8 @@ public:
       mMouseX = x;
       mMouseY = y;
     }
+    else if (mOutClick && mGeom.outStub.Contains(x, y))
+      mOutClick();
     else if (mHoverSrc >= 0 && mHoverSrc == aimedSrc && mHoverDst == aimedDst)
     {
       chaingrid::Grid grid = mGetGrid();
@@ -714,6 +719,7 @@ private:
   int mHoverPortNode = -1;
   bool mHoverPortIsOut = false;
   int mHoverSrc = -1, mHoverDst = -1;
+  std::function<void()> mOutClick; // See SetOutClick
   // Where the pointer last hovered over the grid (see OnMouseDown: a cable is only cut when aimed at).
   float mOverX = 0.f, mOverY = 0.f;
   bool mOverValid = false;
@@ -1712,6 +1718,102 @@ private:
   bool mDimmed = false;
 };
 
+// A lab's card (1.60.0): an amp head in tolex with gold piping, its glyph (1 a glass preamp tube,
+// 2 a speaker cone), its name, and a jewel lamp lit while it's on. Tall and narrow (a grid cell): the
+// glyph on top, the name under it, the lamp at the bottom. Wide (the AMP NEST's slot): a gold
+// faceplate with the glyph beside the name, and `subtitle` (if any) along the bottom.
+inline void DrawLabCard(IGraphics& g, const IRECT& r, int kind, const std::string& name, bool active, bool selected,
+                        bool dragging, const char* subtitle = nullptr, float dim = 1.f)
+{
+  const IColor gold(255, 214, 170, 90), amber(255, 255, 170, 60);
+  const float corner = std::clamp(std::min(r.W(), r.H()) * 0.1f, 3.f, 8.f);
+  g.FillRoundRect(dragging ? PluginColors::NAM_THEMECOLOR.WithOpacity(0.9f) : IColor(255, 36, 31, 28).WithOpacity(dim), r,
+                  corner);
+  for (float y = r.T + 3.f; y < r.B - 2.f; y += 3.f) // Tolex grain
+    g.DrawLine(COLOR_WHITE.WithOpacity(0.025f * dim), r.L + 2.f, y, r.R - 2.f, y);
+  g.DrawRoundRect(gold.WithOpacity((active ? 0.95f : 0.55f) * dim), r.GetPadded(-1.5f), corner, nullptr, 1.5f);
+  if (selected)
+    g.DrawRoundRect(COLOR_WHITE, r, corner, nullptr, 2.5f);
+  const bool wide = r.W() > r.H() * 1.3f;
+  const IRECT inner = r.GetPadded(-std::min(5.f, std::min(r.W(), r.H()) * 0.07f));
+  auto glyph = [&](float cx, float cy, float rr) {
+    if (kind == 1)
+    {
+      // Preamp tube: glass, base, plate, and the filament glowing when on.
+      if (active)
+        g.FillCircle(amber.WithOpacity(0.28f), cx, cy, rr * 1.25f);
+      g.DrawRoundRect(COLOR_WHITE.WithOpacity(0.65f * dim), IRECT(cx - rr * 0.55f, cy - rr, cx + rr * 0.55f, cy + rr * 0.8f),
+                      rr * 0.5f, nullptr, 1.2f);
+      g.FillRect(COLOR_BLACK.WithOpacity(0.6f), IRECT(cx - rr * 0.6f, cy + rr * 0.8f, cx + rr * 0.6f, cy + rr * 1.08f));
+      g.DrawRect(COLOR_WHITE.WithOpacity(0.35f * dim), IRECT(cx - rr * 0.3f, cy - rr * 0.55f, cx + rr * 0.3f, cy + rr * 0.35f));
+      g.DrawLine(active ? amber : COLOR_WHITE.WithOpacity(0.3f), cx, cy - rr * 0.45f, cx, cy + rr * 0.25f, nullptr,
+                 active ? 2.f : 1.f);
+    }
+    else
+    {
+      // Speaker: basket, cone rings, dust cap glowing when on.
+      if (active)
+        g.FillCircle(amber.WithOpacity(0.18f), cx, cy, rr * 1.2f);
+      g.FillCircle(COLOR_BLACK.WithOpacity(0.55f), cx, cy, rr);
+      g.DrawCircle(gold.WithOpacity(0.75f * dim), cx, cy, rr, nullptr, 1.2f);
+      g.DrawCircle(COLOR_WHITE.WithOpacity(0.2f * dim), cx, cy, rr * 0.72f);
+      g.DrawCircle(COLOR_WHITE.WithOpacity(0.12f * dim), cx, cy, rr * 0.5f);
+      g.FillCircle(active ? amber.WithOpacity(0.85f) : COLOR_WHITE.WithOpacity(0.35f * dim), cx, cy, rr * 0.26f);
+    }
+  };
+  auto fit = [&](const std::string& s, float size, float width) {
+    IText t(size, COLOR_WHITE, "Michroma-Regular");
+    IRECT m;
+    const float w = g.MeasureText(t, s.c_str(), m);
+    if (w > width && w > 0.f)
+      t.mSize = std::max(6.5f, size * width / w);
+    return t;
+  };
+  const size_t space = name.find(' ');
+  const std::string top = space == std::string::npos ? name : name.substr(0, space);
+  const std::string bottom = space == std::string::npos ? std::string() : name.substr(space + 1);
+  auto lamp = [&](float cx, float cy, float jr) {
+    if (active)
+      g.FillCircle(amber.WithOpacity(0.35f), cx, cy, jr * 1.9f);
+    g.FillCircle(active ? amber : IColor(255, 70, 40, 30), cx, cy, jr);
+    g.DrawCircle(gold.WithOpacity(0.6f * dim), cx, cy, jr);
+  };
+  if (!wide)
+  {
+    // Grid cell: glyph, name (two lines), lamp.
+    const float gh = inner.H() * 0.38f;
+    glyph(inner.MW(), inner.T + gh * 0.5f, std::min(gh, inner.W()) * 0.4f);
+    const IRECT text(inner.L, inner.T + gh, inner.R, inner.B - inner.H() * 0.2f);
+    const float size = std::clamp(text.H() * 0.36f, 6.5f, 12.f);
+    IText t = fit(top.size() >= bottom.size() ? top : bottom, size, text.W());
+    t.mFGColor = COLOR_WHITE.WithOpacity((active ? 1.f : 0.75f) * dim);
+    IVectorBase::DrawTextFitted(g, t, top.c_str(), text.GetFromTop(text.H() * 0.5f), nullptr);
+    t.mFGColor = gold.WithOpacity(dim);
+    IVectorBase::DrawTextFitted(g, t, bottom.c_str(), text.GetFromBottom(text.H() * 0.5f), nullptr);
+    lamp(inner.MW(), inner.B - inner.H() * 0.1f, std::clamp(inner.H() * 0.06f, 2.f, 5.f));
+    return;
+  }
+  // AMP NEST slot: a faceplate with the glyph and name, and the subtitle (or the lamp) under it.
+  const IRECT plate = inner.GetFromTop(inner.H() * 0.66f);
+  g.FillRoundRect(gold.WithOpacity((active ? 0.3f : 0.15f) * dim), plate, 2.f);
+  const float gs = std::min(plate.H(), plate.W() * 0.34f);
+  glyph(plate.L + 2.f + gs * 0.5f, plate.MH(), gs * 0.38f);
+  const IRECT text = plate.GetReducedFromLeft(gs + 6.f).GetPadded(-2.f);
+  IText t = fit(top.size() >= bottom.size() ? top : bottom, std::clamp(text.H() * 0.38f, 8.f, 15.f), text.W());
+  t.mFGColor = COLOR_WHITE.WithOpacity((active ? 1.f : 0.8f) * dim);
+  IVectorBase::DrawTextFitted(g, t, top.c_str(), text.GetFromTop(text.H() * 0.5f), nullptr);
+  t.mFGColor = gold.WithOpacity(dim);
+  IVectorBase::DrawTextFitted(g, t, bottom.c_str(), text.GetFromBottom(text.H() * 0.5f), nullptr);
+  const IRECT lower = inner.GetReducedFromTop(plate.H());
+  const float jr = std::clamp(lower.H() * 0.22f, 2.5f, 5.f);
+  lamp(lower.L + jr + 4.f, lower.MH(), jr);
+  if (subtitle)
+  {
+    IText st(9.5f, PluginColors::NAM_THEMEFONTCOLOR.WithOpacity(0.75f), "Roboto-Regular", EAlign::Near);
+    IVectorBase::DrawTextFitted(g, st, subtitle, lower.GetReducedFromLeft(4.f * jr + 10.f).GetReducedFromRight(4.f), nullptr);
+  }
+}
+
 class NAMPedalChipControl : public IControl
 {
 public:
@@ -1743,6 +1845,9 @@ public:
   void SetClipGetter(std::function<bool(IRECT& clip)> f) { mClipGetter = f; }
   // Mouse wheel over the chip (e.g. to scroll the list it sits in).
   void SetWheelFunc(std::function<void(float d)> f) { mWheelFunc = f; }
+  // 1.60.0: the labs look like amp heads, not stompboxes: 1 TUBE LAB (a glass tube), 2 CAB LAB (a
+  // speaker cone). 0 is a pedal.
+  void SetLabKind(int kind) { mLabKind = kind; }
   int GetPedalIdx() const { return mPedalIdx; }
 
   // Moves the chip to where its position getter says, now. Draw does this too, but only runs for a
@@ -1804,6 +1909,11 @@ private:
       // Full (untruncated) name in the tooltip -- the on-chip text below gets cut short to fit.
       SetTooltip(displayName.c_str());
       mLastTooltipName = displayName;
+    }
+    if (mLabKind != 0)
+    {
+      DrawLabCard(g, mRECT, mLabKind, displayName, active, selected, mDragging);
+      return;
     }
 
     // Stompbox enclosure, instead of a flat color blob.
@@ -1961,6 +2071,7 @@ private:
   std::string mLastTooltipName;
   bool mDragging = false;
   float mTotalDrag = 0.f;
+  int mLabKind = 0; // See SetLabKind
 };
 
 /// Pedalboard overlay: a drag-and-drop chain rack (drag a pedal chip left/right of the fixed AMP
@@ -2290,6 +2401,20 @@ public:
     this->mPeakValues.fill(0.f); // the base class leaves these uninitialized
   }
 
+  // 1.58.0: a click runs this (the OUT meter opens the OUTPUT page).
+  void SetClickFunc(std::function<void()> f)
+  {
+    mClickFunc = std::move(f);
+    this->SetIgnoreMouse(!mClickFunc);
+  }
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    if (mClickFunc)
+      mClickFunc();
+    else
+      Base::OnMouseDown(x, y, mod);
+  }
+
   // A reading arrives every tick. Only repaint when it moved the bar or the peak by a visible amount
   // (0.07 dB), or while the bar is still gliding/holding -- a silent or steady meter used to repaint
   // every frame for nothing.
@@ -2471,6 +2596,7 @@ private:
   std::array<Clock::time_point, NC> mHoldSince{};
   std::array<Clock::time_point, NC> mClipUntil{};
   bool mMoving = true;
+  std::function<void()> mClickFunc; // See SetClickFunc
 };
 
 // MIDI learn overlay (1.43.0), Ableton-style. Attached last, over the whole window, and shown while
@@ -3086,6 +3212,58 @@ public:
 private:
   std::string mText;
   std::function<void()> mAction;
+};
+
+/// Tap tempo (1.71.0): the tempo, with a light that flashes on the beat. Drag up or down to change it
+/// (Shift for fine steps), double-click to type it. TAP beside it (or a MIDI footswitch) sets it from
+/// your taps.
+class NAMTempoControl : public IControl
+{
+public:
+  NAMTempoControl(const IRECT& bounds, int paramIdx, std::function<double()> beatPhase)
+  : IControl(bounds, paramIdx)
+  , mBeatPhase(std::move(beatPhase))
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const IColor ink = PluginColors::NAM_INK;
+    g.FillRoundRect(ink.WithOpacity(mMouseIsOver ? 0.16f : 0.06f), mRECT, 4.f);
+    const double phase = mBeatPhase ? mBeatPhase() : -1.0;
+    const IRECT led = mRECT.GetFromLeft(mRECT.H()).GetCentredInside(7.f);
+    if (phase >= 0.0 && phase < 0.15)
+      g.FillEllipse(PluginColors::NAM_THEMECOLOR, led);
+    else
+      g.DrawEllipse(ink.WithOpacity(0.45f), led, nullptr, 1.2f);
+    char text[32];
+    snprintf(text, sizeof(text), "%.1f BPM", GetParam() ? GetParam()->Value() : 120.0);
+    g.DrawText(IText(12.f, PluginColors::NAM_THEMEFONTCOLOR.WithOpacity(mMouseIsOver ? 0.95f : 0.8f),
+                     "Roboto-Regular"),
+               text, mRECT.GetReducedFromLeft(mRECT.H() - 4.f));
+  }
+
+  // Redrawn every frame while shown, for the beat light.
+  bool IsDirty() override { return !IsHidden() || IControl::IsDirty(); }
+
+  void OnMouseDrag(float x, float y, float dX, float dY, const IMouseMod& mod) override
+  {
+    if (!GetParam())
+      return;
+    // 0.5 BPM per pixel up, 0.1 with Shift.
+    const double bpm = GetParam()->Value() - dY * (mod.S ? 0.1 : 0.5);
+    SetValue(GetParam()->ToNormalized(bpm));
+    SetDirty(true);
+  }
+
+  void OnMouseDblClick(float x, float y, const IMouseMod& mod) override
+  {
+    if (GetParam())
+      GetUI()->PromptUserInput(*this, mRECT);
+  }
+
+private:
+  std::function<double()> mBeatPhase;
 };
 
 /// Preferences (1.48.0): the colour theme (six palettes, dark or light) and the spectrum strip.
