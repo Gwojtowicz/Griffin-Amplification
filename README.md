@@ -28,7 +28,7 @@ the voltage on every tube, where it's clipping, and the waveform on an oscillosc
 - **Free and open.** No account, no license key, no subscription. It's MIT-licensed, and every line
   of the source is here.
 - **Light.** A 2.3 MB download with no installer, built for an ordinary laptop: a full rig runs at a
-  128-sample buffer (about 5 ms round trip) on a 2015 i7.
+  128-sample buffer (about 5 ms round trip).
 
 It also loads the neural amp captures (`.nam` files) the guitar community already shares, so you
 can play a captured amp and the simulated one in the same chain.
@@ -248,8 +248,8 @@ range comes forward, and the top octave falls away instead of fizzing.
 - The amp-capture engine has a hand-written SSE kernel plus an AVX2/FMA one picked at run time
   (about 5x faster than the generic matrix code), and cab IRs use a zero-latency partitioned FFT.
 - The UI only redraws what changes, clipped in hardware, so the meters don't redraw the whole window.
-- On a 2015 laptop CPU (i7-6700HQ), a full rig runs at a 128-sample buffer: about 5.3 ms round trip
-  plus the interface's driver.
+- On an ordinary laptop, a full rig runs at a 128-sample buffer: about 5.3 ms round trip plus the
+  interface's driver.
 
 ---
 
