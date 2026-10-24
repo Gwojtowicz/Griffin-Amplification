@@ -46,6 +46,7 @@ can play a captured amp and the simulated one in the same chain.
 - [Tube Lab: a real circuit, simulated](#tube-lab-a-real-circuit-simulated)
   - [Example: what Drive does](#example-what-drive-does)
   - [Example: the debug page's schematic and oscilloscope](#example-the-debug-pages-schematic-and-oscilloscope)
+- [Cab Lab: place the mics in 3D](#cab-lab-place-the-mics-in-3d)
 - [EQ with a live analyzer](#eq-with-a-live-analyzer)
   - [Example: tightening a high-gain rig](#example-tightening-a-high-gain-rig)
 - [Everything else](#everything-else)
@@ -190,6 +191,24 @@ running. The sound is bit-for-bit the same with them on or off.
 
 ---
 
+## Cab Lab: place the mics in 3D
+
+<p align="center">
+  <img src="docs/images/app-speaker-lab.png" alt="The SPEAKER LAB: front, side and 3D views of a 2x12 with four mics, their combined response, and the selected mic's settings" width="100%">
+</p>
+
+**CAB LAB** models the speaker cab and the mics on it. Its **SPEAKER LAB** page shows the cab from
+the front, the side and in 3D, and you drag the mics where you want them:
+
+- **Cabs:** 4x12, 2x12, 1x12 or 4x10, with a choice of speakers, or your own IR. Switch to **Dual** for
+  two cabs at once, and put each mic on either one.
+- **Four mics** from ten types (SM57, R-121 ribbon, MD421, U87, C414 and more). Each has its own X, Y
+  and Z (distance from the grille), level, pan and polarity flip.
+- **What you hear, explained:** the response graph shows each close mic and the blend. The readout
+  says how far the mic is from each cone, how far off axis, and how much proximity bass it picks up.
+
+---
+
 ## EQ with a live analyzer
 
 <p align="center">
@@ -227,15 +246,18 @@ range comes forward, and the top octave falls away instead of fizzing.
 
 ## Everything else
 
-- **CAB LAB:** a speaker cab (modeled speakers or an IR), two mics from six types with position,
-  distance and pan, and a stereo room. There are also three IR loaders: CAB, CAB 2 and CAB 3.
+- **Cab IRs:** besides CAB LAB, there are three IR loaders: CAB, CAB 2 and CAB 3.
+- **Capture packs:** the **PACK** dropdown in the AMP block switches between the captures of one pack
+  (a folder or a `.zip`), level-matched.
+- **Tap tempo:** **TAP** in the top bar (or a footswitch) sets the tempo, and each delay follows it as
+  a 1/4, dotted 1/8, 1/8, triplet or 1/16 note.
 - **GATE and PRO COMP:** a gate that can key off your clean guitar even when it sits after a
   high-gain amp, and a studio compressor with Clean, Opto and FET styles and a gain-reduction meter.
 - **Pedals:** up to three copies of each effect, each with its own knobs and popup.
 - **A/B amp slots:** two amp captures, each with its own cab IRs, switchable instantly.
 - **MIDI:** click **MIDI** in the top bar to map footswitches and expression pedals to any knob or switch.
-- **Output:** Master Out, a lookahead limiter (0.7 ms), a soft safety clip, and a **Mono** switch that
-  sums left and right for a single speaker.
+- **Output:** Master Out, a lookahead limiter (0.7 ms), a soft safety clip, and stereo **Width** (0%
+  sums left and right for a single speaker).
 - **Themes:** several color themes, in light or dark.
 
 ---

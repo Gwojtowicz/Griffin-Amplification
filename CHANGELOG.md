@@ -8,6 +8,11 @@ that gets used, and add an entry here.
 - **Minor** (1.8.0): new features.
 - **Patch** (1.8.1): fixes only.
 
+## 1.71.1 (2026-10-23)
+
+- **The title fits again.** 1.71.0's TAP button and BPM counter narrowed the space for the title, and
+  at its fixed size "GRIFFIN AMPLIFICATION" was cut off at both ends. It now shrinks to fit.
+
 ## 1.71.0 (2026-10-22)
 
 - **Tap tempo and a BPM counter** in the header, left of MIDI.

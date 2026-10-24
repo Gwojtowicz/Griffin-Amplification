@@ -1219,8 +1219,22 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         g.DrawFittedBitmap(logoBitmap, r);
       },
       DEFAULT_ANIMATION_DURATION, false, false, kNoParameter, true));
-    pGraphics->AttachControl(
-      new IVLabelControl(titleLabelArea.GetReducedFromLeft(logoSize + 8.f), "GRIFFIN AMPLIFICATION", titleStyle));
+    // 1.71.1: the title shrinks to fit (TAP and the BPM counter narrowed its space; at a fixed size it was
+    // cut off at both ends).
+    {
+      const IRECT titleTextArea = titleLabelArea.GetReducedFromLeft(logoSize + 8.f);
+      IText titleText = titleStyle.valueText;
+      IRECT measured;
+      while (titleText.mSize > 12.f)
+      {
+        pGraphics->MeasureText(titleText, "GRIFFIN AMPLIFICATION", measured);
+        if (measured.W() <= titleTextArea.W() - 4.f)
+          break;
+        titleText.mSize -= 1.f;
+      }
+      pGraphics->AttachControl(
+        new IVLabelControl(titleTextArea, "GRIFFIN AMPLIFICATION", titleStyle.WithValueText(titleText)));
+    }
     // Build version, so it's always clear which build is running (see CHANGELOG.md). Small, out of
     // the way in the window's bottom-right corner.
     pGraphics->AttachControl(new IVLabelControl(
