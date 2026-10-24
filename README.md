@@ -44,6 +44,7 @@ can play a captured amp and the simulated one in the same chain.
 - [What it does](#what-it-does)
 - [The signal chain](#the-signal-chain)
 - [Tube Lab: a real circuit, simulated](#tube-lab-a-real-circuit-simulated)
+  - [The math](#the-math)
   - [The chassis](#the-chassis)
   - [Example: what Drive does](#example-what-drive-does)
   - [Example: the debug page's schematic and oscilloscope](#example-the-debug-pages-schematic-and-oscilloscope)
@@ -130,6 +131,72 @@ On top of that there are switches for the parts of real amps that shape the feel
 cathode bias, speaker feedback, Resonance) and **Real Feel** options that exaggerate them (screen
 squish, shared supply, output-transformer saturation, coil heat). Switched off, the Tube Lab fades out
 and goes to sleep, so it costs almost nothing.
+
+### The math
+
+The full derivation, with every constant and why each choice was made, is in the
+[manual](docs/MANUAL.md#the-tube-lab-how-the-math-works). In short:
+
+**1. The triode.** Each 12AX7 is the Dempwolf & Zoelzer model (DAFx 2011), fitted to measured tubes,
+including the **grid current** that most tube models leave out:
+
+```math
+I_k = G\left(\frac{\ln\left(1 + e^{C\,(V_{pk}/\mu + V_{gk})}\right)}{C}\right)^{\gamma}
+\qquad
+I_g = G_g\left(\frac{\ln\left(1 + e^{C_g V_{gk}}\right)}{C_g}\right)^{\xi} + I_{g0}
+\qquad
+I_p = I_k - I_g
+```
+
+with G = 2.242e-3, C = 3.40, μ = 103.2, γ = 1.26, G<sub>g</sub> = 6.177e-4, C<sub>g</sub> = 9.901,
+ξ = 1.314, I<sub>g0</sub> = 8.025e-8. The `ln(1 + e^x)` term is a smooth `max(0, x)`, so the tube
+cuts off without a hard corner. Once the grid goes above the cathode, I<sub>g</sub> rises steeply:
+the grid clamps like a diode and charges the input cap. That is where blocking and bloom come from.
+Both currents are tabulated once with their derivatives, so no `exp`, `log` or `pow` runs per sample.
+
+**2. The capacitors.** Over one sample step T, each capacitor becomes a conductance in parallel with a
+current source (the trapezoidal rule, stable at any step size):
+
+```math
+i_n = g\,v_n - i_{eq},\qquad g = \frac{2C}{T},\qquad i_{eq} \leftarrow g\,v_n + i_n
+```
+
+**3. Solving the stage.** That leaves a resistive circuit plus the tube. Kirchhoff's current law at
+the five unknown nodes (input, grid, cathode, plate, output) gives
+
+```math
+F(\mathbf{v}) = G_{lin}\,\mathbf{v} - \mathbf{s} + \mathbf{i}_{tube}(\mathbf{v}) = 0
+```
+
+which Newton's method solves every oversampled sample (`J Δv = -F`, a 5x5 elimination), starting from
+the previous sample's voltages. It usually takes a few iterations, at most 8.
+
+**4. The power amp.** The EL34s (or 6L6s) are Koren pentodes in push-pull, each plate seeing a quarter
+of the 3.4k plate-to-plate load (R<sub>L</sub> = 850 Ω):
+
+```math
+I_p = \frac{2}{K_{g1}}\,E_1^{E_x}\,\arctan\!\left(\frac{V_p}{K_{vb}}\right),
+\qquad
+E_1 = \frac{V_{g2}}{K_p}\,\ln\!\left(1 + e^{K_p\left(\frac{1}{\mu} + \frac{V_{g1}}{V_{g2}}\right)}\right)
+```
+
+```math
+V_{p1} = B^+ - R_L D,\qquad V_{p2} = B^+ + R_L D,\qquad D = I_{p1} - I_{p2}
+```
+
+The only unknown is the difference current D, which drives the speaker. The negative feedback is
+inside the same Newton solve rather than a sample late, so high Feedback settings can't ring.
+
+**5. Sag.** The supplies are RC nodes updated each sample, so harder playing pulls B+ and the screens
+down and the gain with them:
+
+```math
+V_B \mathrel{+}= k_s\,(V_{supply} - R_s\,(I_{plates} + I_{screens}) - V_B),
+\qquad
+V_{g2} \mathrel{+}= k_{g2}\,(V_B - R_{g2}\,I_{screens} - V_{g2})
+```
+
+Measured: B+ falls from 450 to 390 V and the screens from 432 to 350 V, about 3 dB of compression.
 
 ### The chassis
 
