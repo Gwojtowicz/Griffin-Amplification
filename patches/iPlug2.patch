@@ -410,7 +410,7 @@ index cba296cf2..955dcb8d4 100644
    /** \todo
     * @param pControl \todo
 diff --git a/IPlug/APP/IPlugAPP_dialog.cpp b/IPlug/APP/IPlugAPP_dialog.cpp
-index a6c0c0b14..720f883dc 100644
+index a6c0c0b14..a23909fa0 100644
 --- a/IPlug/APP/IPlugAPP_dialog.cpp
 +++ b/IPlug/APP/IPlugAPP_dialog.cpp
 @@ -28,6 +28,56 @@ using namespace iplug;
@@ -442,7 +442,7 @@ index a6c0c0b14..720f883dc 100644
 +  bool restart = RtApiAsioConsumeResetRequest();
 +  if (mState.mAudioDriverType != kDeviceASIO || !mDAC || !mDAC->isStreamOpen())
 +    return false;
-+  // Some drivers (Focusrite) don't ask for a reset when the size is changed in their panel: watch the
++  // Some drivers don't ask for a reset when the size is changed in their panel: watch the
 +  // size they prefer instead.
 +  long minSize, maxSize, preferSize, granularity;
 +  if (ASIOGetBufferSize(&minSize, &maxSize, &preferSize, &granularity) == ASE_OK)

@@ -14,7 +14,7 @@ that gets used, and add an entry here.
   - **TAP**: tap two or more times on the beat. The tempo is the average of the last four gaps, and
     taps more than 2 s apart start a new count.
   - **MIDI**: TAP can be MIDI-learned like any switch (click MIDI, click TAP, press a footswitch).
-    Every message is a tap, so latching switches like the Rig Kontrol's work. MIDI taps are timed when
+    Every message is a tap, so latching footswitches work. MIDI taps are timed when
     they arrive on the audio thread, not when the screen updates. Saved in midimap.txt as `tap`.
   - **BPM counter** (40-300 BPM): shows the tempo with a light that flashes on the beat. Drag it up or
     down (Shift for fine steps) or double-click it to type a value; the delays follow either way.
@@ -327,7 +327,7 @@ none copies its circuit.
   the 800 Lead preset, the aliasing goes from -40 dB (Economy, 2x: audible grit) to -53 dB; Economy now
   only halves it to 4x (-43 dB). Single-stage settings keep 4x (2x with Economy): they don't make
   harmonics high enough to fold back. More CPU with the second stage on (about 13% of a core rather
-  than 7% on this PC).
+  than 7% on the test PC).
 - **Tube Lab presets reset the bench** (Variac 120 V, new tubes, bias pot 100%). They were voiced on a
   stock bench; on 56%-worn tubes at 90 V they don't sound like their names. The bench is still yours to
   change after picking one.
@@ -651,7 +651,7 @@ none copies its circuit.
 
 ## 1.52.1 (2026-10-17)
 
-- **The window uses about a third of the graphics power it did** (Intel GPU: 64% -> 21% with your
+- **The window uses about a third of the graphics power it did** (GPU use: 64% -> 21% with a full
   rig playing). Nothing looks different: screenshots match pixel for pixel, the meters still move at
   60 fps and the spectrum is unchanged.
   - Why it was high: the drawing engine clipped in its shaders, so repainting just the IN/OUT meters
@@ -694,19 +694,19 @@ Two new blocks in the AMP NEST pedal list, at the end. Drag them anywhere on the
 
 - **More audio buffer sizes** (Settings page, standalone app): 32, 48, 64, 96, 128, 192, 256, 384, 512,
   1024 and 2048 samples (was 128 to 1024). 64 and below can drop out with the Tube Lab on.
-- **DRIVER PANEL** button next to the sizes: opens your audio interface's own control panel (for the
-  Scarlett 2i2, Focusrite's ASIO settings), where its buffer size and other driver options live. With a
+- **DRIVER PANEL** button next to the sizes: opens your audio interface's own control panel (its
+  ASIO settings), where its buffer size and other driver options live. With a
   non-ASIO driver it opens the Windows sound settings.
 - **DEVICE...** button: opens the full audio Preferences (interface, sample rate, input/output channels,
   MIDI input). Same as Ctrl+, before.
 - **Shows the size the interface actually runs.** Many interfaces only run the size set in their own
   panel. If it differs from the one you picked, the note under the row says so and the latency readout
   at the bottom uses the real size.
-- **The app and the interface's panel stay in sync.** Change the buffer size in the Focusrite panel and
+- **The app and the interface's panel stay in sync.** Change the buffer size in the interface's panel and
   the app restarts its audio at that size within about a second, and the row follows. Before, the
   driver's reset request was ignored. Pick a size in the app and the panel shows it too.
-- DRIVER PANEL tries a second time if nothing comes up, because the first call to Focusrite's driver
-  only starts its helper app.
+- DRIVER PANEL tries a second time if nothing comes up, because the first call to some drivers
+  only starts their helper app.
 - The Preferences dialog's buffer list also gained 48 and 384.
 
 ## 1.50.0 (2026-10-16)
@@ -892,8 +892,8 @@ drag them onto the grid; each has a wider popup with all its controls.
   BBD) or Doubler (15-70 ms, wandering: the part played twice; the right side 13% later), Manual,
   Width, Speed, Regen (+/-), Mix.
 - **WAH**: Cry Baby (350 Hz - 2.2 kHz, sharp +13 dB peak), Vox V847 (450 Hz - 1.6 kHz, rounder +11 dB)
-  or Auto (opens with your picking, the same at any level). Position is heel to toe: map it to the
-  Rig Kontrol's expression pedal with MIDI learn (that takes CC 4 off the volume pedal). Q, Sens
+  or Auto (opens with your picking, the same at any level). Position is heel to toe: map it to an
+  expression pedal with MIDI learn (that takes CC 4 off the volume pedal). Q, Sens
   (Auto only; greyed out otherwise), Level.
 - **PREC DRIVE** (after the Horizon Devices Precision Drive): Volume, Drive, Attack (how much low end
   goes into the clipping: 60-500 Hz high-pass), Gate (0 off, then -90 to -30 dBFS on the input),
@@ -935,7 +935,7 @@ drag them onto the grid; each has a wider popup with all its controls.
   one CC toggle together: if any of them (in the chain) is on, all go off, else all come on. Knobs
   follow the CC's value across their range.
 - Mappings are for the whole app (not a preset), saved in `%LOCALAPPDATA%\NeuralAmpModeler\midimap.txt`,
-  shared by the app and the plug-in. They start as the old fixed Rig Kontrol map (CC 76-83, toe
+  shared by the app and the plug-in. They start as the old fixed footswitch map (CC 76-83, toe
   switch CC 64, volume pedal on CC 1/4/7/11), which you can now change.
 - Sound: bit-identical to 1.42.1.
 
@@ -1068,11 +1068,11 @@ autosave).
   1.37 (whole plugin on your autosave, compared sample for sample). It adds no clicks on a held note
   stepping soft/hard, and costs one `pow` every 8 samples. Presets and older states load with it
   at 0.
-- **Why the Real Feel "wasn't right" on your setup** (Tube Lab > AMP (Twin clean DI capture) > REAL
+- **Why the Real Feel "wasn't right" on a test rig** (Tube Lab > AMP (a clean amp capture) > REAL
   FEEL > CAB 2 + CAB 3), measured as distortion of a held note by pick level, through the whole
   plugin:
   - **The Tube Lab got your guitar about 18 dB hotter than it was voiced for.** Calibrate Input is
-    off, and the Twin capture has no input-level data anyway. The presets and the Real Feel tuning
+    off, and the amp capture has no input-level data anyway. The presets and the Real Feel tuning
     assume hard picks at about -19 dBFS at the Tube Lab. At Drive 24 even picks 24 dB softer than
     your hardest were past breakup, so every note was equally distorted.
   - **REAL FEEL's OT Iron at Depth 6.5x acted as a fuzz** on everything after the amp. It saturates
@@ -1080,8 +1080,7 @@ autosave).
     Iron off cut the distortion 10-12 dB at every pick level.
   - Before: -14, -10, -8, -8, -5, -3 dB THD from 30 dB under your hard pick to your hard pick. The
     dirt barely tracked your picking.
-- **Your setup, changed** (the old one is saved as the preset "Twin + Tube Lab (before Touch,
-  1.37)"):
+- **That rig, changed:**
   - Master In -2.2 -> -20 dB, so the Tube Lab gets the level it was voiced for.
   - AMP Gate threshold -53.1 -> -70.9 dB: it listens after Master In.
   - Tube Lab Drive 24 -> 12 dB, Touch 3, Output -13.9 -> -3.65 dB.
@@ -1118,8 +1117,8 @@ autosave).
   - No output sample can exceed the ceiling, and below the ceiling the gain is exactly 1.
   - It adds 0.67 ms of latency (31 samples at 48 kHz), only while on. Switching it fades out and
     back in (~10 ms).
-  - Your setup: Limiter on, Master Out +6 dB (-3.1 -> +2.9 dB). On your playing, the average is
-    -17.4 dBFS (was -23.1; your old JTM45 setup was -17.5) with peaks at -1.00 dBFS. The limiting
+  - On a test rig: Limiter on, Master Out +6 dB (-3.1 -> +2.9 dB). On a test recording, the average is
+    -17.4 dBFS (was -23.1; a JTM45 capture rig was -17.5) with peaks at -1.00 dBFS. The limiting
     differs from the plain boost by -17 to -20 dB, almost all of it the pick peaks.
   - Limiter off: bit-identical to 1.36.0.
 - **Fix: COMP in stereo.** The compressor ran each channel's whole block through one shared
@@ -1142,18 +1141,17 @@ autosave).
     convolution, and outputs stereo.
   - With no IR loaded, a cab passes its input straight through (like the CAB block), so in parallel
     it blends un-cabbed signal until you load one.
-  - Checked through the whole plugin on your setup: unplaced, the sound is bit-identical to 1.35.0.
+  - Checked through the whole plugin on a test rig: unplaced, the sound is bit-identical to 1.35.0.
     CAB 2 with the same IR, in parallel with CAB, reproduces CAB alone exactly. With the SM57 IR it
     blends audibly (-8 dB level-matched). Saved IR paths reload bit-identically.
-- **Your setup: CAB block switched off.** Your AMP capture ("BNO JT45DR I Crunch BAL CAB3") is an
-  amp-and-cab capture (`gear_type: amp_cab`): a 1966 JTM45 through a reissue Bluesbreaker with G12
-  Alnicos, mic'd. The CAB block's 1960 4x12 e609 IR on top made it two cabs in series: measured,
-  it scooped 500 Hz-2 kHz by about 9 dB and took 15 dB off 6-10 kHz. The IR stays loaded; switch
-  CAB back on if you want that sound, or use it after an amp-only capture or the Tube Lab.
+- **An amp-and-cab capture doesn't want the CAB block.** A capture with `gear_type: amp_cab` already
+  includes a mic'd cab. A 4x12 IR in the CAB block on top made it two cabs in series: measured, it
+  scooped 500 Hz-2 kHz by about 9 dB and took 15 dB off 6-10 kHz. Switch CAB off for those captures,
+  or use it after an amp-only capture or the Tube Lab.
 
 ## 1.35.0 (2026-10-12)
 
-- **Half the CPU, for a lower-latency buffer.** Measured on your setup (Tube Lab > AMP > REAL FEEL >
+- **Half the CPU, for a lower-latency buffer.** Measured on a test rig (Tube Lab > AMP > REAL FEEL >
   CAB > reverbs), whole plugin at a 256 buffer: 65% of each block's time before, about 32% now.
   The slowest blocks went from 114% (crackle territory) to 66%. The sound is unchanged: -133 dB
   from 1.34.0, which is rounding.
@@ -1176,8 +1174,8 @@ autosave).
 
 ## 1.34.0 (2026-10-12)
 
-- **New REAL FEEL pedal**, a tandem pedal with the Tube Lab. Measured on your setup, the Real Feel
-  switches did almost nothing to the final sound: your 5150 capture after the Tube Lab flattens
+- **New REAL FEEL pedal**, a tandem pedal with the Tube Lab. Measured on a test rig, the Real Feel
+  switches did almost nothing to the final sound: a 5150 capture after the Tube Lab flattens
   whatever the Tube Lab's power amp does (Squish 4x: +0.3 dB on the pick). Drag REAL FEEL from the
   AMP NEST and drop it after the AMP block. The switches then act there, after the capture, where
   a real amp's power section is.
@@ -1369,7 +1367,7 @@ autosave).
   between its panels). Only at some window sizes.
   - Cause (iPlug2's NanoVG drawing): the offscreen frame buffer is whole device pixels,
     `WindowWidth() * screen scale` truncated, but NanoVG was told the untruncated size. When that
-    product isn't whole (the user-resized 2442 x 1659 window is 663.6 units tall at 2.5x: a 1657 px
+    product isn't whole (a resized window 663.6 units tall at 2.5x scaling gets a 1657 px
     buffer for 1657.5 px of drawing), everything was squeezed by a fraction of a pixel. Each
     redrawn region's clip edge then fell mid-pixel, and NanoVG's anti-aliased clipping blended
     whatever was drawn underneath into those edge pixels.
@@ -1386,7 +1384,7 @@ autosave).
     (TUBE LAB DEBUG, TUNER) is open, the controls entirely underneath it are now hidden and not
     drawn at all, and exactly those are shown again when it closes (`NAMOverlayPanelControl::Hide`).
     Nothing under the page is left to bleed through, and the frames under it cost less to draw.
-  - Measured on screen at the 2442 x 1659 window, in two areas that should be flat background (the
+  - Measured on screen in a resized window, in two areas that should be flat background (the
     gap above the scope, and the strip the stray line ran along): 1.32.1 had 4 off-background rows
     (up to 58 grey levels off), with fix 1 alone 1 row (35 levels), with both 0.
 
@@ -1439,7 +1437,7 @@ autosave).
   1024 under AUDIO BUFFER: it saves to settings.ini and restarts the audio, like the Preferences
   dialog. The line under it shows the size in ms. In a DAW the row only shows the host's buffer
   and says to change it in the DAW's audio settings (a plug-in can't set the host's buffer).
-  - The Tube Lab (4x oversampled circuit simulation) dropped out at 192 samples on this machine;
+  - The Tube Lab (4x oversampled circuit simulation) dropped out at 192 samples on the test machine;
     256 fixed it.
   - Applied on the next idle tick, outside the click handler.
   - iPlug2 local edit: public `IPlugAPPHost::SetBufferSize()` (sets the state's buffer, saves the
@@ -1447,7 +1445,7 @@ autosave).
 
 ## 1.30.0 (2026-10-10)
 
-- **Toe switch = Tube Lab on/off.** The Rig Kontrol 3's toe switch (under the expression pedal,
+- **Toe switch = Tube Lab on/off.** A foot controller's toe switch (under the expression pedal,
   CC 64) toggles the Tube Lab block, counted the same way as the footswitches (every message is one
   press).
 
@@ -1461,7 +1459,7 @@ autosave).
 
 - **Tuner reads the raw input**, before the Input knob and input calibration. The 1.29.2 log showed
   why it read nothing: with the 5150 capture's calibration the input gain was 0.133 (-17.5 dB), and
-  a hard strum on this Focusrite peaked at only about -50 dBFS raw (-68 dB after that gain), with
+  a hard strum on the test interface peaked at only about -50 dBFS raw (-68 dB after that gain), with
   the idle noise near -92 dBFS. The amp's own gain hides how quiet that is; the tuner couldn't.
 - Gate retuned for low interface levels: 12 dB over the tracked noise floor (was 6 dB), -90 dBFS
   minimum (was -74), and the floor now creeps up ~0.3 dB/s (was ~1.1 dB/s per detection rate),
@@ -1495,8 +1493,7 @@ autosave).
 
 ## 1.29.0 (2026-10-10)
 
-- **MIDI footswitch control**, set up for the Native Instruments **Rig Kontrol 3** (which only sends
-  MIDI while Controller Editor 1.7.4 is open and connected, display showing "con"). MIDI input is
+- **MIDI footswitch control** from a MIDI foot controller. MIDI input is
   now on (`PLUG_DOES_MIDI_IN 1`); in the standalone, pick the pedal's port in Settings > MIDI input.
   - Footswitches = CC 76-83 on any channel. 1 Compressor, 2 Overdrive, 3 Chorus, 4 Delay,
     5 Reverb (on/off), 6 A/B amp, 7 tuner show/hide, 8 FX loop on/off.
@@ -1550,7 +1547,7 @@ autosave).
   and the resulting round trip ("+ driver" -- the interface's own converter/safety delay isn't
   visible to the app). In the standalone app the buffer is the audio device's, read from its
   settings; in a plugin host it's the block size the host calls us with.
-- Measured on this setup: Focusrite USB ASIO, 192 samples @ 48 kHz = 4.0 ms each way, processing
+- Measured on a USB interface with ASIO, 192 samples @ 48 kHz = 4.0 ms each way, processing
   delay 0.0 ms -- so the latency is the buffer, not the app.
 - Checked the "app keeps running after closing" report: clicking the window's X exits the process
   immediately; the stray processes found earlier still had their window open.

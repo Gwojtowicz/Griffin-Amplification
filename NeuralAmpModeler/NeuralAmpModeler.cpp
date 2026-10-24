@@ -3756,7 +3756,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         }
         const int cc = mMidiLastCC.load(std::memory_order_relaxed);
         if (cc < 0)
-          return "No MIDI in yet. (Rig Kontrol: Controller Editor must be open and connected.)";
+          return "No MIDI in yet. (Check the MIDI input in Preferences, and that the controller is connected.)";
         return "Last MIDI in: CC " + std::to_string(cc) + " = " + std::to_string(mMidiLastValue.load());
       };
       cb.mappings = [this]() {
@@ -4870,7 +4870,7 @@ void NeuralAmpModeler::ProcessMidiMsg(const IMidiMsg& msg)
   const int value = msg.mData2;
   if (cc < 0 || cc > 127)
     return;
-  // Every message counts as a press for a switch target: the Rig Kontrol 3's switches latch (one
+  // Every message counts as a press for a switch target: latching footswitches toggle (one
   // press sends 127, the next 0), so this toggles the app's current state instead of having to
   // agree with the pedal's own on/off memory. Knob targets use the last value.
   mMidiCCValue[cc].store(value, std::memory_order_relaxed);
@@ -5012,7 +5012,7 @@ void NeuralAmpModeler::_ApplyMidiMappings()
 
 void NeuralAmpModeler::_SetDefaultMidiMap()
 {
-  // The Rig Kontrol 3 layout of 1.29.0-1.42.1: footswitches CC 76-83, the toe switch CC 64, and
+  // The default footswitch layout of 1.29.0-1.42.1: footswitches CC 76-83, the toe switch CC 64, and
   // CC 1 / 4 / 7 / 11 as a volume pedal.
   for (auto& targets : mMidiMap)
     targets.clear();

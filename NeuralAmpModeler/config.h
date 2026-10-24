@@ -29,7 +29,7 @@
 
 #define PLUG_LATENCY 0
 #define PLUG_TYPE 0
-#define PLUG_DOES_MIDI_IN 1 // 1.29.0: footswitch control (Rig Kontrol 3), see ProcessMidiMsg
+#define PLUG_DOES_MIDI_IN 1 // 1.29.0: footswitch control, see ProcessMidiMsg
 #define PLUG_DOES_MIDI_OUT 0
 #define PLUG_DOES_MPE 0
 #define PLUG_DOES_STATE_CHUNKS 0

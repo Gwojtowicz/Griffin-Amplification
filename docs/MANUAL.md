@@ -553,8 +553,8 @@ stack.
   nears its supply, the follower's grid conducts and rounds the top over.
 - **Output:** the cathode's swing through the same ~7 Hz bilinear high-pass as the coupling cap it
   replaces. Without that high-pass, switching it on clicked at -37 dB.
-- **Measured:** -0.9 dB at the user's settings and -4.3 dB at hot ones (it clips). The difference
-  is -12.8 dB re the signal at the user's settings. It costs +3.5% CPU.
+- **Measured:** -0.9 dB at the test settings and -4.3 dB at hot ones (it clips). The difference
+  is -12.8 dB re the signal at the test settings. It costs +3.5% CPU.
 
 **Cath Bias: cathode-biased power amp** (`PowerAmp.h`).
 - **Circuit:** the grid leaks return to 0 V, and the pair shares a cathode resistor with a 100 µF
@@ -575,7 +575,7 @@ transformer's 40 Hz high-pass and 12 kHz low-pass came after it.
   this sample's output, `fbA·y + fbB`, and the solve stays implicit (no one-sample delay in the loop).
   The filters run on their own state, from the plate voltage the secondary actually carries, so Coil
   Heat's correction stays out of the loop. OT Iron's saturation stays outside the loop.
-- **Measured:** +2 dB at 40-70 Hz at the user's settings, +0.4 dB at 8 kHz. The feedback no longer
+- **Measured:** +2 dB at 40-70 Hz at the test settings, +0.4 dB at 8 kHz. The feedback no longer
   flattens what the transformer rolls off.
 
 **Resonance** (`PowerAmp.h`). It takes a low-pass part (150 Hz) of the fed-back signal away, up to
@@ -595,7 +595,7 @@ glides over ~10 ms.
 
 **8x** (`TubeStage.h`). Twice the oversampling (8x at 44.1/48 kHz, ~384 kHz), with filters twice as
 long, so the latency stays 15 samples.
-- **Cost:** 8.6% → 16.6% of a core at the user's settings.
+- **Cost:** 8.6% → 16.6% of a core at the test settings.
 - **Measured:** in-band aliasing on a hard-clipping Stage 2 (Drive 30, Gain 2 at 9): -38 → -52 dB
   on a 2.5 kHz note. No audible change at moderate gain.
 - Economy halves the factor and 8x doubles it, so both on cancel out.
@@ -655,7 +655,7 @@ exactly the sound without them: every part is skipped.
     (EL34 25 W, 6L6 30 W), on a bar from cold to RED PLATING. With nothing playing, the average
     current is the idle.
 
-Measured on the user's settings (a -19 dBFS strum into the Tube Lab), as level and level-matched
+Measured on the test settings (a -19 dBFS strum into the Tube Lab), as level and level-matched
 difference from stock:
 
 | Setting | Level | Difference |
@@ -790,7 +790,7 @@ How it works:
   -2.7 dB at 18 kHz through both filters, where a guitar speaker is already 30 dB or more down.
 - Aliasing inside the band (below 12 kHz) is made by the circuit itself at its ~192 kHz rate, mostly
   by a hard-clipping Stage 2. At hot settings (Drive 30, Gain 2 at 9) a 2.5 kHz tone aliases at
-  -38 dB, and 8x oversampling would take that to -52 dB at twice the CPU. At the user's settings it
+  -38 dB, and 8x oversampling would take that to -52 dB at twice the CPU. At the test settings it
   is -54 to -84 dB.
 - The tap count is `factor × 15 + 1`, so the total delay is always a whole number of host samples. The
   dry path is delayed by the same amount, so **Mix** and the on/off crossfade stay phase-aligned.
@@ -815,7 +815,7 @@ is bit-identical. Together these halved the Tube Lab's cost; the stock presets m
 to -234 dB.
 
 **Cost (1.45.0).** Another 36% off when it's on, and nearly all of it when it's off. Measured on the
-user's settings (two stages, Marshall stack, 6L6 power amp, speaker load) and checked against a
+test settings (two stages, Marshall stack, 6L6 power amp, speaker load) and checked against a
 200-iteration solve. The circuit used to match that solve to -155..-185 dB re the signal, far below
 what 24-bit audio can hold. It now matches it to -157..-179 dB.
 - **Newton's predictor.** Each solve starts from the last two samples' solutions extrapolated in a
@@ -839,7 +839,7 @@ what 24-bit audio can hold. It now matches it to -157..-179 dB.
   clean as before or cleaner (a held note into the amp: -37 → -50 dB of >2 kHz transient). Switching
   on takes effect 50 ms later; switching off is instant, as before.
 
-Tube Lab alone, user's settings, 48 kHz: 13.4% → 8.6% of a core when on, 8.6% → 0.07% when off. In the
+Tube Lab alone, test settings, 48 kHz: 13.4% → 8.6% of a core when on, 8.6% → 0.07% when off. In the
 whole plugin on the user's chain at a 128-sample buffer: 33.7% → 19.7% as saved (Tube Lab
 footswitched off), and 34.1% → ~28.5% with it on.
 
@@ -1123,9 +1123,9 @@ In the standalone app, Settings has an **AUDIO BUFFER** row:
 
 - **Sizes:** 32, 48, 64, 96, 128, 192, 256, 384, 512, 1024 and 2048 samples. Click one and the audio
   restarts with it. Smaller feels tighter, and bigger is safer from dropouts. With the Tube Lab on, 64
-  and below can drop out on this PC, so 128 is the usual choice.
-- **DRIVER PANEL** opens your audio interface's own settings window. For the Scarlett 2i2 that's
-  "Scarlett 2i2 (3rd Gen) Device Settings": Sample Rate, Buffer Size, Clock Source and Clock Status.
+  and below can drop out on a slower PC, so 128 is the usual choice.
+- **DRIVER PANEL** opens your audio interface's own settings window: typically its sample rate,
+  buffer size and clock source.
   With a non-ASIO driver it opens the Windows sound settings instead.
 - **DEVICE...** opens the full audio Preferences: the interface, sample rate, input and output
   channels, and MIDI input. It's the same dialog as File > Preferences (Ctrl+,).
@@ -1133,9 +1133,9 @@ In the standalone app, Settings has an **AUDIO BUFFER** row:
   runs a different size from the one you picked (some only run the size set in their own panel), the
   note says so. The latency readout at the bottom of the main window always uses the real size.
 
-**The app and the interface's panel stay in sync.** Change Buffer Size in the Focusrite panel and the
+**The app and the interface's panel stay in sync.** Change Buffer Size in the interface's panel and the
 app restarts its audio at that size within about a second, and the row follows it. Pick a size in the
-app and the Focusrite panel shows it too. Either way, the size is saved to `settings.ini`.
+app and the interface's panel shows it too. Either way, the size is saved to `settings.ini`.
 
 In a DAW the row only shows the DAW's buffer size: the DAW owns the audio device, so change it in the
 DAW's audio settings.
@@ -1155,9 +1155,9 @@ How it works:
   reads the driver's preferred size (`ASIOGetBufferSize`). After a reset request or a change in that
   size, it reopens the stream asking for size 0, which RtAudio takes as the driver's preferred size,
   and saves the result to the INI. Asking for the old size again would just reopen at the old size,
-  since the Focusrite driver accepts any size the app asks for.
-- The first `ASIOControlPanel()` call to Focusrite's driver only starts its helper
-  (`Focusrite Notifier.exe`). If the app is still the foreground window about 2 s later, DRIVER PANEL
+  since some drivers accept any size the app asks for.
+- With some drivers, the first `ASIOControlPanel()` call only starts the driver's helper app. If the
+  app is still the foreground window about 2 s later, DRIVER PANEL
   calls it once more.
 - The Preferences dialog's buffer list (`kBufferSizeOptions`) gained 48 and 384 to match.
 
@@ -1495,7 +1495,7 @@ it over `NeuralAmpModeler.vst3\Contents\x86_64-win\NeuralAmpModeler.vst3` inside
 bundle, from an elevated (admin) prompt.
 
 Compiler flags: SSE2 (the default). `/arch:AVX2` was measured in 1.45.0 and made the whole plugin
-slower on the i7-6700HQ it runs on (19.6% → 20.9% of a core), so it isn't used.
+slower on the test machine (19.6% → 20.9% of a core), so it isn't used.
 
 Versioning: `PLUG_VERSION_STR` / `PLUG_VERSION_HEX` in `NeuralAmpModeler/config.h`, with a
 [CHANGELOG.md](../CHANGELOG.md) entry for every build that gets used. A patch release is fixes only, a
@@ -1564,7 +1564,7 @@ its mapping. The strip along the bottom lists every mapping and the last MIDI me
 **How mapped controls respond**
 
 - A **switch** (a pedal's on/off, A/B, the tuner) toggles on every message. Latching footswitches
-  (like the Rig Kontrol's) send 127 on one press and 0 on the next; each counts as a press.
+  send 127 on one press and 0 on the next; each counts as a press.
 - A **knob** follows the CC's value: 0-127 across its whole range.
 - The **volume pedal** (CC 1, 4, 7 and 11 by default) is an extra output volume, not a saved setting.
 
@@ -1572,7 +1572,7 @@ its mapping. The strip along the bottom lists every mapping and the last MIDI me
 
 Mappings belong to the app, not to a preset: your pedal does the same thing whatever sound you load.
 They're saved in `%LOCALAPPDATA%\GriffinAmplification\midimap.txt`, shared by the app and the plug-in.
-Without that file, the app starts from the original Rig Kontrol 3 layout: CC 76-79 = COMP, OD,
+Without that file, the app starts from the original default layout: CC 76-79 = COMP, OD,
 CHORUS, DELAY; CC 80 = every REVERB; CC 81 = A/B; CC 82 = tuner; CC 83 = FX loop; CC 64 (toe
 switch) = Tube Lab; CC 1/4/7/11 = volume. Delete the file to go back to that layout.
 
@@ -1584,19 +1584,17 @@ off the volume pedal. To switch the wah on and off with the toe switch, click th
 the toe switch, and click MIDI to finish. (Hand-written equivalent in `midimap.txt`:
 `4 param <index> Wah Position` and `64 param <index> WahEngaged`; the app reads the file when it starts.)
 
-**Native Instruments Rig Kontrol 3**
+**Connecting a foot controller**
 
-- The pedal only sends MIDI while **Controller Editor 1.7.4** is open and connected (the pedal's
-  display shows "con"). Start it before the app.
-- In the standalone, choose **Rig Kontrol 3 MIDI In** under File > Preferences > MIDI input (or
-  Settings > **DEVICE...**). The app
-  lists MIDI ports when it starts, so a pedal plugged in later needs an app restart.
-- Controller Editor's switch numbers: **1-4** (bottom row) send **CC 80-83**, **5-8** (top row) send
-  **CC 76-79**, the toe switch sends **CC 64**, and the expression pedal CC 4.
+- In the standalone, choose your controller's MIDI port under File > Preferences > MIDI input (or
+  Settings > **DEVICE...**). The app lists MIDI ports when it starts, so a controller plugged in
+  later needs an app restart.
+- Some controllers only send MIDI while their own editor software is running and connected.
+- To see which CC a switch sends, turn MIDI learn on and press it: the status line shows it.
 
 **Troubleshooting:** with MIDI learn on, press a footswitch and watch the status line. "Last MIDI in:
-CC n" means the app hears it. "No MIDI in yet" means it doesn't: check Controller Editor is
-connected and the MIDI input in Preferences, then restart the app.
+CC n" means the app hears it. "No MIDI in yet" means it doesn't: check the controller is
+connected (with its editor software running, if it needs one) and the MIDI input in Preferences, then restart the app.
 
 ## Saved-state format
 

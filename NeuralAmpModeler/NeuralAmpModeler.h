@@ -1074,7 +1074,7 @@ private:
   double mInputGain = 1.0;
   double mOutputGain = 1.0;
 
-  // MIDI mappings (1.43.0: MIDI learn; the fixed Rig Kontrol 3 map of 1.29.0 is now just the
+  // MIDI mappings (1.43.0: MIDI learn; the fixed footswitch map of 1.29.0 is now just the
   // default mappings). Each CC drives a list of targets: a param, the tuner page, or the volume
   // pedal. ProcessMidiMsg (audio thread) only counts messages per CC and keeps the last value (and
   // drives the volume pedal); OnIdle applies them (_ApplyMidiMappings) on the main thread, where
@@ -1612,8 +1612,8 @@ private:
   int mPendingBufferSize = 0;
   // Standalone only (1.51.0): Settings page DRIVER PANEL / DEVICE clicks, run on the next idle tick.
   bool mPendingDriverPanel = false;
-  // Idle ticks until DRIVER PANEL tries once more if nothing came up (Focusrite's driver only starts
-  // its helper app on the first call). 0 = no retry pending.
+  // Idle ticks until DRIVER PANEL tries once more if nothing came up (some drivers only start
+  // their helper app on the first call). 0 = no retry pending.
   int mDriverPanelRetryTicks = 0;
   bool mPendingDevicePrefs = false;
   // The AMP NEST library panel's show/hide toggle -- hidden while any block's popup is open (see
