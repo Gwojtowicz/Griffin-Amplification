@@ -44,6 +44,7 @@ can play a captured amp and the simulated one in the same chain.
 - [What it does](#what-it-does)
 - [The signal chain](#the-signal-chain)
 - [Tube Lab: a real circuit, simulated](#tube-lab-a-real-circuit-simulated)
+  - [The chassis](#the-chassis)
   - [Example: what Drive does](#example-what-drive-does)
   - [Example: the debug page's schematic and oscilloscope](#example-the-debug-pages-schematic-and-oscilloscope)
 - [Cab Lab: place the mics in 3D](#cab-lab-place-the-mics-in-3d)
@@ -129,6 +130,26 @@ On top of that there are switches for the parts of real amps that shape the feel
 cathode bias, speaker feedback, Resonance) and **Real Feel** options that exaggerate them (screen
 squish, shared supply, output-transformer saturation, coil heat). Switched off, the Tube Lab fades out
 and goes to sleep, so it costs almost nothing.
+
+### The chassis
+
+<p align="center">
+  <img src="docs/images/tube-lab-chassis.png" alt="The Tube Lab chassis in 3D: six preamp tubes, four power tubes, the turret board, the transformers and the Variac, with the V5 socket selected as a 12AT7 gain stage" width="100%">
+</p>
+
+Opening the Tube Lab shows the whole amp in 3D. Drag to turn it, use the wheel to zoom, and click
+any part to see what it does and set it:
+
+- **Preamp tubes:** V1 to V6, glowing with their heaters and pulsing with the signal. The two spare
+  sockets, **V5** and **V6**, take a 12AX7, 12AT7, 12AU7 or 5751 as an extra gain stage, a cathode
+  follower or a boost.
+- **Power tubes:** a pair, or all four (**V9-V12**) for a quad like a 100 W head. With failing switched
+  on, each tube wears on its own and can be replaced.
+- **The turret board:** the preamp's caps and resistors, drawn as the real parts, with resistor colour
+  bands for their actual values.
+- **The Variac:** the mains voltage, 90 to 135 V.
+
+Double-click a part to jump to its knobs or to its probe on the debug scope.
 
 ### Example: what Drive does
 
