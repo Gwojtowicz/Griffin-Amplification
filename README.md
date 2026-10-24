@@ -134,7 +134,7 @@ and goes to sleep, so it costs almost nothing.
 ### The chassis
 
 <p align="center">
-  <img src="docs/images/tube-lab-chassis.png" alt="The Tube Lab chassis in 3D: six preamp tubes, four power tubes, the turret board, the transformers and the Variac, with the V5 socket selected as a 12AT7 gain stage" width="100%">
+  <img src="docs/images/tube-lab-chassis-amp.png" alt="The Tube Lab chassis in 3D: the preamp tubes, four glowing EL34 power tubes with V10 selected, the turret board, the transformers and the Variac, with the power tubes' health on the right" width="100%">
 </p>
 
 Opening the Tube Lab shows the whole amp in 3D. Drag to turn it, use the wheel to zoom, and click
