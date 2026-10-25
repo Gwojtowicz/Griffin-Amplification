@@ -1266,7 +1266,7 @@ Two blocks in the AMP NEST pedal list (at the end), placed on the grid like any 
 sit above the amp's hiss, and the amp keeps a dying note loud, so the gate cuts in late and chatters
 on the tail. With Key Input on, the GATE goes after the AMP or Tube Lab but listens to the clean
 signal after Master In: your picking opens and closes it, and the amp's noise can't hold it open.
-This is how hardware gates like the ISP Decimator are used.
+This is how tracking hardware gates are used.
 
 To set it up:
 
@@ -1453,9 +1453,9 @@ stack a second one.
   bipolar regen, Hermite-interpolated delay line; one copy), and Phaser (4 allpass stages swept
   150 Hz to ~4 kHz, bipolar regen; one copy). There are also two **capture pedals** (CAPTURE 1 and CAPTURE 2), which load a `.nam`
   capture of a real pedal (mono, like the amp model; they can go anywhere on the grid).
-- **1.44.0 pedals** ([`NewPedals.h`](../NeuralAmpModeler/NewPedals.h)), modelled on how the originals
-  behave (not their circuits), each with a wider popup:
-  - **SKY VERB** (Strymon BigSky style): an 8-line feedback delay network (Householder mixing,
+- **1.44.0 pedals** ([`NewPedals.h`](../NeuralAmpModeler/NewPedals.h)), modelled on how classic pedal
+  types behave (not on any circuit), each with a wider popup:
+  - **SKY VERB**: an 8-line feedback delay network (Householder mixing,
     per-line one-pole damping from Tone, slow line-length modulation from Mod) after a crossfaded
     pre-delay and four input allpasses. Line gains come from RT60 (`10^(-3·len/RT60)`, with RT60 x1.2
     for the damping's own loss). Modes set the line lengths and diffusion: Hall 30-79 ms, Plate
@@ -1463,14 +1463,14 @@ stack a second one.
     tank an octave up (two crossfaded taps reading at double speed) and feeds it back; Bloom scales
     the input by a slow envelope over a fast one, so the reverb swells in. Freeze sets the loss and
     damping to none, stops the modulation and rounds the line lengths, so the loop is lossless.
-  - **FLANGE DBL** (MXR 126 style): a Hermite-interpolated delay; Flanger sweeps 0.3-4 ms up to x8 with
+  - **FLANGE DBL**: a Hermite-interpolated delay; Flanger sweeps 0.3-4 ms up to x8 with
     a triangle; Doubler sits at 15-70 ms and wanders (a slow sine plus smoothed noise).
-  - **WAH**: a TPT state-variable filter (band-pass plus some low-pass), swept exponentially: Cry Baby
-    350 Hz-2.2 kHz at Q 5.5, V847 450 Hz-1.6 kHz at Q 3.5; Auto drives the position from an envelope
+  - **WAH**: a TPT state-variable filter (band-pass plus some low-pass), swept exponentially: Classic
+    350 Hz-2.2 kHz at Q 5.5, Smooth 450 Hz-1.6 kHz at Q 3.5; Auto drives the position from an envelope
     against a peak follower of your loudest picks.
-  - **PREC DRIVE** (Horizon Precision Drive style): Attack high-pass (60-500 Hz) and a mid push into a
+  - **TIGHT DRIVE**: Attack high-pass (60-500 Hz) and a mid push into a
     biased tanh with first-order antiderivative anti-aliasing, a low-pass after (Bright opens it), and a
-    gate keyed from the input. **APEX PRE** (Horizon Apex style): three biased anti-aliased tanh stages
+    gate keyed from the input. **HI-GAIN PRE**: three biased anti-aliased tanh stages
     with filtering between them, then shelving/peaking Bass, Mid, Treble and Presence.
 - **Tuner** ([`Tuner.h`](../NeuralAmpModeler/Tuner.h)): reads the raw input, decimated to about 22-24 kHz,
   and uses the McLeod pitch method (normalized autocorrelation, first strong peak) so it doesn't jump

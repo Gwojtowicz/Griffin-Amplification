@@ -164,6 +164,24 @@ static const double kTubeCathodeCapUF[6] = {0.0, 0.68, 1.0, 2.2, 10.0, 25.0};
 static const double kTubePlateCapPF[6] = {0.0, 47.0, 100.0, 220.0, 470.0, 1000.0};
 static const double kTubeCoupleNF[6] = {2.2, 4.7, 10.0, 22.0, 47.0, 100.0};
 
+// 1.71.2 renamed the HI-GAIN PRE's params; states and MIDI maps saved before then use these names.
+static const char* _OldParamName(int p)
+{
+  switch (p)
+  {
+    case kHGPreActive: return "ApexActive";
+    case kHGPreEngaged: return "ApexEngaged";
+    case kHGPreGain: return "Apex Gain";
+    case kHGPreBass: return "Apex Bass";
+    case kHGPreMid: return "Apex Mid";
+    case kHGPreTreble: return "Apex Treble";
+    case kHGPrePresence: return "Apex Presence";
+    case kHGPreVolume: return "Apex Volume";
+    case kHGPreBright: return "Apex Bright";
+    default: return nullptr;
+  }
+}
+
 static const PedalDef kPedals[kNumPedals] = {
   {"COMP", kCompressorActive, kCompressorEngaged, kCompressorSlot,
    {{"Sustain", kCompressorSustain}, {"Level", kCompressorLevel}, {"Mix", kCompressorMix}, {nullptr, -1}}},
@@ -237,8 +255,8 @@ static const PedalDef kLatePedals[chaingrid::kNumLatePedals] = {
   {"SKY VERB", kSkyActive, kSkyEngaged, -1, {{"Decay", kSkyDecay}, {"Tone", kSkyTone}, {"Mod", kSkyMod}, {"Mix", kSkyMix}}},
   {"FLANGE DBL", kFDActive, kFDEngaged, -1, {{"Manual", kFDManual}, {"Width", kFDWidth}, {"Speed", kFDSpeed}, {"Mix", kFDMix}}},
   {"WAH", kWahActive, kWahEngaged, -1, {{"Position", kWahPosition}, {"Q", kWahQ}, {"Sens", kWahSens}, {"Level", kWahLevel}}},
-  {"PREC DRIVE", kPDActive, kPDEngaged, -1, {{"Volume", kPDVolume}, {"Drive", kPDDrive}, {"Attack", kPDAttack}, {"Gate", kPDGate}}},
-  {"APEX PRE", kApexActive, kApexEngaged, -1, {{"Gain", kApexGain}, {"Bass", kApexBass}, {"Mid", kApexMid}, {"Treble", kApexTreble}}},
+  {"TIGHT DRIVE", kPDActive, kPDEngaged, -1, {{"Volume", kPDVolume}, {"Drive", kPDDrive}, {"Attack", kPDAttack}, {"Gate", kPDGate}}},
+  {"HI-GAIN PRE", kHGPreActive, kHGPreEngaged, -1, {{"Gain", kHGPreGain}, {"Bass", kHGPreBass}, {"Mid", kHGPreMid}, {"Treble", kHGPreTreble}}},
   // 1.46.0 (ProEQ.h): laid out separately (the EQ graph; see the chaingrid::kProEq case).
   {"PRO EQ", kProEqActive, kProEqEngaged, -1, {{"Output", kProEqOutput}, {nullptr, -1}, {nullptr, -1}, {nullptr, -1}}},
   // 1.52.0 (Dynamics.h): laid out separately (two rows and a meter; see _IsDynamicsPedal).
@@ -788,7 +806,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
   GetParam(kFDMix)->InitDouble("FlangeDbl Mix", 5.0, 0.0, 10.0, 0.1);
   GetParam(kWahActive)->InitBool("WahActive", false);
   GetParam(kWahEngaged)->InitBool("WahEngaged", true);
-  GetParam(kWahModel)->InitEnum("Wah Model", 0, {"Cry Baby", "V847", "Auto"});
+  GetParam(kWahModel)->InitEnum("Wah Model", 0, {"Classic", "Smooth", "Auto"});
   GetParam(kWahPosition)->InitDouble("Wah Position", 5.0, 0.0, 10.0, 0.1);
   GetParam(kWahQ)->InitDouble("Wah Q", 5.0, 0.0, 10.0, 0.1);
   GetParam(kWahSens)->InitDouble("Wah Sens", 5.0, 0.0, 10.0, 0.1);
@@ -800,15 +818,15 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
   GetParam(kPDAttack)->InitDouble("PrecDrive Attack", 5.0, 0.0, 10.0, 0.1);
   GetParam(kPDGate)->InitDouble("PrecDrive Gate", 0.0, 0.0, 10.0, 0.1);
   GetParam(kPDBright)->InitBool("PrecDrive Bright", false);
-  GetParam(kApexActive)->InitBool("ApexActive", false);
-  GetParam(kApexEngaged)->InitBool("ApexEngaged", true);
-  GetParam(kApexGain)->InitDouble("Apex Gain", 6.0, 0.0, 10.0, 0.1);
-  GetParam(kApexBass)->InitDouble("Apex Bass", 5.0, 0.0, 10.0, 0.1);
-  GetParam(kApexMid)->InitDouble("Apex Mid", 5.0, 0.0, 10.0, 0.1);
-  GetParam(kApexTreble)->InitDouble("Apex Treble", 5.0, 0.0, 10.0, 0.1);
-  GetParam(kApexPresence)->InitDouble("Apex Presence", 4.0, 0.0, 10.0, 0.1);
-  GetParam(kApexVolume)->InitDouble("Apex Volume", -6.0, -40.0, 10.0, 0.1, "dB");
-  GetParam(kApexBright)->InitBool("Apex Bright", false);
+  GetParam(kHGPreActive)->InitBool("HGPreActive", false);
+  GetParam(kHGPreEngaged)->InitBool("HGPreEngaged", true);
+  GetParam(kHGPreGain)->InitDouble("HG Pre Gain", 6.0, 0.0, 10.0, 0.1);
+  GetParam(kHGPreBass)->InitDouble("HG Pre Bass", 5.0, 0.0, 10.0, 0.1);
+  GetParam(kHGPreMid)->InitDouble("HG Pre Mid", 5.0, 0.0, 10.0, 0.1);
+  GetParam(kHGPreTreble)->InitDouble("HG Pre Treble", 5.0, 0.0, 10.0, 0.1);
+  GetParam(kHGPrePresence)->InitDouble("HG Pre Presence", 4.0, 0.0, 10.0, 0.1);
+  GetParam(kHGPreVolume)->InitDouble("HG Pre Volume", -6.0, -40.0, 10.0, 0.1, "dB");
+  GetParam(kHGPreBright)->InitBool("HG Pre Bright", false);
 
   // Extra pedal copies: the original's knobs (same ranges and defaults), as "Reverb2 Size" etc.
   {
@@ -2600,7 +2618,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           switch (p)
           {
             case chaingrid::kSkyVerb:
-              about = "Studio reverb in the spirit of a Strymon BigSky.";
+              about = "A multi-mode studio reverb.";
               ctls = {{kSkyMode, "Mode", false,
                        "Hall: big and smooth. Plate: dense, bright, instant. Room: small. Shimmer: an octave up keeps "
                        "rising in the tail (Mod sets how much). Cloud: huge and ambient. Bloom: swells in after each note."},
@@ -2614,7 +2632,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                        "footswitch with MIDI learn."}};
               break;
             case chaingrid::kFlangerDoubler:
-              about = "After the MXR 126 Flanger/Doubler.";
+              about = "A flanger, or a doubler that sounds like the part played twice.";
               ctls = {{kFDDoubler, "Doubler", true,
                        "Off: flanger (a short swept delay, the jet sound). On: doubler (a 15-70 ms wandering delay that "
                        "sounds like the part played twice)."},
@@ -2625,9 +2643,9 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                       {kFDMix, "Mix", false, "How much of the delayed signal: 5 is the classic even blend."}};
               break;
             case chaingrid::kWah:
-              about = "Cry Baby, Vox V847 or auto-wah. Map Position to your expression pedal with MIDI learn.";
+              about = "Classic, smooth or auto-wah. Map Position to your expression pedal with MIDI learn.";
               ctls = {{kWahModel, "Model", false,
-                       "Cry Baby: 350 Hz-2.2 kHz, sharp. V847: 450 Hz-1.6 kHz, rounder. Auto: opens with your picking."},
+                       "Classic: 350 Hz-2.2 kHz, sharp. Smooth: 450 Hz-1.6 kHz, rounder. Auto: opens with your picking."},
                       {kWahPosition, "Position", false,
                        "Heel (0) to toe (10). For a real wah, map it to the expression pedal in MIDI learn (that takes "
                        "its CC off the volume pedal). In Auto, where the sweep starts."},
@@ -2635,8 +2653,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                       {kWahSens, "Sens", false, "Auto: how far under your hardest picks it starts to open."},
                       {kWahLevel, "Level", false, "Output level."}};
               break;
-            case chaingrid::kPrecisionDrive:
-              about = "After the Horizon Devices Precision Drive: a tight overdrive for high gain amps.";
+            case chaingrid::kTightDrive:
+              about = "A tight overdrive for high gain amps.";
               ctls = {{kPDVolume, "Volume", false, "Output level."},
                       {kPDDrive, "Drive", false, "Gain into the clipping: a clean boost at 0, a saturated push at 10."},
                       {kPDAttack, "Attack", false,
@@ -2645,7 +2663,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                       {kPDBright, "Bright", true, "More top end after the clipping."}};
               break;
             case chaingrid::kTrackGate:
-              about = "Three gates: Tracking (after the ISP Decimator), Classic (Boss NS-2), Smart (MXR Smart Gate).";
+              about = "Three gates: Tracking (follows your note's decay), Classic (threshold and decay), Smart (gates only the noise).";
               ctls = {{kTGModel, "Model", false, BaseParamHelp(kTGModel)},
                       {kTGThreshold, "Threshold", false, BaseParamHelp(kTGThreshold)},
                       {kTGRelease, "Release", false, BaseParamHelp(kTGRelease)},
@@ -2656,7 +2674,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                       {kTGKey, "Key In", true, BaseParamHelp(kTGKey)}};
               break;
             case chaingrid::kDigiDelay:
-              about = "Digital delay after the Boss DD-3 / DD-8: clean repeats, chorused, warm or reversed.";
+              about = "Digital delay: clean repeats, chorused, warm or reversed.";
               ctls = {{kDigiMode, "Mode", false, BaseParamHelp(kDigiMode)},
                       {kDigiTime, "Time", false, BaseParamHelp(kDigiTime)},
                       {kDigiFeedback, "Feedback", false, BaseParamHelp(kDigiFeedback)},
@@ -2664,7 +2682,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                       {kDigiTapDiv, "Tap", false, BaseParamHelp(kDigiTapDiv)}};
               break;
             case chaingrid::kAnalogDelay:
-              about = "Bucket-brigade delay after the MXR Carbon Copy: dark repeats that can run away.";
+              about = "Bucket-brigade delay: dark repeats that can run away.";
               ctls = {{kAnaTime, "Delay", false, BaseParamHelp(kAnaTime)},
                       {kAnaRegen, "Regen", false, BaseParamHelp(kAnaRegen)},
                       {kAnaMix, "Mix", false, BaseParamHelp(kAnaMix)},
@@ -2674,7 +2692,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                       {kAnaTapDiv, "Tap", false, BaseParamHelp(kAnaTapDiv)}};
               break;
             case chaingrid::kTapeEcho:
-              about = "Tape echo after the Boss RE-20 / Roland Space Echo: three heads, wow, saturation and a spring.";
+              about = "Tape echo: three heads, wow, saturation and a spring.";
               ctls = {{kTapeHeads, "Heads", false, BaseParamHelp(kTapeHeads)},
                       {kTapeRate, "Rate", false, BaseParamHelp(kTapeRate)},
                       {kTapeIntensity, "Intensity", false, BaseParamHelp(kTapeIntensity)},
@@ -2685,22 +2703,22 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                       {kTapeTapDiv, "Tap", false, BaseParamHelp(kTapeTapDiv)}};
               break;
             case chaingrid::kSpringVerb:
-              about = "Spring reverb after a '63 Fender Reverb / Boss FRV-1: the drip and splash of two springs.";
+              about = "Spring reverb: the drip and splash of two springs.";
               ctls = {{kSprDwell, "Dwell", false, BaseParamHelp(kSprDwell)},
                       {kSprTone, "Tone", false, BaseParamHelp(kSprTone)},
                       {kSprMix, "Mix", false, BaseParamHelp(kSprMix)},
                       {kSprDecay, "Decay", false, BaseParamHelp(kSprDecay)}};
               break;
-            case chaingrid::kApexPreamp:
+            case chaingrid::kHiGainPreamp:
             default:
-              about = "After the Horizon Devices Apex Preamp: a three-stage high-gain preamp.";
-              ctls = {{kApexGain, "Gain", false, "Preamp gain."},
-                      {kApexBass, "Bass", false, "Low end (around 120 Hz)."},
-                      {kApexMid, "Mid", false, "Mids (around 700 Hz)."},
-                      {kApexTreble, "Treble", false, "Highs (above 2.8 kHz)."},
-                      {kApexPresence, "Presence", false, "Upper highs (5 kHz and up)."},
-                      {kApexVolume, "Volume", false, "Output level. It's a preamp: put a CAB after it."},
-                      {kApexBright, "Bright", true, "More top end into the gain."}};
+              about = "A three-stage high-gain preamp.";
+              ctls = {{kHGPreGain, "Gain", false, "Preamp gain."},
+                      {kHGPreBass, "Bass", false, "Low end (around 120 Hz)."},
+                      {kHGPreMid, "Mid", false, "Mids (around 700 Hz)."},
+                      {kHGPreTreble, "Treble", false, "Highs (above 2.8 kHz)."},
+                      {kHGPrePresence, "Presence", false, "Upper highs (5 kHz and up)."},
+                      {kHGPreVolume, "Volume", false, "Output level. It's a preamp: put a CAB after it."},
+                      {kHGPreBright, "Bright", true, "More top end into the gain."}};
               break;
           }
           auto attach = [&](IControl* c) {
@@ -4077,11 +4095,11 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         mWah.SetParams(GetParam(kWahModel)->Int(), GetParam(kWahPosition)->Value() / 10.0, GetParam(kWahQ)->Value() / 10.0,
                        GetParam(kWahSens)->Value() / 10.0, GetParam(kWahLevel)->Value());
         return mWah.Process(in, (int)numChannels, (int)numFrames);
-      case chaingrid::kPrecisionDrive:
-        mPrecisionDrive.SetParams(GetParam(kPDVolume)->Value(), GetParam(kPDDrive)->Value() / 10.0,
-                                  GetParam(kPDAttack)->Value() / 10.0, GetParam(kPDGate)->Value() / 10.0,
-                                  GetParam(kPDBright)->Bool());
-        return mPrecisionDrive.Process(in, (int)numChannels, (int)numFrames);
+      case chaingrid::kTightDrive:
+        mTightDrive.SetParams(GetParam(kPDVolume)->Value(), GetParam(kPDDrive)->Value() / 10.0,
+                              GetParam(kPDAttack)->Value() / 10.0, GetParam(kPDGate)->Value() / 10.0,
+                              GetParam(kPDBright)->Bool());
+        return mTightDrive.Process(in, (int)numChannels, (int)numFrames);
       case chaingrid::kProEq:
       {
         // PRO EQ (1.46.0): in place, with the spectrum of its input and output for its popup.
@@ -4151,12 +4169,12 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         mSpringVerb.SetParams(GetParam(kSprDwell)->Value() / 10.0, GetParam(kSprTone)->Value() / 10.0,
                               GetParam(kSprMix)->Value() / 10.0, GetParam(kSprDecay)->Value() / 10.0);
         return mSpringVerb.Process(in, (int)numChannels, (int)numFrames);
-      case chaingrid::kApexPreamp:
-        mApexPreamp.SetParams(GetParam(kApexGain)->Value() / 10.0, GetParam(kApexBass)->Value() / 10.0,
-                              GetParam(kApexMid)->Value() / 10.0, GetParam(kApexTreble)->Value() / 10.0,
-                              GetParam(kApexPresence)->Value() / 10.0, GetParam(kApexVolume)->Value(),
-                              GetParam(kApexBright)->Bool());
-        return mApexPreamp.Process(in, (int)numChannels, (int)numFrames);
+      case chaingrid::kHiGainPreamp:
+        mHiGainPreamp.SetParams(GetParam(kHGPreGain)->Value() / 10.0, GetParam(kHGPreBass)->Value() / 10.0,
+                                GetParam(kHGPreMid)->Value() / 10.0, GetParam(kHGPreTreble)->Value() / 10.0,
+                                GetParam(kHGPrePresence)->Value() / 10.0, GetParam(kHGPreVolume)->Value(),
+                                GetParam(kHGPreBright)->Bool());
+        return mHiGainPreamp.Process(in, (int)numChannels, (int)numFrames);
       case chaingrid::kCab2:
       case chaingrid::kCab3:
       {
@@ -4807,8 +4825,8 @@ void NeuralAmpModeler::OnReset()
   mSkyVerb.SetSampleRate(sampleRate);
   mFlangerDoubler.SetSampleRate(sampleRate);
   mWah.SetSampleRate(sampleRate);
-  mPrecisionDrive.SetSampleRate(sampleRate);
-  mApexPreamp.SetSampleRate(sampleRate);
+  mTightDrive.SetSampleRate(sampleRate);
+  mHiGainPreamp.SetSampleRate(sampleRate);
   mGate.SetSampleRate(sampleRate);
   mGate.Reset();
   mStudioComp.SetSampleRate(sampleRate);
@@ -5090,11 +5108,15 @@ void NeuralAmpModeler::_LoadMidiMap()
       std::string name;
       in >> idx;
       std::getline(in >> std::ws, name);
-      if (idx >= 0 && idx < kNumParams && name == GetParam(idx)->GetName())
+      auto named = [&](int p) {
+        const char* old = _OldParamName(p);
+        return name == GetParam(p)->GetName() || (old != nullptr && name == old);
+      };
+      if (idx >= 0 && idx < kNumParams && named(idx))
         target = idx;
       else
         for (int p = 0; p < kNumParams && target == kMidiNoTarget; p++)
-          if (name == GetParam(p)->GetName())
+          if (named(p))
             target = p;
     }
     if (target != kMidiNoTarget
@@ -5811,7 +5833,8 @@ int NeuralAmpModeler::UnserializeState(const IByteChunk& chunk, int startPos)
         break;
       for (int p = kNumPositionalParams; p < kNumParams; p++)
       {
-        if (strcmp(GetParam(p)->GetName(), name.Get()) == 0)
+        const char* old = _OldParamName(p);
+        if (strcmp(GetParam(p)->GetName(), name.Get()) == 0 || (old != nullptr && strcmp(old, name.Get()) == 0))
         {
           GetParam(p)->Set(v);
           break;

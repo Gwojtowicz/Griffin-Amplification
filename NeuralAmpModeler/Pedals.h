@@ -873,7 +873,7 @@ private:
   std::vector<sample*> mPointers;
 };
 
-// Classic 4-stage phaser (Phase 90 / Small Stone style): four first-order allpass filters share
+// Classic 4-stage phaser: four first-order allpass filters share
 // one swept break frequency; mixed with the dry signal, they cancel it at two frequencies, and
 // those two notches sweep up and down. The sweep is exponential in frequency (even in pitch),
 // from 150 Hz up to ~4 kHz at full Depth, with a sine LFO. Regen feeds the last stage back into

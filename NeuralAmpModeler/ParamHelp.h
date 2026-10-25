@@ -110,26 +110,26 @@ inline const char* BaseParamHelp(int p)
     case kFDRegen: return "FLANGE DBL Regen: feedback (Flanger). More = a more resonant jet.";
     case kFDMix: return "FLANGE DBL Mix: dry/wet.";
     case kWahModel:
-      return "WAH model: Cry Baby (classic, peaky), V847 (smoother, narrower sweep) or Auto (follows how hard "
+      return "WAH model: Classic (peaky), Smooth (rounder, narrower sweep) or Auto (follows how hard "
              "you pick).";
     case kWahPosition: return "WAH Position: the pedal's position, heel (dark) to toe (bright). Map it to an expression pedal.";
     case kWahQ: return "WAH Q: how peaky the wah is. More = vocal and nasal; less = subtle.";
     case kWahSens: return "WAH Sens (Auto): how much your picking moves it.";
     case kWahLevel: return "WAH Level: its output volume.";
-    case kPDVolume: return "PREC DRIVE Volume: its output level.";
-    case kPDDrive: return "PREC DRIVE Drive: gain into the clipper. Low = tight boost, high = saturation.";
+    case kPDVolume: return "TIGHT DRIVE Volume: its output level.";
+    case kPDDrive: return "TIGHT DRIVE Drive: gain into the clipper. Low = tight boost, high = saturation.";
     case kPDAttack:
-      return "PREC DRIVE Attack: how much low end goes into the drive (60-500 Hz high-pass). Up = tighter, "
+      return "TIGHT DRIVE Attack: how much low end goes into the drive (60-500 Hz high-pass). Up = tighter, "
              "chunkier palm mutes for high-gain amps.";
-    case kPDGate: return "PREC DRIVE Gate: its built-in noise gate (keyed from your clean input).";
-    case kPDBright: return "PREC DRIVE Bright: opens the top end after the drive.";
-    case kApexGain: return "APEX PRE Gain: how hard its three gain stages are pushed.";
-    case kApexBass: return "APEX PRE Bass.";
-    case kApexMid: return "APEX PRE Mid.";
-    case kApexTreble: return "APEX PRE Treble.";
-    case kApexPresence: return "APEX PRE Presence: upper-mid / top bite.";
-    case kApexVolume: return "APEX PRE Volume: its output level.";
-    case kApexBright: return "APEX PRE Bright switch: more top end into the gain.";
+    case kPDGate: return "TIGHT DRIVE Gate: its built-in noise gate (keyed from your clean input).";
+    case kPDBright: return "TIGHT DRIVE Bright: opens the top end after the drive.";
+    case kHGPreGain: return "HI-GAIN PRE Gain: how hard its three gain stages are pushed.";
+    case kHGPreBass: return "HI-GAIN PRE Bass.";
+    case kHGPreMid: return "HI-GAIN PRE Mid.";
+    case kHGPreTreble: return "HI-GAIN PRE Treble.";
+    case kHGPrePresence: return "HI-GAIN PRE Presence: upper-mid / top bite.";
+    case kHGPreVolume: return "HI-GAIN PRE Volume: its output level.";
+    case kHGPreBright: return "HI-GAIN PRE Bright switch: more top end into the gain.";
     case kCab2Level:
     case kCab3Level: return "Extra cab Level: this cab's output volume (balance it against the other cabs).";
     case kCab2Pan:
@@ -285,9 +285,9 @@ inline const char* BaseParamHelp(int p)
     case kOutputWiden: return "Widen: stereo from a mono chain (the mono sum is unchanged).";
     // 1.66.0 pedals --------------------------------------------------------------------------------------
     case kTGModel:
-      return "TRACK GATE Model. Tracking (after the ISP Decimator): the release follows how fast your note is dying, so "
-             "sustains ring out and stops are instant. Classic (after the Boss NS-2): a plain threshold and decay. Smart "
-             "(after the MXR Smart Gate): gates only the noisy part -- see Noise.";
+      return "TRACK GATE Model. Tracking: the release follows how fast your note is dying, so "
+             "sustains ring out and stops are instant. Classic: a plain threshold and decay. "
+             "Smart: gates only the noisy part -- see Noise.";
     case kTGThreshold: return "TRACK GATE Threshold: below this the gate closes. Set it just over the hiss between notes.";
     case kTGRelease:
       return "TRACK GATE Release. Classic: the decay, 5 ms to 1.5 s. Tracking / Smart: how much longer than your note's "
@@ -304,7 +304,7 @@ inline const char* BaseParamHelp(int p)
       return "TRACK GATE Key In: listen to your clean guitar (from IN) instead of the signal it gates. Best after a "
              "high-gain amp.";
     case kDigiMode:
-      return "DIGI DELAY Mode. Standard: clean repeats (the DD-3's ~7 kHz bandwidth). Mod: chorused repeats. Warm: darker, "
+      return "DIGI DELAY Mode. Standard: clean repeats (~7 kHz bandwidth). Mod: chorused repeats. Warm: darker, "
              "softly saturating repeats. Reverse: each window played backwards (one repeat; Feedback has no effect).";
     case kDigiTime: return "DIGI DELAY Time: 20 ms (slapback) to 1.2 s.";
     case kDigiFeedback: return "DIGI DELAY Feedback: the number of repeats. Near 10 they go on and on.";
@@ -314,7 +314,7 @@ inline const char* BaseParamHelp(int p)
              "swoops the pitch.";
     case kAnaRegen: return "ANALOG DLY Regen: the number of repeats. Past about 9 it builds up and self-oscillates.";
     case kAnaMix: return "ANALOG DLY Mix: the repeats' level (your dry signal is unchanged).";
-    case kAnaMod: return "ANALOG DLY Mod: a slow wobble in the repeats (the Carbon Copy's Mod switch).";
+    case kAnaMod: return "ANALOG DLY Mod: a slow wobble in the repeats (the Mod switch).";
     case kAnaRate: return "ANALOG DLY Rate: the Mod wobble's speed.";
     case kAnaWidth: return "ANALOG DLY Width: the Mod wobble's depth.";
     case kTapeHeads:

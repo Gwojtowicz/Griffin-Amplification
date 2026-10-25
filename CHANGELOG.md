@@ -223,10 +223,10 @@ Five new pedals (MorePedals.h), in the PEDALS drawer. Each is modelled on how a 
 none copies its circuit.
 
 - **TRACK GATE**: a second noise gate, with three models and more options than GATE.
-  - **Tracking** (after the ISP Decimator): the release follows how fast your note is dying, so a
+  - **Tracking**: the release follows how fast your note is dying, so a
     slow sustain fades naturally and a stop is cut at once.
-  - **Classic** (after the Boss NS-2): threshold and decay.
-  - **Smart** (after the MXR Smart Gate): **Noise** sets what it gates. Hiss gates only above 3 kHz, so
+  - **Classic**: threshold and decay.
+  - **Smart**: **Noise** sets what it gates. Hiss gates only above 3 kHz, so
     the body of a fading chord stays. Mid gates above 250 Hz, Full gates everything.
   - Also: **Hold**, **Range** (how far down it goes when closed), **Ratio** (a downward expander from
     1.5:1 to a 20:1 gate) and **Key In** (listen to the clean guitar from IN), plus fixed 4 dB
@@ -244,29 +244,29 @@ none copies its circuit.
     | Ratio 4:1 | -78 dB |
 
     In every case the note's decay above the threshold was kept exactly (0.0 dB).
-- **DIGI DELAY** (after the Boss DD-3 / DD-8): 20 ms to 1.2 s, with Feedback and Level. Your dry
+- **DIGI DELAY**: 20 ms to 1.2 s, with Feedback and Level. Your dry
   signal stays unchanged. The modes:
-  - **Standard**: clean repeats with the DD-3's ~7 kHz bandwidth.
+  - **Standard**: clean repeats with a ~7 kHz bandwidth.
   - **Mod**: chorused repeats.
   - **Warm**: 2.8 kHz bandwidth, softly saturating.
   - **Reverse**: each window played backwards.
 
   A new Time crossfades over 30 ms instead of sweeping the pitch.
-- **ANALOG DLY** (after the MXR Carbon Copy), with Delay (20-600 ms), Regen, Mix and the Mod
+- **ANALOG DLY** (a bucket-brigade delay), with Delay (20-600 ms), Regen, Mix and the Mod
   switch's Rate and Width:
   - Bucket-brigade repeats that get darker the longer the delay: about 6 kHz at 20 ms, down to
     1.8 kHz at 600 ms.
   - Soft saturation in the loop, so Regen past about 9 builds into self-oscillation without blowing
     up (it peaked at -1 dBFS at Regen 10).
   - Turning Delay swoops the pitch, as on the pedal.
-- **TAPE ECHO** (after the Boss RE-20 / Roland Space Echo):
+- **TAPE ECHO** (a three-head tape echo):
   - Three playback heads (head 2 at twice head 1's delay, head 3 at three times), in 7 combinations.
   - **Rate** is the tape speed: head 1 from 300 ms (slow and dark) to 70 ms (fast and bright).
     Turning it swoops.
   - **Intensity** (feedback, runs away up high), **Echo** level and **Saturate** (tape drive).
   - **Wow**: drift at 0.8 Hz (about 8 cents at full) plus flutter at 12 Hz.
   - A built-in spring reverb (**Reverb** level).
-- **SPRING VERB** (after a '63 Fender Reverb / Boss FRV-1), with Dwell, Tone, Mix and Decay (about
+- **SPRING VERB** (a two-spring reverb), with Dwell, Tone, Mix and Decay (about
   1-4 s):
   - Two springs per side. Each is 24 allpasses in a feedback loop, which delays the lows more than
     the highs, so every bounce comes back as the falling "drip" chirp.
@@ -877,7 +877,7 @@ switched off, and four new physics options in a **CIRCUIT+** row (above REAL FEE
 ## 1.44.1 (2026-10-15)
 
 - **All pedals show in the PEDALS list again.** With the five 1.44.0 pedals there were 21 pedal types,
-  and at 4 across only 3 rows fit, so SKY VERB, FLANGE DBL, PREC DRIVE, APEX PRE and CAB 3 sat below
+  and at 4 across only 3 rows fit, so SKY VERB, FLANGE DBL, TIGHT DRIVE, HI-GAIN PRE and CAB 3 sat below
   the fold (reachable only by scrolling). The AMP NEST buttons now go two to a row (AMPS | CAB IRs,
   PEDAL 1 | PEDAL 2; AMP LIBRARY is now called AMPS to fit) and the list goes 5 across, so every
   pedal fits without scrolling. The scrollbar only appears on very short windows. Sound unchanged.
@@ -887,23 +887,23 @@ switched off, and four new physics options in a **CIRCUIT+** row (above REAL FEE
 Five new pedals (`NewPedals.h`), modelled on how classic pedals behave. Find them in the pedal list and
 drag them onto the grid; each has a wider popup with all its controls.
 
-- **SKY VERB** (in the spirit of a Strymon BigSky): Hall, Plate, Room, Shimmer, Cloud and Bloom modes;
+- **SKY VERB** (a multi-mode studio reverb): Hall, Plate, Room, Shimmer, Cloud and Bloom modes;
   Decay (0.3 s to 40 s), Pre-delay (0-500 ms), Tone, Mod, Mix, and **Freeze** (holds the reverb
   forever; map it to a footswitch). An 8-line feedback delay network with input diffusion, damping and
   slow modulation. Shimmer feeds an octave-up back into the tail; Bloom swells in after each note.
   Measured: RT60 within 4% of the Decay knob (3.44 s for 3.46 s, 39 s for 40 s); Freeze holds its
   level exactly; Shimmer's tail has its octave at -14 dB (Hall: -43 dB). About 2% CPU.
-- **FLANGE DBL** (after the MXR 126 Flanger/Doubler): Flanger (0.3-4 ms swept, exponential like a
+- **FLANGE DBL**: Flanger (0.3-4 ms swept, exponential like a
   BBD) or Doubler (15-70 ms, wandering: the part played twice; the right side 13% later), Manual,
   Width, Speed, Regen (+/-), Mix.
-- **WAH**: Cry Baby (350 Hz - 2.2 kHz, sharp +13 dB peak), Vox V847 (450 Hz - 1.6 kHz, rounder +11 dB)
+- **WAH**: Classic (350 Hz - 2.2 kHz, sharp +13 dB peak), Smooth (450 Hz - 1.6 kHz, rounder +11 dB)
   or Auto (opens with your picking, the same at any level). Position is heel to toe: map it to an
   expression pedal with MIDI learn (that takes CC 4 off the volume pedal). Q, Sens
   (Auto only; greyed out otherwise), Level.
-- **PREC DRIVE** (after the Horizon Devices Precision Drive): Volume, Drive, Attack (how much low end
+- **TIGHT DRIVE** (a tight overdrive): Volume, Drive, Attack (how much low end
   goes into the clipping: 60-500 Hz high-pass), Gate (0 off, then -90 to -30 dBFS on the input),
   Bright. Anti-aliased clipping (aliasing -50 dB at full drive on a 3.1 kHz tone).
-- **APEX PRE** (after the Horizon Devices Apex Preamp): three cascaded gain stages, Gain, Bass, Mid,
+- **HI-GAIN PRE** (a high-gain preamp): three cascaded gain stages, Gain, Bass, Mid,
   Treble, Presence, Volume, Bright. A preamp: put a CAB after it.
 - All of them: knobs glide, switching them on/off and changing modes don't click, off is
   bit-identical to bypass, silence in is silence out, no NaN at any setting. All five in one chain
@@ -1514,7 +1514,7 @@ autosave).
 - **New PHASER pedal**, in the AMP NEST's pedal list. Knobs: **Rate** (0.05-8 Hz), **Depth**,
   **Regen** (-10..+10: positive sharpens it toward the "vocal" sound, negative softens it) and
   **Mix** (5 = the deepest notches).
-  - Classic 4-stage design (Phase 90 / Small Stone style): four first-order allpass filters on one
+  - Classic 4-stage design: four first-order allpass filters on one
     swept break frequency, sine LFO, exponential sweep from 150 Hz up to ~4 kHz at full Depth;
     regen from the last stage back into the first, through tanh. The right side sweeps 90 degrees
     ahead in stereo. Knob moves glide over 10 ms.

@@ -1,22 +1,20 @@
 #pragma once
 
 // Pedals added in 1.66.0, modelled on how classic pedals behave (not copies of their circuits):
-//   TrackGate    -- a three-model noise gate: Tracking (in the spirit of the ISP Decimator: its release
-//                   follows how fast the note is dying, so it never chops a sustain), Classic (after the
-//                   Boss NS-2: threshold and decay, a fast hard gate) and Smart (after the MXR Smart
-//                   Gate: Hiss gates only the top end, Mid the mids and up, Full everything). Plus
-//                   Hold, Range, a downward-expander Ratio and Key input.
-//   DigitalDelay -- after the Boss DD-3 / DD-8: clean repeats with the DD-3's ~7 kHz bandwidth,
-//                   Standard, Mod (chorused repeats), Warm (darker, softly saturating) or Reverse.
-//   AnalogDelay  -- after the MXR Carbon Copy: bucket-brigade repeats that get darker the longer the
-//                   delay (the BBD's clock drops), soft-saturating regen that self-oscillates past
-//                   noon-and-a-bit, and the Mod switch's slow wobble (Rate, Width).
-//   TapeEcho     -- after the Boss RE-20 / Roland Space Echo: three playback heads (1:2:3 spacing),
-//                   tape speed (Rate), Intensity, wow and flutter, tape saturation, and a spring.
-//   SpringVerb   -- after a '63 Fender Reverb / Boss FRV-1: two dispersive springs (a chain of
-//                   allpasses in a feedback loop gives the "drip" chirp), Dwell drives the spring's
-//                   transducer (more level, more grit, and the boing when you dig in), Tone, Mix,
-//                   Decay.
+//   TrackGate    -- a three-model noise gate: Tracking (its release follows how fast the note is
+//                   dying, so it never chops a sustain), Classic (threshold and decay, a fast hard
+//                   gate) and Smart (Hiss gates only the top end, Mid the mids and up, Full
+//                   everything). Plus Hold, Range, a downward-expander Ratio and Key input.
+//   DigitalDelay -- clean repeats with a ~7 kHz bandwidth: Standard, Mod (chorused repeats), Warm
+//                   (darker, softly saturating) or Reverse.
+//   AnalogDelay  -- bucket-brigade repeats that get darker the longer the delay (the BBD's clock
+//                   drops), soft-saturating regen that self-oscillates past noon-and-a-bit, and the
+//                   Mod switch's slow wobble (Rate, Width).
+//   TapeEcho     -- three playback heads (1:2:3 spacing), tape speed (Rate), Intensity, wow and
+//                   flutter, tape saturation, and a spring.
+//   SpringVerb   -- two dispersive springs (a chain of allpasses in a feedback loop gives the "drip"
+//                   chirp), Dwell drives the spring's transducer (more level, more grit, and the
+//                   boing when you dig in), Tone, Mix, Decay.
 // Same call convention as Pedals.h / NewPedals.h: Process(inputs, numChannels, numFrames) returns
 // the pedal's own output buffers; the knobs glide (pedals::Glide).
 
@@ -362,7 +360,7 @@ public:
         // Soft saturation in the loop (the compander and BBD headroom): repeats stay musical, and
         // high Regen builds into oscillation instead of exploding.
         mLine[c].Push(std::tanh(1.4 * (x + regen[s] * wet)) / 1.4);
-        // Mix is the repeats' level (as on the Carbon Copy): the dry signal is unchanged.
+        // Mix is the repeats' level (as on the classic analog delays): the dry signal is unchanged.
         mBuf.out[c][s] = static_cast<sample>(x + wet * mix[s] * 1.2);
       }
     }

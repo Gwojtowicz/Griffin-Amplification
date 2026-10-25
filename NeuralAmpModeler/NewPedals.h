@@ -1,17 +1,15 @@
 #pragma once
 
 // Pedals added in 1.44.0, modelled on how classic pedals behave (not copies of their circuits):
-//   SkyVerb        -- a multi-mode studio reverb in the spirit of a Strymon BigSky: Hall, Plate, Room,
-//                     Shimmer, Cloud and Bloom, with Decay, Pre-delay, Tone, Mod, Mix and Freeze.
-//   FlangerDoubler -- after the MXR 126 Flanger/Doubler: a swept short delay (flanger) or a 15-70 ms
-//                     wandering delay (doubler: a second take of the same part), Manual, Width,
-//                     Speed, Regen, Mix.
-//   Wah            -- a Dunlop Cry Baby, a Vox V847, or an envelope (auto) wah: a swept resonant
+//   SkyVerb        -- a multi-mode studio reverb: Hall, Plate, Room, Shimmer, Cloud and Bloom, with
+//                     Decay, Pre-delay, Tone, Mod, Mix and Freeze.
+//   FlangerDoubler -- a swept short delay (flanger) or a 15-70 ms wandering delay (doubler: a second
+//                     take of the same part), Manual, Width, Speed, Regen, Mix.
+//   Wah            -- a classic or a smooth wah, or an envelope (auto) wah: a swept resonant
 //                     filter. Its Position is meant for an expression pedal (MIDI learn).
-//   PrecisionDrive -- after the Horizon Devices Precision Drive: a tight overdrive/boost for high
-//                     gain amps, with Attack (how much low end goes into the clipping) and a gate.
-//   ApexPreamp     -- after the Horizon Devices Apex Preamp: a three-stage high-gain preamp with
-//                     a three-band EQ and Presence.
+//   TightDrive     -- a tight overdrive/boost for high gain amps, with Attack (how much low end
+//                     goes into the clipping) and a gate.
+//   HiGainPreamp   -- a three-stage high-gain preamp with a three-band EQ and Presence.
 // Same call convention as Pedals.h: Process(inputs, numChannels, numFrames) returns the pedal's
 // own output buffers; the knobs glide (pedals::Glide).
 
@@ -413,7 +411,7 @@ private:
 };
 
 // ============================================================================================
-// FlangerDoubler (MXR 126-style). Flanger: a 0.3-10 ms delay swept by a triangle LFO (exponential
+// FlangerDoubler. Flanger: a 0.3-10 ms delay swept by a triangle LFO (exponential
 // in time, like a BBD); Doubler: a 15-70 ms delay that wanders (a slow sine plus smoothed noise),
 // so it sounds like the part played twice. Regen feeds the delayed signal back (soft-limited).
 class FlangerDoubler
@@ -529,15 +527,15 @@ private:
 
 // ============================================================================================
 // Wah: a swept resonant filter (a state-variable filter: band-pass with some low-pass, like the
-// wah's inductor circuit). Cry Baby: 350 Hz - 2.2 kHz, sharp peak. V847: 450 Hz - 1.6 kHz, rounder.
+// wah's inductor circuit). Classic: 350 Hz - 2.2 kHz, sharp peak. Smooth: 450 Hz - 1.6 kHz, rounder.
 // Auto: the position follows your picking (an envelope against your recent loudest).
 class Wah
 {
 public:
   enum Model
   {
-    kCryBaby = 0,
-    kV847,
+    kClassic = 0,
+    kSmooth,
     kAuto,
     kNumModels
   };
@@ -568,10 +566,10 @@ public:
     mLevel.Set(std::pow(10.0, std::clamp(levelDB, -24.0, 24.0) / 20.0));
   }
 
-  // The peak frequency at a position, for each model (Auto sweeps the Cry Baby's range).
+  // The peak frequency at a position, for each model (Auto sweeps the Classic range).
   static double PeakHz(int model, double pos)
   {
-    const double lo = model == kV847 ? 450.0 : 350.0, hi = model == kV847 ? 1600.0 : 2200.0;
+    const double lo = model == kSmooth ? 450.0 : 350.0, hi = model == kSmooth ? 1600.0 : 2200.0;
     return lo * std::pow(hi / lo, std::clamp(pos, 0.0, 1.0));
   }
 
@@ -582,8 +580,8 @@ public:
     const double* position = mPosition.Fill(mG[0], numFrames, GlideCoef(0.012, sr));
     const double* q = mQ.Fill(mG[1], numFrames, GlideCoef(kKnobGlideS, sr));
     const double* level = mLevel.Fill(mG[2], numFrames, GlideCoef(kKnobGlideS, sr));
-    const double baseQ = mModel == kV847 ? 3.5 : 5.5;
-    const double lpMix = mModel == kV847 ? 0.4 : 0.25;
+    const double baseQ = mModel == kSmooth ? 3.5 : 5.5;
+    const double lpMix = mModel == kSmooth ? 0.4 : 0.25;
     const double attack = 1.0 - std::exp(-1.0 / (0.004 * sr)), release = 1.0 - std::exp(-1.0 / (0.12 * sr));
     const double posUp = 1.0 - std::exp(-1.0 / (0.015 * sr)), posDown = 1.0 - std::exp(-1.0 / (0.15 * sr));
     const double refFall = 1.0 / sr;
@@ -606,7 +604,7 @@ public:
         // Position sets where the sweep starts (heel) in Auto.
         pos = position[s] * 0.5 + (1.0 - position[s] * 0.5) * mAutoPos;
       }
-      const double fc = PeakHz(mModel == kAuto ? kCryBaby : mModel, pos);
+      const double fc = PeakHz(mModel == kAuto ? kClassic : mModel, pos);
       const double Q = baseQ * std::pow(2.0, (q[s] - 0.5) * 2.0);
       // TPT state-variable filter (Zavalishin).
       const double g = std::tan(kPedalsPi * std::min(fc, 0.45 * sr) / sr), k = 1.0 / Q;
@@ -637,7 +635,7 @@ private:
   double mSampleRate = 48000.0;
   std::array<State, 2> mState{};
   Biquad mHP[2];
-  int mModel = kCryBaby;
+  int mModel = kClassic;
   double mSens = 0.5;
   double mEnv = 0.0, mRefDB = -50.0, mAutoPos = 0.0;
   Glide mPosition, mQ, mLevel;
@@ -646,10 +644,10 @@ private:
 };
 
 // ============================================================================================
-// PrecisionDrive: Attack sets a high-pass into the clipping (60 Hz .. 500 Hz: how much low end gets
+// TightDrive: Attack sets a high-pass into the clipping (60 Hz .. 500 Hz: how much low end gets
 // clipped -- tight for metal) with a little mid push; Drive the gain into an asymmetric soft clip;
 // a low-pass after (Bright opens it); Volume; and a noise gate keyed from the pedal's input.
-class PrecisionDrive
+class TightDrive
 {
 public:
   void SetSampleRate(double sr)
@@ -749,10 +747,10 @@ private:
 };
 
 // ============================================================================================
-// ApexPreamp: a tightening high-pass, three cascaded gain stages (biased soft clips with filtering
+// HiGainPreamp: a tightening high-pass, three cascaded gain stages (biased soft clips with filtering
 // between them, like a modern high-gain preamp), then Bass / Mid / Treble, Presence and Volume.
 // Bright adds top end before the gain.
-class ApexPreamp
+class HiGainPreamp
 {
 public:
   void SetSampleRate(double sr)

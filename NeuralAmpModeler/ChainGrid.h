@@ -48,12 +48,12 @@ constexpr int kPhaser = kFirstLatePedal + 1;
 constexpr int kRealFeel = kFirstLatePedal + 2; // The Tube Lab's Real Feel, as a block (RealFeel.h)
 constexpr int kCab2 = kFirstLatePedal + 3; // 1.36.0: extra cab IR blocks
 constexpr int kCab3 = kFirstLatePedal + 4;
-// 1.44.0: SKY VERB, FLANGE DBL, WAH, PREC DRIVE, APEX PRE (NewPedals.h).
+// 1.44.0: SKY VERB, FLANGE DBL, WAH, TIGHT DRIVE, HI-GAIN PRE (NewPedals.h).
 constexpr int kSkyVerb = kFirstLatePedal + 5;
 constexpr int kFlangerDoubler = kFirstLatePedal + 6;
 constexpr int kWah = kFirstLatePedal + 7;
-constexpr int kPrecisionDrive = kFirstLatePedal + 8;
-constexpr int kApexPreamp = kFirstLatePedal + 9;
+constexpr int kTightDrive = kFirstLatePedal + 8;
+constexpr int kHiGainPreamp = kFirstLatePedal + 9;
 // 1.46.0: PRO EQ (ProEQ.h), a parametric EQ with a live spectrum.
 constexpr int kProEq = kFirstLatePedal + 10;
 // 1.52.0: GATE and PRO COMP (Dynamics.h).

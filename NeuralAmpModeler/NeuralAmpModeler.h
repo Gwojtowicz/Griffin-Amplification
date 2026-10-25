@@ -319,7 +319,7 @@ enum EParams
   kRealFeelMix,
   // The Tube Lab 60 Hz grind's own dry/wet (1.40.0).
   kTubeRippleMix,
-  // 1.44.0 pedals (NewPedals.h; grid ids chaingrid::kSkyVerb .. kApexPreamp), and their grid params.
+  // 1.44.0 pedals (NewPedals.h; grid ids chaingrid::kSkyVerb .. kHiGainPreamp), and their grid params.
   kSkyActive,
   kSkyEngaged,
   kSkyMode, // Hall / Plate / Room / Shimmer / Cloud / Bloom
@@ -339,7 +339,7 @@ enum EParams
   kFDMix,
   kWahActive,
   kWahEngaged,
-  kWahModel, // Cry Baby / V847 / Auto
+  kWahModel, // Classic / Smooth / Auto
   kWahPosition,
   kWahQ,
   kWahSens,
@@ -351,15 +351,15 @@ enum EParams
   kPDAttack,
   kPDGate,
   kPDBright,
-  kApexActive,
-  kApexEngaged,
-  kApexGain,
-  kApexBass,
-  kApexMid,
-  kApexTreble,
-  kApexPresence,
-  kApexVolume,
-  kApexBright,
+  kHGPreActive,
+  kHGPreEngaged,
+  kHGPreGain,
+  kHGPreBass,
+  kHGPreMid,
+  kHGPreTreble,
+  kHGPrePresence,
+  kHGPreVolume,
+  kHGPreBright,
   kGridCell35,
   kGridIn35,
   kGridCell36,
@@ -568,7 +568,7 @@ constexpr int kLateGridIn[] = {kGridIn32, kGridIn33, kGridIn34, kGridIn35, kGrid
                                kGridIn37, kGridIn38, kGridIn39, kGridIn40, kGridIn41, kGridIn42,
                                kGridIn43, kGridIn44, kGridIn45, kGridIn46, kGridIn47, kGridIn48};
 // The 1.44.0 pedals' params, first to last (older states load them at their defaults).
-constexpr int kNewPedalParamsFirst = kSkyActive, kNewPedalParamsLast = kApexBright;
+constexpr int kNewPedalParamsFirst = kSkyActive, kNewPedalParamsLast = kHGPreBright;
 // The 1.52.0 GATE and PRO COMP params, first to last (older states load them at their defaults).
 constexpr int kDynamicsParamsFirst = kGateActive, kDynamicsParamsLast = kSCompScHpf;
 // The 1.66.0 pedals' params, first to last (older states load them at their defaults).
@@ -1262,8 +1262,8 @@ private:
   pedals::SkyVerb mSkyVerb;
   pedals::FlangerDoubler mFlangerDoubler;
   pedals::Wah mWah;
-  pedals::PrecisionDrive mPrecisionDrive;
-  pedals::ApexPreamp mApexPreamp;
+  pedals::TightDrive mTightDrive;
+  pedals::HiGainPreamp mHiGainPreamp;
   // PRO EQ (1.46.0, ProEQ.h): the block and the Output EQ, and the spectrum taps the UI reads
   // (Spectrum.h): each EQ's input and output (the Output EQ's "output" is the final output).
   proeq::EQ mProEq, mOutEq;
@@ -1281,7 +1281,7 @@ private:
   // Their popups are wider than a plain pedal's (more controls).
   static bool _IsWidePedal(int id)
   {
-    return (id >= chaingrid::kSkyVerb && id <= chaingrid::kApexPreamp)
+    return (id >= chaingrid::kSkyVerb && id <= chaingrid::kHiGainPreamp)
            || (id >= chaingrid::kTrackGate && id <= chaingrid::kSpringVerb);
   }
   // 1.66.0 pedals (MorePedals.h).
