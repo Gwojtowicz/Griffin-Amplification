@@ -531,8 +531,28 @@ enum EParams
   kDigiTapDiv,
   kAnaTapDiv,
   kTapeTapDiv,
+  // 1.72.0: the MODULAR chassis (PreampModules.h): which chassis the Tube Lab is (Tube Lab, Modular), the
+  // bay that's playing (A, B), each bay's module, then each bay's knobs (kModKnobs each, module::Knob
+  // order, see ModKnobParam); TUBE LAB's, then TUBE LAB 2's copies in the same order (see LabParam).
+  kTubeModFirst,
+  kTubeModChassis = kTubeModFirst,
+  kTubeModBay,
+  kTubeModA,
+  kTubeModB,
+  kTubeModKnobFirst,
+  kTubeModKnobLast = kTubeModKnobFirst + 2 * 5 - 1,
+  kTubeModLast = kTubeModKnobLast,
+  kLab2ModFirst,
+  kLab2ModLast = kLab2ModFirst + (kTubeModLast - kTubeModFirst),
   kNumParams
 };
+
+// A MODULAR chassis bay's module param (bay 0 = A, 1 = B) and its knobs (TUBE LAB's; LabParam gives TUBE
+// LAB 2's). A bay's module param is an index into the modules, module::ModuleId - 1 (Tube Lab isn't one).
+constexpr int kModKnobs = 5;
+constexpr int ModBayParam(int bay) { return bay == 0 ? kTubeModA : kTubeModB; }
+constexpr int ModKnobParam(int bay, int knob) { return kTubeModKnobFirst + bay * kModKnobs + knob; }
+static_assert(kModKnobs == tube::module::kNumKnobs, "a bay knob per module knob");
 
 // A chassis socket's param (1.68.0): socket k (0, 1 = V5, V6), field one of these (TUBE LAB's; LabParam
 // gives TUBE LAB 2's).
@@ -597,6 +617,8 @@ constexpr int LabParam(int lab, int p)
     return p;
   if (p >= kTubeChassisFirst && p <= kTubeChassisLast) // 1.68.0: the chassis's
     return kLab2ChassisFirst + (p - kTubeChassisFirst);
+  if (p >= kTubeModFirst && p <= kTubeModLast) // 1.72.0: the MODULAR chassis's
+    return kLab2ModFirst + (p - kTubeModFirst);
   for (int i = 0; i < kNumLabParams; i++)
     if (kTubeLabParams[i] == p)
       return kLab2First + i;
@@ -607,6 +629,8 @@ constexpr int Lab2Base(int p)
 {
   if (p >= kLab2ChassisFirst && p <= kLab2ChassisLast)
     return kTubeChassisFirst + (p - kLab2ChassisFirst);
+  if (p >= kLab2ModFirst && p <= kLab2ModLast)
+    return kTubeModFirst + (p - kLab2ModFirst);
   return p >= kLab2First && p <= kLab2Last ? kTubeLabParams[p - kLab2First] : -1;
 }
 static_assert(sizeof(kLateGridCell) / sizeof(int) == chaingrid::kNumParamSlots - kNumGridSlots32,
@@ -931,7 +955,8 @@ public:
       const float scale = pGraphics->GetDrawScale();
       NAMDragLog("parent resize %d x %d (ui %d x %d, draw %.3f, screen %.3f)", width, height, pGraphics->Width(),
                  pGraphics->Height(), scale, pGraphics->GetScreenScale());
-      pGraphics->Resize(static_cast<int>(width / scale), static_cast<int>(height / scale), scale, false);
+      pGraphics->Resize(static_cast<int>(std::lround(width / scale)), static_cast<int>(std::lround(height / scale)),
+                        scale, false);
     }
   }
   bool OnHostRequestingSupportedViewConfiguration(int width, int height) override { return true; }
@@ -1374,13 +1399,23 @@ private:
   std::atomic<float> mUiPowerLife[4] = {1.f, 1.f, 1.f, 1.f}, mUiDissRatio[4] = {};
   std::atomic<bool> mUiPowerDead[4] = {false, false, false, false};
   std::atomic<int> mReplacePowerReq{0}, mReplacePowerReq2{0}; // TUBE LAB's, TUBE LAB 2's
+  // 1.72.0: the MODULAR chassis's readings: how many stages the playing module has, each one's glow.
+  std::atomic<int> mUiModuleStages{0};
+  std::atomic<float> mUiModuleLevel[tube::module::kMaxStages] = {};
+  // A bay's module, its knobs at that module's defaults, and (if it's the bay playing) the power amp
+  // its amp has; or, full = false, just the power tubes (a bay flip, the chassis switched).
+  void _ApplyModuleToBay(int lab, int bay, bool full);
   void _UpdateChassis(); // OnIdle
+  double mChassisGlow = 0.0; // 1.74.0: the glow as last drawn (see _UpdateChassis)
   // 1.68.0: the chassis's links to the other pages (chassis::Link).
   void _ChassisGo(int link);
   int mChassisSelected = 0; // chassis::Item
   // The side panel's controls, each with the chassis::Item it belongs to (OnIdle shows the selected one's).
   std::vector<std::pair<int, iplug::igraphics::IControl*>> mChassisFields;
   float mChassisYaw = -0.35f, mChassisPitch = 0.7f; // 1.68.0: the 3D view's camera, kept across relayouts
+  // 1.72.0: the page's two scenes (TUBE LAB and MODULAR; OnIdle shows the lab's chassis).
+  iplug::igraphics::IControl* mChassisTubeScene = nullptr;
+  iplug::igraphics::IControl* mChassisModScene = nullptr;
   double mChassisSignature = 0.0; // What the page last drew (see _UpdateChassis)
   std::chrono::steady_clock::time_point mChassisLastDraw{};
   std::chrono::steady_clock::time_point mTubeStatsNextRequest{}, mTubeStatsLastArrived{}, mTubeLastSignalTime{};
@@ -1527,6 +1562,16 @@ private:
   bool mThemeLight = false;
   bool mShowSpecStrip = true;
   bool mSpecStripExpanded = false; // the strip's taller size (its arrow button)
+  // Settings > Display (1.74.0), in ui.ini. The tab isn't saved, but survives a UI rebuild.
+  int mUiFps = PLUG_FPS; // 30 or 60
+  int mWindowResolution = -1; // NAMDisplaySettingsControl::kResolutions, -1 = as dragged
+  int mPendingWindowResolution = -1; // Applied on the next OnIdle tick
+  bool mReopenSettingsAfterResize = false;
+  int mSettingsTab = 0;
+  void _SetFrameRate(int fps);
+  void _ApplyWindowResolution(); // OnIdle, standalone only
+  int _WindowResolutionShown(); // The preset the window is at now, or -1
+  bool _WindowResolutionFits(int index);
   iplug::igraphics::IRECT mSpecStripRect; // where the strip is, from the last layout
   // The strip's controls, with their rects at its current and small size (the big cards shrink it).
   struct SpecStripCtl

@@ -115,6 +115,7 @@ struct ProbeStats
   double reserve[2] = {8.0, 8.0}, perveance[2] = {1.0, 1.0};
   double paBiasNow = 0.0, paCathodeRest = 0.0, paRatedW = 25.0, paBiasTrim = 1.0;
   bool cathodeBias = false, sixL6 = false;
+  const char* powerName = "EL34";
 
   void ResetCounters()
   {
@@ -187,6 +188,7 @@ struct ProbeStats
     paBiasTrim = o.paBiasTrim;
     cathodeBias = o.cathodeBias;
     sixL6 = o.sixL6;
+    powerName = o.powerName;
   }
 };
 

@@ -244,7 +244,7 @@ inline std::vector<Line> Explain(const ProbeStats& s, const TubeParams& p, bool 
   if (p.powerAmp)
   {
     out.push_back({"POWER", Format("%s pair, biased at %.1f V for %.0f mA idle per tube, %.0f V B+. %s",
-                                   p.sixL6 ? "6L6" : "EL34", s.paBias, s.paIdleMA, s.paRailRest,
+                                   p.PowerName(), s.paBias, s.paIdleMA, s.paRailRest,
                                    p.sixL6 ? "6L6s: big clean headroom, tight lows, glassy highs (Fender/American)."
                                            : "EL34s: midrange grind, breaks up earlier (Marshall/British).")});
     if (signal && s.paSamples > 0)
@@ -378,7 +378,7 @@ public:
                              p.outputDB, p.cathodeCap ? p.cathodeCapUF : 0.0, p.plateKOhm, p.plateCapPF, p.sag ? 1 : 0,
                              p.sagSupplyKOhm, p.sagTimeS, p.stage2 ? 1 : 0, p.gain2, p.bias2V,
                              p.cathodeCap2 ? p.cathodeCap2UF : 0.0, p.plateCap2PF, p.coupleNF, p.powerAmp ? 1 : 0,
-                             p.master, p.powerSag, p.feedback, p.presence, p.sixL6 ? "6L6" : "EL34",
+                             p.master, p.powerSag, p.feedback, p.presence, p.PowerName(),
                              p.speakerLoad ? 1 : 0,
                              p.toneStack == 0 ? "off" : p.toneStack == 1 ? "fender" : "marshall", p.bass, p.mid,
                              p.treble);

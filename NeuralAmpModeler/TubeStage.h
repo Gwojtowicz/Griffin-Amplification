@@ -40,6 +40,7 @@
 #include "MainsHum.h"
 #include "TubeCircuit.h"
 #include "PowerAmp.h"
+#include "PreampModules.h"
 #include "ToneStackCircuit.h"
 #include "TubeProbe.h"
 
@@ -307,6 +308,17 @@ struct TubeParams
   double feedback = 0.5; // 0..1
   double presence = 0.5; // 0..1
   bool sixL6 = false; // EL34s (false) or 6L6s (true)
+  // 1.75.0: what the playing module's amp fits instead (PowerAmpParams): 0 = as above and stock.
+  int powerTube = kPowerStock;
+  double bPlus = 0.0, raa = 0.0;
+  const char* PowerName() const
+  {
+    return powerTube == kPower6V6 ? "6V6" : powerTube == kPowerEL84 ? "EL84" : sixL6 ? "6L6" : "EL34";
+  }
+  bool SamePowerSection(const TubeParams& o) const
+  {
+    return sixL6 == o.sixL6 && quad == o.quad && powerTube == o.powerTube && bPlus == o.bPlus && raa == o.raa;
+  }
   bool speakerLoad = false; // Power tubes drive a real speaker's impedance (see PowerAmp.h)
 
   // Tone stack (1.20.0, ToneStackCircuit.h) between the preamp and the power amp: 0 off,
@@ -353,6 +365,12 @@ struct TubeParams
   // see PowerAmp.h).
   bool quad = false;
   SocketParams socket[kNumSockets];
+  // 1.72.0: a preamp module (PreampModules.h, the MODULAR chassis's active bay) in place of V1, V2, the
+  // sockets and the tone stack: 0 = none (this preamp), with its knobs 0..1 (module::Knob). Circuit
+  // engine only; the input arrives as Drive sets it (the guitar's level at the module's input jack).
+  int module = module::kModuleLab;
+  double moduleKnobs[module::kNumKnobs] = {0.5, 0.5, 0.5, 0.5, 0.5};
+  bool ModuleOn() const { return circuit && !capture && module > module::kModuleLab && module < module::kNumModules; }
 
   // The preamp's gain stages are numbered 0 (V1), 1 (V2) and 2 + k (socket k). The one a socket
   // follows: the last gain socket before it, else V2 if it's on, else V1.
@@ -388,8 +406,10 @@ struct TubeParams
   {
     if (!circuit)
       return false;
-    if (stage2)
+    if (stage2 || (ModuleOn() && module::GetModule(module).needs8x))
       return true;
+    if (ModuleOn()) // (A module is the whole preamp: the sockets aren't in it)
+      return false;
     for (const SocketParams& s : socket)
       if (s.IsGain())
         return true;
@@ -409,6 +429,9 @@ struct TubeParams
     a.feedback = feedback;
     a.presence = presence;
     a.sixL6 = sixL6;
+    a.powerTube = powerTube;
+    a.bPlus = bPlus;
+    a.raa = raa;
     a.speakerLoad = speakerLoad;
     a.screenSquish = screenSquish;
     a.otSaturation = otSaturation;
@@ -572,6 +595,7 @@ private:
     mCircuit.SetExtraLoad(0.0);
     mPower.Reset(os, mParams.ToPowerAmp());
     mStack.Reset(os, TubeParams::StackParts(mParams.toneStack), mSmoothed.bass, mSmoothed.mid, mSmoothed.treble);
+    _ResetModule(mParams);
     mFadeLength = std::max(1, static_cast<int>(kFadeSeconds * os));
     mAsleep = false; // From rest; the next sample decides (see _Awake)
     mWakeLength = std::max(1, static_cast<int>(kWakeSeconds * sampleRate));
@@ -597,6 +621,7 @@ private:
     mTarget.mid = p.mid;
     mTarget.treble = p.treble;
     mTarget.touch = p.touch * kTouchExponentPerUnit;
+    std::copy(std::begin(p.moduleKnobs), std::end(p.moduleKnobs), std::begin(mTarget.moduleKnobs));
     mRipple.SetTarget(p.ripple, p.rippleAmount, p.rippleMix);
 
     // Switch flips (engine, cathode caps, sag, stage 2) crossfade over kFadeSeconds from the old sound to the
@@ -606,13 +631,14 @@ private:
     const bool partFlip = p.circuit
                           && (p.cathodeCap != mParams.cathodeCap || p.sag != mParams.sag || p.stage2 != mParams.stage2
                               || (p.stage2 && p.cathodeCap2 != mParams.cathodeCap2) || p.powerAmp != mParams.powerAmp
-                              || (p.powerAmp && (p.sixL6 != mParams.sixL6 || p.quad != mParams.quad))
+                              || (p.powerAmp && !p.SamePowerSection(mParams))
                               || (p.powerAmp && p.speakerLoad != mParams.speakerLoad) // 1.45.0: it stepped (-13 dB)
                               || p.cathodeFollower != mParams.cathodeFollower
                               || (p.powerAmp && (p.cathodeBias != mParams.cathodeBias
                                                  || p.speakerFeedback != mParams.speakerFeedback)))
                           || p.toneStack != mParams.toneStack || p.capture != mParams.capture
-                          || (p.circuit && _SocketsFlip(p));
+                          || (p.circuit && _SocketsFlip(p))
+                          || p.ModuleOn() != mParams.ModuleOn() || (p.ModuleOn() && p.module != mParams.module);
     if (engineFlip || partFlip)
     {
       mFadeFrom = !mParams.circuit ? FadeFrom::Classic : FadeFrom::Circuit;
@@ -628,9 +654,18 @@ private:
       mFadePowerOn = mParams.powerAmp;
       mFadeStack = mStack;
       mFadeStackType = mParams.toneStack;
+      mFadeModuleOn = mParams.ModuleOn();
+      if (mFadeModuleOn)
+        mFadeModule = mModule;
       mFadeRemaining = mFadeLength;
+      mFadeModuleOut = mModuleOut;
     }
-    if (engineFlip && p.circuit)
+    // 1.75.0: a module's level after the power amp. It's per path, in the crossfade, and not in the smoothed
+    // Output: gliding from a +20 dB module to the next played the next one 20 dB too loud for a moment.
+    mModuleOut = p.ModuleOn() ? DBToAmp(module::GetModule(p.module).outputDB) : 1.0;
+    // (1.72.0: so does unplugging a module: this preamp sat idle under it.)
+    const bool fresh = p.circuit && (engineFlip || (mParams.ModuleOn() && !p.ModuleOn()));
+    if (fresh)
       mCircuit.Reset(mOversampledRate, p.ToCircuit()); // Start the circuit from rest.
     else
       mCircuit.SetParams(p.ToCircuit()); // Like turning a pot: the circuit carries its state over.
@@ -638,27 +673,30 @@ private:
     // Stage 2 starts from rest when it's switched in (or the circuit engine is); otherwise its
     // parts change like pots, same as stage 1.
     const CircuitParams c2 = p.ToCircuit2(mCircuit.OutputResistance());
-    if (p.stage2 && (!mParams.stage2 || (engineFlip && p.circuit)))
+    if (p.stage2 && (!mParams.stage2 || fresh))
       mCircuit2.Reset(mOversampledRate, c2);
     else
       mCircuit2.SetParams(c2);
     // The sockets likewise (1.68.0): from rest when one starts working or gets a new tube.
-    _SetSockets(p, engineFlip && p.circuit ? nullptr : &mParams);
+    _SetSockets(p, fresh ? nullptr : &mParams);
     mCircuit.SetRestingExtraLoad(_RestingExtraLoad(p));
     if (!p.stage2 && mSocketMask == 0)
       mCircuit.SetExtraLoad(0.0);
 
     // The power amp starts from rest when switched in (or the circuit engine is, or the tubes are
     // swapped); otherwise its knobs change like pots.
-    if (p.powerAmp && (!mParams.powerAmp || (engineFlip && p.circuit) || p.sixL6 != mParams.sixL6 || p.quad != mParams.quad
+    if (p.powerAmp && (!mParams.powerAmp || (engineFlip && p.circuit) || !p.SamePowerSection(mParams)
                        || p.cathodeBias != mParams.cathodeBias || p.speakerFeedback != mParams.speakerFeedback))
       mPower.Reset(mOversampledRate, p.ToPowerAmp());
     else
       mPower.SetParams(p.ToPowerAmp());
     // A different tone stack starts from rest (crossfaded in, above).
-    if (p.toneStack != mParams.toneStack)
+    if (p.toneStack != mParams.toneStack || fresh)
       mStack.Reset(mOversampledRate, TubeParams::StackParts(p.toneStack), mSmoothed.bass, mSmoothed.mid,
                    mSmoothed.treble);
+    // A module plugged in (or another one) starts from rest, crossfaded in (above).
+    if (p.ModuleOn() && (!mParams.ModuleOn() || p.module != mParams.module || (engineFlip && p.circuit)))
+      _ResetModule(p);
     mParams = p;
   }
 
@@ -728,6 +766,11 @@ public:
         mLevelAcc[i] = 0.0;
       }
       mLevel[3] = mLevel[2];
+      for (int i = 0; i < module::kMaxStages; i++)
+      {
+        mModuleLevel[i] = mModuleLevelAcc[i];
+        mModuleLevelAcc[i] = 0.0;
+      }
       // A follower socket shows the signal of the stage it follows.
       for (int k = 0; k < kNumSockets; k++)
         if (mParams.socket[k].role == kSocketFollower)
@@ -779,6 +822,7 @@ private:
     double socketGain[kNumSockets] = {0.25, 0.25}; // 1.68.0: each socket's Gain pot
     double bass = 0.5, mid = 0.5, treble = 0.5; // Tone stack knobs glide like turned pots
     double touch = 0.0; // Touch's expansion exponent (see _TouchGain)
+    double moduleKnobs[module::kNumKnobs] = {0.5, 0.5, 0.5, 0.5, 0.5}; // 1.72.0: glide like turned pots
   };
 
   void _BuildLUT()
@@ -836,6 +880,8 @@ private:
     mSmoothed.mid += mSmoothCoef * (mTarget.mid - mSmoothed.mid);
     mSmoothed.treble += mSmoothCoef * (mTarget.treble - mSmoothed.treble);
     mSmoothed.touch += mSmoothCoef * (mTarget.touch - mSmoothed.touch);
+    for (int k = 0; k < module::kNumKnobs; k++)
+      mSmoothed.moduleKnobs[k] += mSmoothCoef * (mTarget.moduleKnobs[k] - mSmoothed.moduleKnobs[k]);
     if (mTarget.touch == 0.0 && mSmoothed.touch < 1e-9)
       mSmoothed.touch = 0.0; // Fully off again: back to the exact Touch-off path
   }
@@ -924,6 +970,7 @@ private:
     mPower.Reset(mOversampledRate, mParams.ToPowerAmp());
     mStack.Reset(mOversampledRate, TubeParams::StackParts(mParams.toneStack), mSmoothed.bass, mSmoothed.mid,
                  mSmoothed.treble);
+    _ResetModule(mParams);
     if (mOversample > 1)
     {
       mUp.Reset();
@@ -966,6 +1013,8 @@ private:
     _UpdateStackKnobs(mStack);
     if (mFadeRemaining > 0)
       _UpdateStackKnobs(mFadeStack);
+    if (mParams.ModuleOn())
+      _UpdateModuleKnobs();
 
     // Treble pre-emphasis into the grid (like a bright cap across the volume pot). With the capture as
     // the preamp (1.64.0), there's no grid here: the capture's output goes in as it is.
@@ -973,7 +1022,8 @@ private:
     if (!(mParams.capture && mParams.circuit))
     {
       mBrightLP += mBrightCoef * (x - mBrightLP);
-      emphasized = x + 2.0 * mSmoothed.bright * (x - mBrightLP);
+      // (A module has its own bright caps, where its schematic puts them.)
+      emphasized = mParams.ModuleOn() ? x : x + 2.0 * mSmoothed.bright * (x - mBrightLP);
       touchGain = _TouchGain(x);
       if (touchGain != 1.0)
         emphasized *= touchGain;
@@ -1006,8 +1056,9 @@ private:
 
   double _ProcessOversampled(double x)
   {
-    const double y = mParams.circuit ? _Circuit(mCircuit, mCircuit2, mParams.stage2, mSocket, mSocketMask, mStack,
-                                                mParams.toneStack, mPower, mParams.powerAmp, x)
+    double y = mParams.circuit ? _Circuit(mCircuit, mCircuit2, mParams.stage2, mSocket, mSocketMask, mStack,
+                                                mParams.toneStack, mPower, mParams.powerAmp, x,
+                                                mParams.ModuleOn() ? &mModule : nullptr)
                                      : _Stack(mStack, mParams.toneStack, _Classic(x));
     if (mProbing)
       _Probe(x, y);
@@ -1020,17 +1071,23 @@ private:
     }
     if (mUiWanted && mParams.stage2)
       mLevelAcc[1] = std::max(mLevelAcc[1], std::fabs(mCircuit2.PlateSwing()) * 0.01);
+    if (mUiWanted && mParams.ModuleOn())
+      for (int i = 0; i < mModule.NumStages(); i++)
+        mModuleLevelAcc[i] = std::max(mModuleLevelAcc[i], std::fabs(mModule.Stage(i).PlateSwing()) * 0.01);
     if (mUiWanted && mSocketMask != 0 && mParams.circuit)
       for (int k = 0; k < kNumSockets; k++)
         if (mSocketMask & (1 << k))
           mLevelAcc[4 + k] = std::max(mLevelAcc[4 + k], std::fabs(mSocket[k].PlateSwing()) * 0.01);
+    y *= mModuleOut;
     if (mFadeRemaining <= 0)
       return y;
     // Mid-crossfade after a switch flip: blend in from whatever was playing before.
     const double old = mFadeFrom == FadeFrom::Classic
                          ? _Stack(mFadeStack, mFadeStackType, _Classic(x))
                          : _Circuit(mFadeCircuit, mFadeCircuit2, mFadeStage2, mFadeSocket, mFadeSocketMask, mFadeStack,
-                                    mFadeStackType, mFadePower, mFadePowerOn, x);
+                                    mFadeStackType, mFadePower, mFadePowerOn, x,
+                                    mFadeModuleOn ? &mFadeModule : nullptr)
+                               * mFadeModuleOut;
     const double g = static_cast<double>(mFadeRemaining--) / mFadeLength;
     return y + g * (old - y);
   }
@@ -1040,13 +1097,23 @@ private:
   // the preamp and the power amp, as in a real amp.
   double _Circuit(TriodeStageCircuit& stage1, TriodeStageCircuit& stage2, bool useStage2, TriodeStageCircuit* sockets,
                   int socketMask, tonestack::TMBStack& stack, int stackType, PushPullPowerAmp& power, bool usePower,
-                  double x)
+                  double x, module::ModuleChain* preampModule = nullptr)
   {
-    // (1.64.0: with the capture as the preamp, x is already its output.)
-    const double pre =
-      _Stack(stack, stackType, mParams.capture ? x : _Preamp(stage1, stage2, useStage2, sockets, socketMask, x));
-    mLastPre = pre;
+    // (1.64.0: with the capture as the preamp, x is already its output. 1.72.0: a module is the whole
+    // preamp, its own tone stack included; Drive sets the level into its input jack.)
     const double mains = mBenchMains; // Bench: the Variac moves the preamp's supply too
+    double pre;
+    if (preampModule != nullptr)
+    {
+      // As this preamp does, half of Drive's dB is made up after it (the modules' levels are matched to
+      // this preamp's at Drive 20 dB, kModuleDriveRef).
+      preampModule->SetRailScale(mains);
+      pre = preampModule->Process(x * mSmoothed.drive) * std::sqrt(kModuleDriveRef / mSmoothed.drive);
+    }
+    else
+      pre =
+        _Stack(stack, stackType, mParams.capture ? x : _Preamp(stage1, stage2, useStage2, sockets, socketMask, x));
+    mLastPre = pre;
     if (!usePower)
     {
       if (stage1.SupplyShared() || mains != 1.0)
@@ -1160,6 +1227,32 @@ private:
     return false;
   }
 
+  // 1.72.0: the module from rest (at the knobs' current glide), if one's plugged in.
+  void _ResetModule(const TubeParams& p)
+  {
+    if (!p.ModuleOn())
+      return;
+    for (int k = 0; k < module::kNumKnobs; k++)
+      mModuleKnobsQ[k] = _Quantize(mSmoothed.moduleKnobs[k]);
+    mModule.Reset(module::GetModule(p.module), mOversampledRate, mModuleKnobsQ);
+    mModule.SetRailScale(mBenchMains);
+  }
+  // Its knobs: re-solved only while one is still gliding, in visible steps (as the tone stack's).
+  void _UpdateModuleKnobs()
+  {
+    double q[module::kNumKnobs];
+    bool changed = false;
+    for (int k = 0; k < module::kNumKnobs; k++)
+    {
+      q[k] = _Quantize(mSmoothed.moduleKnobs[k]);
+      changed |= q[k] != mModuleKnobsQ[k];
+    }
+    if (!changed)
+      return;
+    std::copy(std::begin(q), std::end(q), std::begin(mModuleKnobsQ));
+    mModule.SetKnobs(q);
+  }
+
   // Classic engine: the Koren LUT plus the Bloom bias shift.
   double _Classic(double x)
   {
@@ -1198,10 +1291,10 @@ private:
       std::fill(f, f + kNumProbes, 0.f);
       f[kProbeInput] = static_cast<float>(grid);
     }
-    if (!mParams.circuit)
+    if (!mParams.circuit || mParams.ModuleOn()) // (A module's stages aren't V1, V2: only its output is probed)
     {
       if (frame)
-        f[kProbeStackOut] = static_cast<float>(y);
+        f[kProbeStackOut] = static_cast<float>(mParams.ModuleOn() ? mLastPre : y);
       return;
     }
     _ProbeStage(st, 0, mCircuit);
@@ -1297,7 +1390,7 @@ private:
     s.rail = TriodeStageCircuit::kBPlus;
     s.paBias = mPower.Bias();
     s.paIdleMA = 1e3 * mPower.IdleAmps();
-    s.paRailRest = PushPullPowerAmp::kBPlus;
+    s.paRailRest = mPower.RestingBPlus();
     s.paScreenRest = mPower.RestingScreenVoltage();
     s.feedbackDB = mPower.FeedbackDB();
     // Bench.
@@ -1315,6 +1408,7 @@ private:
     s.paBiasTrim = mParams.powerBias;
     s.cathodeBias = mParams.cathodeBias;
     s.sixL6 = mParams.sixL6;
+    s.powerName = mParams.PowerName();
   }
 
 public:
@@ -1362,6 +1456,14 @@ public:
   double StageRk(int i) const { return i == 0 ? mCircuit.Rk() : mCircuit2.Rk(); }
   // 1.68.0: a gain socket's cathode resistor (what its Bias picked), 0 if it isn't a gain stage.
   double SocketRk(int k) const { return (mSocketMask & (1 << k)) ? mSocket[k].Rk() : 0.0; }
+  // 1.72.0: the module's stages: how many (0 with none), each one's plate swing / 100 V last block (the
+  // MODULAR chassis's glow), and its resting plate voltage.
+  int ModuleStages() const { return mParams.ModuleOn() ? mModule.NumStages() : 0; }
+  double ModuleStageLevel(int i) const { return mModuleLevel[std::clamp(i, 0, module::kMaxStages - 1)]; }
+  double ModuleStagePlate(int i) const
+  {
+    return i >= 0 && i < ModuleStages() ? mModule.Stage(i).RestingPlateVoltage() : 0.0;
+  }
 
 private:
   // Red plating wears a power tube out: per second, 0.02 x (excess / 10%)^2 of its life, where excess
@@ -1600,6 +1702,9 @@ private:
   int mSocketMask = 0;
   PushPullPowerAmp mPower;
   tonestack::TMBStack mStack;
+  module::ModuleChain mModule; // 1.72.0: the preamp module, when one's plugged in (TubeParams::ModuleOn)
+  static constexpr double kModuleDriveRef = 10.0; // Drive 20 dB (x 10), where the modules' levels were matched
+  double mModuleKnobsQ[module::kNumKnobs] = {-1.0, -1.0, -1.0, -1.0, -1.0};
 
   // Crossfade after a switch flip (see SetParams).
   static constexpr double kFadeSeconds = 0.01;
@@ -1617,7 +1722,10 @@ private:
   bool mFadePowerOn = false;
   tonestack::TMBStack mFadeStack;
   int mFadeStackType = 0;
+  module::ModuleChain mFadeModule; // 1.72.0
+  bool mFadeModuleOn = false;
   int mFadeLength = 1, mFadeRemaining = 0;
+  double mModuleOut = 1.0, mFadeModuleOut = 1.0; // 1.75.0: see SetParams
 
   std::vector<iplug::sample> mBuffer;
   iplug::sample* mBufPtr[1] = {nullptr};
@@ -1643,6 +1751,7 @@ private:
   double mPopEnv = 0.0, mPopDecay = 0.999, mFailGain = 1.0, mWarmStep = 1e-5;
   uint32_t mPopRng = 22222u;
   double mLevel[kNumStageLevels] = {}, mLevelAcc[kNumStageLevels] = {};
+  double mModuleLevel[module::kMaxStages] = {}, mModuleLevelAcc[module::kMaxStages] = {};
 
   // Debug probes (see SetProbe). Not owned.
   TubeProbe* mProbe = nullptr;

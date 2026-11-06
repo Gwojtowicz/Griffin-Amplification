@@ -2420,7 +2420,7 @@ public:
   // every frame for nothing.
   void OnMsgFromDelegate(int msgTag, int dataSize, const void* pData) override
   {
-    const bool wasDirty = this->IsDirty();
+    const bool wasDirty = Base::IsDirty();
     std::array<double, NC> value;
     std::array<float, NC> peak;
     for (int c = 0; c < NC; c++)
@@ -2437,6 +2437,8 @@ public:
         return;
     this->SetClean();
   }
+
+  bool IsDirty() override { return mMoving || Base::IsDirty(); }
 
   void Draw(IGraphics& g) override
   {
@@ -3230,9 +3232,9 @@ public:
   {
     const IColor ink = PluginColors::NAM_INK;
     g.FillRoundRect(ink.WithOpacity(mMouseIsOver ? 0.16f : 0.06f), mRECT, 4.f);
-    const double phase = mBeatPhase ? mBeatPhase() : -1.0;
+    mDrawnLit = _Lit();
     const IRECT led = mRECT.GetFromLeft(mRECT.H()).GetCentredInside(7.f);
-    if (phase >= 0.0 && phase < 0.15)
+    if (mDrawnLit)
       g.FillEllipse(PluginColors::NAM_THEMECOLOR, led);
     else
       g.DrawEllipse(ink.WithOpacity(0.45f), led, nullptr, 1.2f);
@@ -3243,8 +3245,8 @@ public:
                text, mRECT.GetReducedFromLeft(mRECT.H() - 4.f));
   }
 
-  // Redrawn every frame while shown, for the beat light.
-  bool IsDirty() override { return !IsHidden() || IControl::IsDirty(); }
+  // Redrawn only when the beat light turns on or off: any repaint costs a full-window composite.
+  bool IsDirty() override { return (!IsHidden() && _Lit() != mDrawnLit) || IControl::IsDirty(); }
 
   void OnMouseDrag(float x, float y, float dX, float dY, const IMouseMod& mod) override
   {
@@ -3263,7 +3265,143 @@ public:
   }
 
 private:
+  bool _Lit() const
+  {
+    const double phase = mBeatPhase ? mBeatPhase() : -1.0;
+    return phase >= 0.0 && phase < 0.15;
+  }
+
   std::function<double()> mBeatPhase;
+  bool mDrawnLit = false;
+};
+
+/// Settings > Display (1.74.0): the frame rate, and the standalone window's resolution.
+class NAMDisplaySettingsControl : public IControl
+{
+public:
+  // Window sizes in physical pixels, all in the UI's 9:5 shape. The UI scales with the window.
+  struct Resolution
+  {
+    int w, h;
+    const char* name;
+  };
+  static constexpr int kNumResolutions = 5;
+  static constexpr Resolution kResolutions[kNumResolutions] = {{1260, 700, "1260 x 700"},
+                                                               {1620, 900, "1620 x 900"},
+                                                               {2160, 1200, "2160 x 1200"},
+                                                               {2700, 1500, "2700 x 1500"},
+                                                               {3240, 1800, "3240 x 1800"}};
+
+  struct Callbacks
+  {
+    std::function<int()> getFps;
+    std::function<void(int)> setFps;
+    std::function<int()> getResolution; // Which one the window is at, or -1
+    std::function<bool(int)> resolutionFits; // Does it fit this screen?
+    std::function<void(int)> setResolution;
+  };
+
+  NAMDisplaySettingsControl(const IRECT& bounds, Callbacks callbacks, bool hasResolution)
+  : IControl(bounds)
+  , mCallbacks(std::move(callbacks))
+  , mHasResolution(hasResolution)
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    _Layout();
+    const IText heading(15.f, PluginColors::NAM_THEMEFONTCOLOR, "Michroma-Regular", EAlign::Near);
+    const IText note(12.f, PluginColors::NAM_THEMEFONTCOLOR.WithOpacity(0.6f), "Roboto-Regular", EAlign::Near);
+    g.DrawText(heading, "FRAME RATE", mFpsLabel);
+    const int fps = mCallbacks.getFps();
+    _Segment(g, mFps30, "30 FPS", fps == 30, kHoverFps30, true);
+    _Segment(g, mFps60, "60 FPS", fps == 60, kHoverFps60, true);
+    g.DrawText(note, "Lower uses less graphics power", mFpsNote);
+    if (!mHasResolution)
+      return;
+    g.DrawText(heading, "RESOLUTION", mResLabel);
+    const int res = mCallbacks.getResolution();
+    for (int i = 0; i < kNumResolutions; i++)
+      _Segment(g, mRes[i], kResolutions[i].name, res == i, i, mCallbacks.resolutionFits(i));
+    g.DrawText(note, "Window size in pixels. Smaller uses less graphics power.", mResNote);
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    _Layout();
+    if (mFps30.Contains(x, y))
+      mCallbacks.setFps(30);
+    if (mFps60.Contains(x, y))
+      mCallbacks.setFps(60);
+    if (mHasResolution)
+      for (int i = 0; i < kNumResolutions; i++)
+        if (mRes[i].Contains(x, y) && mCallbacks.resolutionFits(i))
+          mCallbacks.setResolution(i);
+    SetDirty(false);
+  }
+
+  void OnMouseOver(float x, float y, const IMouseMod& mod) override
+  {
+    _Layout();
+    int hover = -1;
+    if (mFps30.Contains(x, y))
+      hover = kHoverFps30;
+    if (mFps60.Contains(x, y))
+      hover = kHoverFps60;
+    if (mHasResolution)
+      for (int i = 0; i < kNumResolutions; i++)
+        if (mRes[i].Contains(x, y))
+          hover = i;
+    if (hover != mHover)
+    {
+      mHover = hover;
+      SetDirty(false);
+    }
+    IControl::OnMouseOver(x, y, mod);
+  }
+
+  void OnMouseOut() override
+  {
+    mHover = -1;
+    IControl::OnMouseOut();
+  }
+
+private:
+  static constexpr int kHoverFps30 = 100, kHoverFps60 = 101;
+
+  void _Layout()
+  {
+    const float labelW = 150.f, segH = 28.f, rowGap = 22.f, noteH = 18.f;
+    float y = mRECT.T;
+    mFpsLabel = IRECT(mRECT.L, y, mRECT.L + labelW, y + segH);
+    const float x = mRECT.L + labelW;
+    mFps30 = IRECT(x, y, x + 90.f, y + segH);
+    mFps60 = IRECT(x + 90.f, y, x + 180.f, y + segH);
+    mFpsNote = IRECT(x + 196.f, y, mRECT.R, y + segH);
+    y += segH + rowGap;
+    mResLabel = IRECT(mRECT.L, y, mRECT.L + labelW, y + segH);
+    const float segW = (mRECT.R - x) / kNumResolutions;
+    for (int i = 0; i < kNumResolutions; i++)
+      mRes[i] = IRECT(x + i * segW, y, x + (i + 1) * segW, y + segH);
+    mResNote = IRECT(x, y + segH + 4.f, mRECT.R, y + segH + 4.f + noteH);
+  }
+
+  void _Segment(IGraphics& g, const IRECT& r, const char* text, bool on, int hoverId, bool enabled)
+  {
+    const IColor fill = on ? PluginColors::NAM_THEMECOLOR
+                           : PluginColors::NAM_SURFACE.WithContrast(enabled && mHover == hoverId ? 0.1f : 0.f);
+    g.FillRect(fill, r);
+    g.DrawRect(PluginColors::NAM_INK.WithOpacity(0.25f), r, nullptr, 1.f);
+    const IColor ink = on ? PluginColors::NAM_ONACCENT : PluginColors::NAM_THEMEFONTCOLOR;
+    g.DrawText(IText(13.f, ink.WithOpacity(enabled ? 1.f : 0.35f), "Roboto-Regular"), text, r);
+  }
+
+  Callbacks mCallbacks;
+  bool mHasResolution;
+  IRECT mFpsLabel, mFps30, mFps60, mFpsNote, mResLabel, mResNote;
+  IRECT mRes[kNumResolutions];
+  int mHover = -1;
 };
 
 /// Preferences (1.48.0): the colour theme (six palettes, dark or light) and the spectrum strip.
@@ -3415,9 +3553,14 @@ public:
                          const IBitmap& switchBitmap, ISVG closeSVG, const IVStyle& style,
                          const IVStyle& radioButtonStyle,
                          NAMBufferSizeControl::Callbacks bufferCallbacks = NAMBufferSizeControl::Callbacks(),
-                         bool bufferEditable = false, IControl* themePicker = nullptr)
+                         bool bufferEditable = false, IControl* themePicker = nullptr,
+                         IControl* displaySettings = nullptr, std::function<int()> getTab = nullptr,
+                         std::function<void(int)> setTab = nullptr)
   : IContainerBaseWithNamedChildren(bounds)
   , mThemePicker(themePicker)
+  , mDisplaySettings(displaySettings)
+  , mGetTab(std::move(getTab))
+  , mSetTab(std::move(setTab))
   , mBufferCallbacks(std::move(bufferCallbacks))
   , mBufferEditable(bufferEditable)
   , mAnimationTime(0)
@@ -3475,6 +3618,8 @@ public:
         {
           pCaller->OnEndAnimation();
           IContainerBase::Hide(mWillHide);
+          if (!mWillHide)
+            _ApplyTab(); // showing the page showed every tab's controls
           GetUI()->SetAllControlsDirty();
           return;
         }
@@ -3499,15 +3644,35 @@ public:
     if (PluginColors::NAM_LIGHT)
       AddNamedChildControl(new NAMPanelControl(GetRECT(), PluginColors::NAM_BG, 0.f), mControlNames.bitmap);
     else
-      AddNamedChildControl(new IBitmapControl(GetRECT(), mBitmap), mControlNames.bitmap)->SetIgnoreMouse(true);
+    {
+      // 1.74.0: the art is one size, so a solid fill under it covers a window bigger than that.
+      AddNamedChildControl(new NAMPanelControl(GetRECT(), PluginColors::NAM_BG, 0.f), mControlNames.panel);
+      const IRECT artArea = GetRECT().GetCentredInside(std::max(GetRECT().W(), (float)PLUG_WIDTH),
+                                                       std::max(GetRECT().H(), (float)PLUG_HEIGHT));
+      AddNamedChildControl(new IBitmapControl(artArea, mBitmap), mControlNames.bitmap)->SetIgnoreMouse(true);
+    }
     const auto titleArea = GetRECT().GetPadded(-(pad + 10.0f)).GetFromTop(50.0f);
     AddNamedChildControl(new IVLabelControl(titleArea, "SETTINGS", titleStyle), mControlNames.title);
+
+    // 1.74.0: the tabs. Each tab's controls go in mTabControls; _ApplyTab shows the current tab's.
+    for (auto& controls : mTabControls)
+      controls.clear();
+    const IRECT tabsArea = IRECT(titleArea.L, titleArea.B + 6.f, titleArea.R, titleArea.B + 6.f + kTabsH)
+                             .GetMidHPadded(0.5f * kNumTabs * kTabW);
+    AddNamedChildControl(new TabsControl(tabsArea, [this]() { return _Tab(); },
+                                         [this](int tab) {
+                                           if (mSetTab)
+                                             mSetTab(tab);
+                                           _ApplyTab();
+                                         }),
+                         mControlNames.tabs);
+    const float contentTop = tabsArea.B + 16.f;
 
     // Attach input/output calibration controls
     {
       const float height = NAM_KNOB_HEIGHT + NAM_SWTICH_HEIGHT + 10.0f;
       const float width = titleArea.W();
-      const auto inputOutputArea = titleArea.GetFromBottom(height).GetTranslated(0.0f, height);
+      const auto inputOutputArea = titleArea.GetFromBottom(height).GetTranslated(0.0f, height + kTabsH + 6.f);
       const auto inputArea = inputOutputArea.GetFromLeft(0.5f * width);
       const auto outputArea = inputOutputArea.GetFromRight(0.5f * width);
 
@@ -3520,12 +3685,13 @@ public:
         new InputLevelControl(inputLevelArea, kInputCalibrationLevel, mInputLevelBackgroundBitmap,
                               text.WithFGColor(COLOR_WHITE)),
         mControlNames.inputCalibrationLevel, kCtrlTagInputCalibrationLevel);
+      mTabControls[kTabAudio].push_back(inputLevelControl);
       inputLevelControl->SetTooltip(
         "The analog level, in dBu RMS, that corresponds to digital level of 0 dBFS peak in the host as its signal "
         "enters this plugin.");
-      AddNamedChildControl(
+      mTabControls[kTabAudio].push_back(AddNamedChildControl(
         new NAMSwitchControl(inputSwitchArea, kCalibrateInput, "Calibrate Input", mStyle, mSwitchBitmap),
-        mControlNames.calibrateInput, kCtrlTagCalibrateInput);
+        mControlNames.calibrateInput, kCtrlTagCalibrateInput));
 
       // Same-ish height & width as input controls
       const auto outputRadioArea = outputArea.GetFromBottom(
@@ -3534,35 +3700,43 @@ public:
       auto* outputModeControl =
         AddNamedChildControl(new OutputModeControl(outputRadioArea, kOutputMode, mRadioButtonStyle, buttonSize),
                              mControlNames.outputMode, kCtrlTagOutputMode);
+      mTabControls[kTabAudio].push_back(outputModeControl);
       outputModeControl->SetTooltip(
         "How to adjust the level of the output.\nRaw=No adjustment.\nNormalized=Adjust the level so that all models "
         "are about the same loudness.\nCalibrated=Match the input's digital-analog calibration.");
     }
 
     const float halfWidth = PLUG_WIDTH / 2.0f - pad;
-    const auto bottomArea = GetRECT().GetPadded(-pad).GetFromBottom(78.0f);
+    const auto pageArea = GetRECT().GetPadded(-pad);
+    const IRECT infoArea(pageArea.L, contentTop + 12.f, pageArea.R, contentTop + 12.f + 78.f);
 
     // Audio buffer row, centered in the space between the calibration controls and the info text.
     if (mBufferCallbacks.getRequested)
     {
-      const float calibrationBottom = titleArea.B + NAM_KNOB_HEIGHT + NAM_SWTICH_HEIGHT + 10.0f;
-      // With the theme row below it, the buffer row moves up to a third of the way down.
-      // With the theme row above the info text, the buffer row centres in what's left.
-      const float midY = 0.5f * (calibrationBottom + (mThemePicker ? bottomArea.T - kThemeRowH : bottomArea.T));
+      const float calibrationBottom = titleArea.B + kTabsH + 6.f + NAM_KNOB_HEIGHT + NAM_SWTICH_HEIGHT + 10.0f;
+      const float midY = 0.5f * (calibrationBottom + pageArea.B);
       const IRECT bufferArea(titleArea.L, midY - 30.f, titleArea.R, midY + 30.f);
-      AddNamedChildControl(new NAMBufferSizeControl(bufferArea, mBufferCallbacks, mBufferEditable),
-                           mControlNames.bufferSize);
+      mTabControls[kTabAudio].push_back(
+        AddNamedChildControl(new NAMBufferSizeControl(bufferArea, mBufferCallbacks, mBufferEditable),
+                             mControlNames.bufferSize));
     }
     const float lineHeight = 15.0f;
-    const auto modelInfoArea = bottomArea.GetFromLeft(halfWidth).GetFromTop(4 * lineHeight);
-    const auto aboutArea = bottomArea.GetFromRight(halfWidth).GetFromTop(5 * lineHeight);
-    AddNamedChildControl(new ModelInfoControl(modelInfoArea, leftStyle), mControlNames.modelInfo);
-    AddNamedChildControl(new AboutControl(aboutArea, leftStyle, leftText), mControlNames.about);
+    const auto modelInfoArea = infoArea.GetFromLeft(halfWidth).GetFromTop(4 * lineHeight);
+    const auto aboutArea = infoArea.GetFromRight(halfWidth).GetFromTop(5 * lineHeight);
+    mTabControls[kTabAbout].push_back(
+      AddNamedChildControl(new ModelInfoControl(modelInfoArea, leftStyle), mControlNames.modelInfo));
+    mTabControls[kTabAbout].push_back(
+      AddNamedChildControl(new AboutControl(aboutArea, leftStyle, leftText), mControlNames.about));
+    if (mDisplaySettings)
+    {
+      mDisplaySettings->SetTargetAndDrawRECTs(IRECT(titleArea.L, contentTop, titleArea.R, contentTop + 100.f));
+      mTabControls[kTabDisplay].push_back(AddNamedChildControl(mDisplaySettings, mControlNames.display));
+    }
     if (mThemePicker)
     {
-      const float top = bottomArea.T - kThemeRowH;
+      const float top = contentTop + 124.f;
       mThemePicker->SetTargetAndDrawRECTs(IRECT(titleArea.L, top, titleArea.R, top + 54.f));
-      AddNamedChildControl(mThemePicker, mControlNames.theme);
+      mTabControls[kTabDisplay].push_back(AddNamedChildControl(mThemePicker, mControlNames.theme));
     }
 
     auto closeAction = [&](IControl* pCaller) {
@@ -3572,6 +3746,7 @@ public:
       new NAMSquareButtonControl(CornerButtonArea(GetRECT()), closeAction, mCloseSVG), mControlNames.close);
 
     OnResize();
+    _ApplyTab();
   }
 
   void SetModelInfo(const ModelInfo& modelInfo)
@@ -3582,10 +3757,101 @@ public:
   };
 
 private:
+  enum ETab
+  {
+    kTabAudio = 0,
+    kTabDisplay,
+    kTabAbout,
+    kNumTabs
+  };
+  static constexpr float kTabsH = 30.f, kTabW = 130.f;
+
+  // The row of tab buttons under the title.
+  class TabsControl : public IControl
+  {
+  public:
+    TabsControl(const IRECT& bounds, std::function<int()> get, std::function<void(int)> set)
+    : IControl(bounds)
+    , mGet(std::move(get))
+    , mSet(std::move(set))
+    {
+    }
+
+    void Draw(IGraphics& g) override
+    {
+      static const char* const names[kNumTabs] = {"AUDIO", "DISPLAY", "ABOUT"};
+      const int current = mGet();
+      for (int i = 0; i < kNumTabs; i++)
+      {
+        const IRECT r = mRECT.SubRectHorizontal(kNumTabs, i);
+        const bool on = i == current;
+        const IColor fill = on ? PluginColors::NAM_THEMECOLOR
+                               : PluginColors::NAM_SURFACE.WithContrast(mHover == i ? 0.1f : 0.f);
+        g.FillRect(fill, r);
+        g.DrawRect(PluginColors::NAM_INK.WithOpacity(0.25f), r, nullptr, 1.f);
+        g.DrawText(IText(13.f, on ? PluginColors::NAM_ONACCENT : PluginColors::NAM_THEMEFONTCOLOR, "Roboto-Regular"),
+                   names[i], r);
+      }
+    }
+
+    void OnMouseDown(float x, float y, const IMouseMod& mod) override
+    {
+      const int tab = _TabAt(x, y);
+      if (tab >= 0)
+        mSet(tab);
+      SetDirty(false);
+    }
+
+    void OnMouseOver(float x, float y, const IMouseMod& mod) override
+    {
+      const int hover = _TabAt(x, y);
+      if (hover != mHover)
+      {
+        mHover = hover;
+        SetDirty(false);
+      }
+      IControl::OnMouseOver(x, y, mod);
+    }
+
+    void OnMouseOut() override
+    {
+      mHover = -1;
+      IControl::OnMouseOut();
+    }
+
+  private:
+    int _TabAt(float x, float y) const
+    {
+      for (int i = 0; i < kNumTabs; i++)
+        if (mRECT.SubRectHorizontal(kNumTabs, i).Contains(x, y))
+          return i;
+      return -1;
+    }
+
+    std::function<int()> mGet;
+    std::function<void(int)> mSet;
+    int mHover = -1;
+  };
+
+  int _Tab() const { return mGetTab ? std::clamp(mGetTab(), 0, kNumTabs - 1) : 0; }
+
+  void _ApplyTab()
+  {
+    const int current = _Tab();
+    for (int tab = 0; tab < kNumTabs; tab++)
+      for (IControl* c : mTabControls[tab])
+        c->Hide(IsHidden() || tab != current);
+    if (GetUI())
+      SetDirty(false);
+  }
+
   NAMBufferSizeControl::Callbacks mBufferCallbacks;
   bool mBufferEditable = false;
   IControl* mThemePicker = nullptr;
-  static constexpr float kThemeRowH = 62.f;
+  IControl* mDisplaySettings = nullptr;
+  std::function<int()> mGetTab;
+  std::function<void(int)> mSetTab;
+  std::vector<IControl*> mTabControls[kNumTabs];
   IBitmap mBitmap;
   IBitmap mInputLevelBackgroundBitmap;
   IBitmap mSwitchBitmap;
@@ -3604,9 +3870,12 @@ private:
     const std::string bufferSize = "BufferSize";
     const std::string calibrateInput = "CalibrateInput";
     const std::string close = "Close";
+    const std::string display = "Display";
     const std::string inputCalibrationLevel = "InputCalibrationLevel";
     const std::string modelInfo = "ModelInfo";
     const std::string outputMode = "OutputMode";
+    const std::string panel = "Panel";
+    const std::string tabs = "Tabs";
     const std::string theme = "Theme";
     const std::string title = "Title";
   } mControlNames;
@@ -3847,7 +4116,93 @@ private:
   };
 };
 
-/// A row of tabs (1.46.0, the Tube Lab's PREAMP / POWER AMP / FEEL). Not a parameter: the plugin
+// 1.73.0: the Tube Lab popup as a rack-mount unit, drawn behind its controls: a brushed faceplate with a
+// rack ear down each side (a screw slot per rack unit), split into units at `seams` (y), with a screw in
+// each unit's corners. Static: it only redraws with the popup.
+class NAMRackPanelControl : public IControl
+{
+public:
+  NAMRackPanelControl(const IRECT& bounds, float earW, std::vector<float> seams)
+  : IControl(bounds)
+  , mEarW(earW)
+  , mSeams(std::move(seams))
+  {
+    mIgnoreMouse = true;
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const bool light = PluginColors::NAM_LIGHT;
+    const IColor face = PluginColors::NAM_PANEL.WithContrast(light ? -0.03f : 0.05f);
+    const IRECT r = mRECT;
+    // The faceplate: a soft top-to-bottom shade, then fine brushing.
+    g.PathRoundRect(r, 6.f);
+    g.PathFill(IPattern::CreateLinearGradient(r.L, r.T, r.L, r.B, {{face.WithContrast(0.04f), 0.f}, {face.WithContrast(-0.03f), 1.f}}));
+    for (float y = r.T + 3.f; y < r.B - 2.f; y += 3.f)
+    {
+      const float k = 0.012f + 0.012f * (float)(((int)y * 7) % 5) / 5.f;
+      g.DrawLine(PluginColors::NAM_INK.WithOpacity(light ? k * 3.f : k), r.L + mEarW, y, r.R - mEarW, y);
+    }
+    // The ears.
+    for (int side = 0; side < 2; side++)
+    {
+      const IRECT ear = side == 0 ? r.GetFromLeft(mEarW) : r.GetFromRight(mEarW);
+      g.PathRoundRect(ear, side == 0 ? 6.f : 0.f, side == 0 ? 0.f : 6.f, side == 0 ? 0.f : 6.f, side == 0 ? 6.f : 0.f);
+      g.PathFill(IPattern::CreateLinearGradient(ear.L, ear.T, ear.R, ear.T,
+                                                {{face.WithContrast(side == 0 ? -0.05f : -0.02f), 0.f},
+                                                 {face.WithContrast(side == 0 ? -0.02f : -0.05f), 1.f}}));
+      const float edge = side == 0 ? ear.R : ear.L;
+      g.DrawLine(COLOR_BLACK.WithOpacity(light ? 0.18f : 0.55f), edge, ear.T + 2.f, edge, ear.B - 2.f, nullptr, 1.5f);
+      g.DrawLine(PluginColors::NAM_INK.WithOpacity(light ? 0.5f : 0.06f), edge + (side == 0 ? 1.5f : -1.5f), ear.T + 2.f,
+                 edge + (side == 0 ? 1.5f : -1.5f), ear.B - 2.f);
+      // A screw slot in each unit (a rack unit's holes line up with the units here).
+      float top = r.T;
+      for (size_t u = 0; u <= mSeams.size(); u++)
+      {
+        const float bottom = u < mSeams.size() ? mSeams[u] : r.B;
+        const float h = std::min(22.f, (bottom - top) * 0.5f);
+        const IRECT slot = IRECT(ear.MW() - mEarW * 0.22f, (top + bottom) * 0.5f - h * 0.5f, ear.MW() + mEarW * 0.22f,
+                                 (top + bottom) * 0.5f + h * 0.5f);
+        g.FillRoundRect(COLOR_BLACK.WithOpacity(light ? 0.35f : 0.75f), slot, slot.W() * 0.5f);
+        g.DrawRoundRect(PluginColors::NAM_INK.WithOpacity(light ? 0.5f : 0.08f), slot.GetTranslated(0.f, 1.f), slot.W() * 0.5f);
+        top = bottom;
+      }
+    }
+    // The units: a seam between each, a screw in each corner.
+    const IRECT inner = r.GetPadded(-mEarW, 0.f, -mEarW, 0.f);
+    float top = r.T;
+    for (size_t u = 0; u <= mSeams.size(); u++)
+    {
+      const float bottom = u < mSeams.size() ? mSeams[u] : r.B;
+      if (u < mSeams.size())
+      {
+        g.DrawLine(COLOR_BLACK.WithOpacity(light ? 0.2f : 0.6f), inner.L, bottom, inner.R, bottom, nullptr, 1.5f);
+        g.DrawLine(PluginColors::NAM_INK.WithOpacity(light ? 0.6f : 0.07f), inner.L, bottom + 1.5f, inner.R, bottom + 1.5f);
+      }
+      for (int c = 0; c < 4; c++)
+        _Screw(g, c % 2 == 0 ? inner.L + 8.f : inner.R - 8.f, c < 2 ? top + 8.f : bottom - 8.f);
+      top = bottom;
+    }
+    g.DrawRoundRect(COLOR_BLACK.WithOpacity(light ? 0.25f : 0.7f), r, 6.f, nullptr, 1.5f);
+  }
+
+private:
+  void _Screw(IGraphics& g, float x, float y)
+  {
+    const float rr = 3.6f;
+    g.FillCircle(COLOR_BLACK.WithOpacity(0.45f), x + 0.6f, y + 0.8f, rr + 0.6f);
+    g.PathCircle(x, y, rr);
+    g.PathFill(IPattern::CreateLinearGradient(x - rr, y - rr, x + rr, y + rr,
+                                              {{IColor(255, 205, 205, 210), 0.f}, {IColor(255, 95, 95, 100), 1.f}}));
+    g.DrawLine(IColor(255, 50, 50, 55), x - rr * 0.65f, y + rr * 0.65f, x + rr * 0.65f, y - rr * 0.65f, nullptr, 1.2f);
+  }
+
+  float mEarW;
+  std::vector<float> mSeams;
+};
+
+/// A row of tabs (1.46.0, the Tube Lab's PREAMP / POWER AMP / FEEL;
+/// 1.73.0: and CHASSIS, which opens a page rather than showing one). Not a parameter: the plugin
 /// keeps which tab is open and shows that page's controls (see NeuralAmpModeler::_ApplyTubeTab).
 class NAMTabBarControl : public IControl
 {
@@ -3863,16 +4218,45 @@ public:
 
   void Draw(IGraphics& g) override
   {
+    // 1.73.0: rack-mount buttons, all the same width, in a recessed well: the page that's showing is pressed
+    // in, with its LED lit.
     const int n = (int)mLabels.size();
     const int sel = mGetTab ? mGetTab() : 0;
-    g.DrawLine(PluginColors::NAM_THEMECOLOR.WithOpacity(0.6f), mRECT.L, mRECT.B - 1.f, mRECT.R, mRECT.B - 1.f, nullptr, 1.5f);
+    const bool light = PluginColors::NAM_LIGHT;
+    g.FillRoundRect(COLOR_BLACK.WithOpacity(light ? 0.12f : 0.4f), mRECT, 5.f);
+    g.DrawLine(COLOR_BLACK.WithOpacity(light ? 0.15f : 0.5f), mRECT.L + 4.f, mRECT.T + 0.5f, mRECT.R - 4.f, mRECT.T + 0.5f);
+    g.DrawLine(PluginColors::NAM_INK.WithOpacity(light ? 0.5f : 0.07f), mRECT.L + 4.f, mRECT.B - 0.5f, mRECT.R - 4.f,
+               mRECT.B - 0.5f);
     for (int i = 0; i < n; i++)
     {
-      const IRECT r = mRECT.GetGridCell(0, i, 1, n).GetPadded(-3.f, 0.f, -3.f, -2.f);
+      const IRECT r = mRECT.GetGridCell(0, i, 1, n).GetPadded(-3.f);
       const bool on = i == sel, hover = i == mHover;
-      g.FillRoundRect(on ? PluginColors::NAM_THEMECOLOR : PluginColors::NAM_BG.WithContrast((PluginColors::NAM_LIGHT ? -0.1f : 0.06f) + (hover ? 0.12f : 0.f)), r, 6.f, 6.f, 0.f, 0.f);
-      const IText text(15.f, on ? PluginColors::NAM_ONACCENT : PluginColors::NAM_THEMEFONTCOLOR.WithOpacity(0.75f), "Michroma-Regular");
-      g.DrawText(text, mLabels[i].c_str(), r);
+      const IColor base = PluginColors::NAM_SURFACE;
+      const IColor top = on ? base.WithContrast(-0.06f) : base.WithContrast(hover ? 0.16f : 0.1f);
+      const IColor bottom = on ? base.WithContrast(-0.02f) : base.WithContrast(hover ? 0.02f : -0.04f);
+      g.PathRoundRect(r, 4.f);
+      g.PathFill(IPattern::CreateLinearGradient(r.L, r.T, r.L, r.B, {{top, 0.f}, {bottom, 1.f}}));
+      g.DrawRoundRect(on ? PluginColors::NAM_THEMECOLOR.WithOpacity(0.9f) : COLOR_BLACK.WithOpacity(light ? 0.2f : 0.55f), r,
+                      4.f, nullptr, on ? 1.5f : 1.f);
+      if (!on) // A highlight along the top edge: raised; the pressed one has none
+        g.DrawLine(PluginColors::NAM_INK.WithOpacity(light ? 0.6f : 0.1f), r.L + 4.f, r.T + 1.f, r.R - 4.f, r.T + 1.f);
+      // The LED.
+      const float lx = r.L + 14.f, ly = r.MH(), lr = 3.5f;
+      if (on)
+      {
+        g.FillCircle(PluginColors::NAM_THEMECOLOR.WithOpacity(0.18f), lx, ly, lr * 2.6f);
+        g.FillCircle(PluginColors::NAM_THEMECOLOR.WithOpacity(0.35f), lx, ly, lr * 1.6f);
+        g.FillCircle(PluginColors::NAM_THEMECOLOR, lx, ly, lr);
+        g.FillCircle(COLOR_WHITE.WithOpacity(0.7f), lx - 1.f, ly - 1.f, 1.2f);
+      }
+      else
+      {
+        g.FillCircle(COLOR_BLACK.WithOpacity(light ? 0.25f : 0.6f), lx, ly, lr);
+        g.DrawCircle(PluginColors::NAM_INK.WithOpacity(light ? 0.3f : 0.12f), lx, ly, lr);
+      }
+      const IText text(13.5f, PluginColors::NAM_THEMEFONTCOLOR.WithOpacity(on ? 1.f : hover ? 0.85f : 0.62f),
+                       "Michroma-Regular");
+      g.DrawText(text, mLabels[i].c_str(), r.GetReducedFromLeft(22.f).GetReducedFromRight(6.f));
     }
   }
 

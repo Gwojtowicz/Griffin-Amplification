@@ -63,23 +63,14 @@ public:
     mLast = std::chrono::steady_clock::now();
   }
 
-  // Redraws at ~30 fps (the floating window: 60) only while it shows a live (on, not frozen) spectrum.
-  void SetFrameRate(double fps) { mFps = fps; }
-
-  bool IsDirty() override
-  {
-    if (IsHidden() || !_Live())
-      return IControl::IsDirty();
-    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - mLastFrame).count() >= 1.0 / mFps)
-      return true;
-    return IControl::IsDirty();
-  }
+  // Redraws every frame only while it shows a live (on, not frozen) spectrum.
+  bool IsDirty() override { return (!IsHidden() && _Live()) || IControl::IsDirty(); }
 
   void Draw(IGraphics& g) override
   {
     const auto now = std::chrono::steady_clock::now();
     const double dt = std::min(0.25, std::chrono::duration<double>(now - mLast).count());
-    mLast = mLastFrame = now;
+    mLast = now;
     if (_Live())
     {
       for (spectrum::Tap* t : {_ShownTap(0), _ShownTap(1)})
@@ -935,8 +926,7 @@ private:
   bool mCompact = false;
   std::function<void()> mOnClick;
   spectrum::Analyzer mAnalyzer;
-  std::chrono::steady_clock::time_point mLast, mLastFrame;
-  double mFps = 30.0;
+  std::chrono::steady_clock::time_point mLast;
   int mHover = -1, mDragBand = -1;
   Drag mDrag = Drag::None;
   float mDragStartX = 0.f, mDragStartY = 0.f;

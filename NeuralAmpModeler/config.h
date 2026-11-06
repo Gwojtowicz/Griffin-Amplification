@@ -1,7 +1,7 @@
 #define PLUG_NAME "Griffin Amplification"
 #define PLUG_MFR "Griffin Wojtowicz"
-#define PLUG_VERSION_HEX 0x00014702
-#define PLUG_VERSION_STR "1.71.2"
+#define PLUG_VERSION_HEX 0x00014B00
+#define PLUG_VERSION_STR "1.75.0"
 // 1.57.0: Griffin Amplification's own IDs, so a DAW can tell it apart from the plug-in it was forked
 // from (the VST3 class IDs are made from these two).
 #define PLUG_UNIQUE_ID 'GrAm'
@@ -36,7 +36,7 @@
 #define PLUG_HAS_UI 1
 #define PLUG_WIDTH 900
 #define PLUG_HEIGHT 500
-#define PLUG_FPS 60
+#define PLUG_FPS 30
 #define PLUG_SHARED_RESOURCES 0
 #define PLUG_HOST_RESIZE 0
 #define PLUG_MIN_WIDTH 700

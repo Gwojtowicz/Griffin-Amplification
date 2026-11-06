@@ -225,6 +225,20 @@ struct PentodeModel
 // Koren's published constants.
 constexpr PentodeModel kEL34 = {11.0, 1.35, 650.0, 4200.0, 60.0, 24.0, 0.035, 25.0};
 constexpr PentodeModel k6L6 = {8.7, 1.35, 1460.0, 4500.0, 48.0, 12.0, 0.040, 30.0};
+// 1.75.0: the small tubes. 6V6: Koren's constants; they give 46 mA at 250 V / -12.5 V (datasheet 45) and
+// 33 mA at 315 V / 225 V / -13 V (34). EL84: fitted here to its datasheet point (250 V, -7.3 V: 48 mA,
+// 11.3 mA/V, 40k, mu 19) with Kp held at 150, as leaving it free gave a corner too hard for push-pull;
+// that gives 46.7 mA with 135 ohm cathode bias (48) and 36.5 mA at 300 V, 130 ohm per pair (36).
+constexpr PentodeModel k6V6 = {10.7, 1.31, 1672.0, 4500.0, 41.16, 12.7, 0.022, 14.0};
+constexpr PentodeModel kEL84 = {19.0, 1.432, 734.7, 4500.0, 150.0, 46.7, 0.042, 12.0};
+
+// What a preamp module can fit in place of the EL34 / 6L6 choice.
+enum PowerTube
+{
+  kPowerStock = 0, // EL34 or 6L6, as PowerAmpParams::sixL6 says
+  kPower6V6,
+  kPowerEL84
+};
 
 struct PowerAmpParams
 {
@@ -233,6 +247,9 @@ struct PowerAmpParams
   double feedback = 0.5; // 0..1: negative feedback amount
   double presence = 0.5; // 0..1: how much less feedback (more bite) at high frequencies
   bool sixL6 = false; // false = EL34s, true = 6L6s
+  int powerTube = kPowerStock; // 1.75.0: set by a preamp module
+  // The amp's own plate supply and plate-to-plate load (0: the stock 450 V and 3.4k, 1.7k with a quad).
+  double bPlus = 0.0, raa = 0.0;
   bool speakerLoad = false; // Drive a real speaker's impedance instead of a resistor
   // Real Feel switches (1.33.0), see the top of this file.
   bool screenSquish = false;
@@ -251,6 +268,7 @@ struct PowerAmpParams
   bool operator==(const PowerAmpParams& o) const
   {
     return master == o.master && sag == o.sag && feedback == o.feedback && presence == o.presence && sixL6 == o.sixL6
+           && powerTube == o.powerTube && bPlus == o.bPlus && raa == o.raa
            && speakerLoad == o.speakerLoad && screenSquish == o.screenSquish && otSaturation == o.otSaturation
            && coilHeat == o.coilHeat && sharedSupply == o.sharedSupply && feelDepth == o.feelDepth
            && cathodeBias == o.cathodeBias && speakerFeedback == o.speakerFeedback && resonance == o.resonance
@@ -283,7 +301,7 @@ public:
     mParams = p;
     mSqDepth = mSqDepthMid = _Depth();
     _Update();
-    mVB = kBPlus;
+    mVB = mBPlus;
     mVg2 = mVg2Rest;
     mD = 0.0;
     mGrid1 = mGrid2 = mGridRef * mBench.mains;
@@ -343,7 +361,8 @@ public:
     if (p == mParams)
       return;
     const bool tubesChanged =
-      p.sixL6 != mParams.sixL6 || p.cathodeBias != mParams.cathodeBias || p.tubesPerSide != mParams.tubesPerSide;
+      p.sixL6 != mParams.sixL6 || p.cathodeBias != mParams.cathodeBias || p.tubesPerSide != mParams.tubesPerSide
+      || p.powerTube != mParams.powerTube || p.bPlus != mParams.bPlus || p.raa != mParams.raa;
     const bool loadChanged = p.speakerLoad != mParams.speakerLoad;
     const bool otSatOn = p.otSaturation && !mParams.otSaturation;
     mParams = p;
@@ -684,6 +703,7 @@ public:
   double Bias() const { return mBias; }
   double CathodeVoltage() const { return mCathodeV; } // Cathode bias: the bias it has set itself (0 fixed)
   double IdleAmps() const { return _Model().idleAmps; }
+  double RestingBPlus() const { return mBPlus; }
   double RestingScreenVoltage() const { return mVg2Rest; }
   // Bench (1.58.0, TubeBench.h): the Variac, perveance and emission ceiling, a few times a
   // millisecond while they glide. Cheap: nothing is re-solved.
@@ -766,7 +786,18 @@ private:
   static constexpr double kBlockDepth = 0.6;
   static constexpr int kTableSize = 8192;
 
-  const PentodeModel& _Model() const { return mParams.sixL6 ? k6L6 : kEL34; }
+  const PentodeModel& _Model() const
+  {
+    return mParams.powerTube == kPower6V6    ? k6V6
+           : mParams.powerTube == kPowerEL84 ? kEL84
+           : mParams.sixL6                   ? k6L6
+                                             : kEL34;
+  }
+  // The tube's X and Vp tables.
+  int _TableIndex() const
+  {
+    return mParams.powerTube == kPower6V6 ? 2 : mParams.powerTube == kPowerEL84 ? 3 : mParams.sixL6 ? 1 : 0;
+  }
 
   // Newton's predictor restarts from the current point (no trend): after a reset or a tube swap.
   void _HoldPredictor()
@@ -883,10 +914,10 @@ private:
   {
     const double x = mInvMu + vg1 * invVg2;
     double f, df;
-    _Read(mParams.sixL6 ? mF6L6 : mFEL34, mParams.sixL6 ? mDF6L6 : mDFEL34, kXMin, kXMax, x, f, df);
+    _Read(kTabF[_TableIndex()], kTabDF[_TableIndex()], kXMin, kXMax, x, f, df);
     const double vpc = std::max(vp, 0.0);
     double t, dt;
-    _Read(mParams.sixL6 ? mT6L6 : mTEL34, mParams.sixL6 ? mDT6L6 : mDTEL34, 0.0, kVpMax, vpc, t, dt);
+    _Read(kTabT[_TableIndex()], kTabDT[_TableIndex()], 0.0, kVpMax, vpc, t, dt);
     ip = a * f * t;
     dIpDvg = a * df * t * invVg2;
     dIpDvp = vp > 0.0 ? a * f * dt : 0.0;
@@ -989,7 +1020,7 @@ private:
   {
     const double x = 1.0 / m.mu + vg1 / vg2;
     double f, df;
-    _Read(mParams.sixL6 ? mF6L6 : mFEL34, mParams.sixL6 ? mDF6L6 : mDFEL34, kXMin, kXMax, x, f, df);
+    _Read(kTabF[_TableIndex()], kTabDF[_TableIndex()], kXMin, kXMax, x, f, df);
     // Depth also widens the knee (Kvb x sqrt(strength)) and takes more of what the plate misses (x the
     // same), so the screen starts taking current on the swings you actually play, not only when the
     // plates bottom out.
@@ -1119,6 +1150,8 @@ private:
     static const bool built = [] {
       _BuildTables(kEL34, mFEL34, mDFEL34, mTEL34, mDTEL34);
       _BuildTables(k6L6, mF6L6, mDF6L6, mT6L6, mDT6L6);
+      _BuildTables(k6V6, mF6V6, mDF6V6, mT6V6, mDT6V6);
+      _BuildTables(kEL84, mFEL84, mDFEL84, mTEL84, mDTEL84);
       return true;
     }();
     (void)built;
@@ -1127,7 +1160,9 @@ private:
     const bool quad = mParams.tubesPerSide >= 2;
     mN = quad ? 2.0 : 1.0;
     mGridN = mN;
-    mRl = quad ? kRl / 2.0 : kRl;
+    mRl = mParams.raa > 0.0 ? mParams.raa / 4.0 : (quad ? kRl / 2.0 : kRl);
+    mBPlus = mParams.bPlus > 0.0 ? mParams.bPlus : kBPlus;
+    mScreenDesign = mBPlus - (kBPlus - kScreenRest);
     mOtCornerHz = quad ? kQuadOtCornerHz : kOtCornerHz;
     mOtCornerW = 2.0 * 3.14159265358979 * mOtCornerHz;
     mOtSatVs = quad ? kOtSatVoltSeconds * kQuadOtFlux : kOtSatVoltSeconds;
@@ -1139,13 +1174,13 @@ private:
     // bias, the cathode voltage that gives it with the grids at 0 V (more cathode voltage, less
     // current).
     auto restFor = [&](double idleAmps, double& bias, double& cathode) {
-      const double a = (2.0 / m.kg1) * std::pow(kScreenRest / m.kp, m.ex);
+      const double a = (2.0 / m.kg1) * std::pow(mScreenDesign / m.kp, m.ex);
       double lo = -150.0, hi = 0.0;
       for (int i = 0; i < 60; i++)
       {
         const double mid = 0.5 * (lo + hi);
         double ip, d1, d2;
-        _Tube(m, a, 1.0 / kScreenRest, mid, kBPlus, ip, d1, d2);
+        _Tube(m, a, 1.0 / mScreenDesign, mid, mBPlus, ip, d1, d2);
         if (ip < idleAmps)
           lo = mid;
         else
@@ -1159,9 +1194,9 @@ private:
         for (int i = 0; i < 60; i++)
         {
           const double mid = 0.5 * (klo + khi);
-          const double ak = (2.0 / m.kg1) * std::pow((kScreenRest - mid) / m.kp, m.ex);
+          const double ak = (2.0 / m.kg1) * std::pow((mScreenDesign - mid) / m.kp, m.ex);
           double ip, d1, d2;
-          _Tube(m, ak, 1.0 / (kScreenRest - mid), -mid, kBPlus - mid, ip, d1, d2);
+          _Tube(m, ak, 1.0 / (mScreenDesign - mid), -mid, mBPlus - mid, ip, d1, d2);
           if (ip > idleAmps)
             klo = mid;
           else
@@ -1175,12 +1210,12 @@ private:
       restFor(m.idleAmps, mBias, mRestCathode);
       mGridRef = mParams.cathodeBias ? 0.0 : mBias; // Where the grid leaks return to
       const double restVgk = mGridRef - mRestCathode;
-      const double aRest = (2.0 / m.kg1) * std::pow((kScreenRest - mRestCathode) / m.kp, m.ex);
+      const double aRest = (2.0 / m.kg1) * std::pow((mScreenDesign - mRestCathode) / m.kp, m.ex);
       // Small-signal difference-current gain at idle: dD/du = 2 * gm (both tubes, push-pull),
       // reduced by the plate load (each tube's rp across Rl).
       double ip, gm, gp;
-      _Tube(m, aRest, 1.0 / (kScreenRest - mRestCathode), restVgk, kBPlus - mRestCathode, ip, gm, gp);
-      const double dDdu = quad ? 2.0 * mN * gm / (1.0 + 2.0 * mN * gp * mRl) : 2.0 * gm / (1.0 + 2.0 * gp * kRl);
+      _Tube(m, aRest, 1.0 / (mScreenDesign - mRestCathode), restVgk, mBPlus - mRestCathode, ip, gm, gp);
+      const double dDdu = quad ? 2.0 * mN * gm / (1.0 + 2.0 * mN * gp * mRl) : 2.0 * gm / (1.0 + 2.0 * gp * mRl);
       // Output scale: small signals come out at unity at the reference Master with no feedback.
       // In the midband the coupling cap is a short, so each grid gets the inverter's swing through
       // the divider Rg / (Rg + Rpi).
@@ -1221,17 +1256,17 @@ private:
     {
       // The plain screen supply's resting point...
       const double rStock = mRScreen;
-      double vg2r = kScreenRest, iTot = 0.0, iScr = 0.0, i1 = 0.0, i2 = 0.0, ar = 0.0;
+      double vg2r = mScreenDesign, iTot = 0.0, iScr = 0.0, i1 = 0.0, i2 = 0.0, ar = 0.0;
       for (int k = 0; k < 6; k++)
       {
         const double vk = mRestCathode, vgk = mGridRef - vk;
         ar = (2.0 / m.kg1) * std::pow((vg2r - vk) / m.kp, m.ex);
         double x1, x2;
-        _Tube(m, ar, 1.0 / (vg2r - vk), vgk, kBPlus - vk, i1, x1, x2);
-        _Tube(m, ar * kTube2Match, 1.0 / (vg2r - vk), vgk, kBPlus - vk, i2, x1, x2);
+        _Tube(m, ar, 1.0 / (vg2r - vk), vgk, mBPlus - vk, i1, x1, x2);
+        _Tube(m, ar * kTube2Match, 1.0 / (vg2r - vk), vgk, mBPlus - vk, i2, x1, x2);
         iTot = mN * (i1 + i2);
         iScr = kScreenFraction * iTot;
-        vg2r = kBPlus - rStock * iScr;
+        vg2r = mBPlus - rStock * iScr;
       }
       mVg2Rest = vg2r;
       mRestA = ar;
@@ -1250,7 +1285,9 @@ private:
     mScreenCoef = 1.0 - std::exp(-mT / (mRScreen * 40e-6 * mN));
     mPiCoef = 1.0 - std::exp(-mT / kPiDecoupleTauS);
     // Grid coupling caps (value per tube type; a change keeps each cap's voltage, see Cap).
-    const double cc = mParams.sixL6 ? 100e-9 : 22e-9;
+    const double cc = mParams.powerTube == kPowerEL84 ? 47e-9
+                      : mParams.powerTube == kPower6V6 || mParams.sixL6 ? 100e-9
+                                                                        : 22e-9;
     mCc1.Init(cc, mT);
     mCc2.Init(cc, mT);
     // Speaker network companion conductances (trapezoidal) at this sample rate.
@@ -1290,12 +1327,12 @@ private:
     mRSquish = (kSquishScreenOhms * strength + 1700.0 * mParams.sag) / mN;
     mSquishCoef = 1.0 - std::exp(-mT / (mRSquish * mN * kSquishScreenFarads / strength));
     const double vk = mRestCathode, vgk = mGridRef - vk;
-    const double iSquish = mN * (_ScreenCurrent(m, mRestA, mVg2Rest - vk, vgk, kBPlus - vk, mRestI1)
-                                 + _ScreenCurrent(m, mRestA * kTube2Match, mVg2Rest - vk, vgk, kBPlus - vk, mRestI2));
-    mScreenLift = mVg2Rest - kBPlus + mRSquish * iSquish;
+    const double iSquish = mN * (_ScreenCurrent(m, mRestA, mVg2Rest - vk, vgk, mBPlus - vk, mRestI1)
+                                 + _ScreenCurrent(m, mRestA * kTube2Match, mVg2Rest - vk, vgk, mBPlus - vk, mRestI2));
+    mScreenLift = mVg2Rest - mBPlus + mRSquish * iSquish;
     const double iTot = mN * (mRestI1 + mRestI2);
     const double iScr = mParams.screenSquish ? iSquish : kScreenFraction * iTot;
-    mVSupply = kBPlus + mRSupply * (iTot + iScr);
+    mVSupply = mBPlus + mRSupply * (iTot + iScr);
   }
 
   static constexpr double kXMin = -0.5, kXMax = 0.5; // 1/mu + Vg1/Vg2 range
@@ -1306,6 +1343,13 @@ private:
 
   static inline double mFEL34[kTableSize], mDFEL34[kTableSize], mTEL34[kTableSize], mDTEL34[kTableSize];
   static inline double mF6L6[kTableSize], mDF6L6[kTableSize], mT6L6[kTableSize], mDT6L6[kTableSize];
+  static inline double mF6V6[kTableSize], mDF6V6[kTableSize], mT6V6[kTableSize], mDT6V6[kTableSize];
+  static inline double mFEL84[kTableSize], mDFEL84[kTableSize], mTEL84[kTableSize], mDTEL84[kTableSize];
+  static inline const double* const kTabF[4] = {mFEL34, mF6L6, mF6V6, mFEL84};
+  static inline const double* const kTabDF[4] = {mDFEL34, mDF6L6, mDF6V6, mDFEL84};
+  static inline const double* const kTabT[4] = {mTEL34, mT6L6, mT6V6, mTEL84};
+  static inline const double* const kTabDT[4] = {mDTEL34, mDT6L6, mDT6V6, mDTEL84};
+  double mBPlus = kBPlus, mScreenDesign = kScreenRest; // 1.75.0: the amp's supply, at rest
 
   PowerAmpParams mParams;
   double mT = 1.0 / 96000.0;

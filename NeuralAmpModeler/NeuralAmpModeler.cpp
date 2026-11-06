@@ -30,6 +30,7 @@
 #include "PackPickerControl.h" // 1.70.0 PACK PICKER
 static void _PackLog(const std::string& text); // 1.70.1 (defined with the PACK PICKER code)
 #include "TubeChassisControls.h"
+#include "ModularChassisControls.h"
 #include "ParamHelp.h"
 #include "EQControls.h"
 #include "IPlugPaths.h"
@@ -715,6 +716,27 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         ->InitEnum((n + "CoupleSel").c_str(), 3, {"2.2 nF", "4.7 nF", "10 nF", "22 nF", "47 nF", "100 nF"});
     }
   }
+  // 1.72.0: the MODULAR chassis (TUBE LAB 2 copies these below). Bay A starts with the British master-volume
+  // module, B with the American modern one; each bay's knobs at its module's defaults.
+  {
+    using namespace tube::module;
+    GetParam(kTubeModChassis)->InitEnum("TubeModChassis", 0, {"Tube Lab", "Modular"});
+    GetParam(kTubeModBay)->InitEnum("TubeModBay", 0, {"A", "B"});
+    const int defaults[2] = {kBritMV, kCalModern};
+    static const char* bayNames[2] = {"TubeModA", "TubeModB"};
+    static const char* knobNames[kNumKnobs] = {"Gain", "Gain2", "Bass", "Mid", "Treble"};
+    for (int bay = 0; bay < 2; bay++)
+    {
+      IParam* m = GetParam(ModBayParam(bay));
+      m->InitEnum(bayNames[bay], defaults[bay] - 1, kNumModules - 1);
+      for (int id = 1; id < kNumModules; id++)
+        m->SetDisplayText(id - 1, GetModule(id).name);
+      for (int k = 0; k < kNumKnobs; k++)
+        GetParam(ModKnobParam(bay, k))
+          ->InitDouble((std::string(bayNames[bay]) + knobNames[k]).c_str(), 10.0 * GetModule(defaults[bay]).knobDefault[k],
+                       0.0, 10.0, 0.1);
+    }
+  }
 
   // Signal-chain grid: not automatable (they're the routing, not sound settings). The defaults are
   // "unset"; _MigrateLegacyChain lays the Slot params' order out on the grid.
@@ -858,6 +880,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     GetParam(kLab2First + i)->Init(*GetParam(kTubeLabParams[i]), "Tube", "Lab2Tube");
   for (int p = kTubeChassisFirst; p <= kTubeChassisLast; p++) // 1.68.0: and of the chassis's
     GetParam(LabParam(1, p))->Init(*GetParam(p), "Tube", "Lab2Tube");
+  for (int p = kTubeModFirst; p <= kTubeModLast; p++) // 1.72.0: and of the MODULAR chassis's
+    GetParam(LabParam(1, p))->Init(*GetParam(p), "Tube", "Lab2Tube");
   _MigrateLegacyChain();
 
   mNoiseGateTrigger.AddListener(&mNoiseGateGain);
@@ -907,6 +931,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     mBlockPopupCardBg = nullptr;
     mBlockPopupCloseButton = nullptr;
     mBlockPopupTitleLabel = nullptr;
+    pGraphics->SetFPS(mUiFps);
     pGraphics->AttachCornerResizer(EUIResizerMode::Size, true);
     pGraphics->AttachTextEntryControl();
     pGraphics->EnableMouseOver(true);
@@ -1720,7 +1745,6 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         auto* graph = new NAMEqGraphControl(IRECT(x, y, x + w, y + h), kOutEqBandFirst, kOutEqBandExtFirst, kOutEqTrim,
                                             kOutEqOutput, nullptr, &mOutTapOut, nullptr, "OUTPUT", &mStripView, true,
                                             openOutEq);
-        graph->SetFrameRate(60.0);
         graph->SetTooltip("The live spectrum of the final output, with the Output EQ's curve. Click to open the Output EQ.");
         NAMSpectrumWindowControl::Callbacks cb;
         cb.dock = [this]() { _SetSpecFloating(false); };
@@ -2100,8 +2124,13 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           // (engine) switches and the live transfer curve across the top, then a row of 6 knobs,
           // then the circuit row (cathode bypass cap, plate load, supply), the Stage 2 row, and the
           // Power Amp row.
-          const IRECT tubeBody = _ComputeTubePopupCardArea(b).GetReducedFromTop(38.f).GetPadded(-10.f);
-          const IRECT topRow = tubeBody.GetFromTop(tubeBody.H() * 0.2f);
+          // 1.73.0: a rack-mount unit (NAMRackPanelControl): the faceplate under the title, rack ears down its
+          // sides, and three rack units -- the tabs, then the switches and the curve, then the tab's page.
+          constexpr float kRackEar = 24.f, kTabsH = 36.f;
+          const IRECT rackArea = _ComputeTubePopupCardArea(b).GetReducedFromTop(40.f).GetPadded(-6.f);
+          const IRECT tubeBody = rackArea.GetPadded(-(kRackEar + 14.f), -8.f, -(kRackEar + 14.f), -8.f);
+          const IRECT tabBarArea = tubeBody.GetFromTop(kTabsH);
+          const IRECT topRow = tubeBody.GetReducedFromTop(kTabsH + 16.f).GetFromTop((tubeBody.H() - kTabsH - 16.f) * 0.22f);
           const IRECT switchesArea = topRow.GetFromLeft(std::min(600.f, topRow.W() * 0.66f));
           // Seven cells: On, Circuit, AMP Capture (1.64.0), Spkr Load, Economy, 8x (1.46.0: up here with
           // Economy, its opposite), and PRESETS / DEBUG stacked.
@@ -2119,36 +2148,36 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           // Below the top row (1.46.0): a tab bar and one page of controls per tab -- PREAMP, POWER AMP,
           // FEEL -- each on the same 4 x 7 grid. On one page (1.45.0) there were six rows and every
           // dial shrank; the Circuit+ row's labels were cut off.
-          const IRECT tabBarArea = tubeBody.GetReducedFromTop(topRow.H() + 6.f).GetFromTop(32.f);
-          const IRECT lowerArea = tubeBody.GetReducedFromTop(topRow.H() + 6.f + 32.f + 10.f);
+          const IRECT lowerArea = tubeBody.GetReducedFromTop(topRow.B - tubeBody.T + 18.f);
           constexpr int kTubeCols = 7, kTubeRows = 4;
           mTubeTabControls.clear();
           auto addToTab = [this, p](IControl* c, int tab) {
             mPedalDetailControls[p].push_back(c);
             mTubeTabControls.push_back({c, tab});
           };
-          // 1.62.0: CHASSIS, at the tab bar's right end: the preamp as a chassis (TubeChassisControls.h).
           {
-            auto* chassisButton = new NAMFlatButtonControl(tabBarArea.GetFromRight(tabBarArea.W() * 0.16f).GetPadded(-2.f),
-                                                           "CHASSIS", [pGraphics]() {
-                                                             if (auto* page = pGraphics->GetControlWithTag(kCtrlTagTubeChassis))
-                                                               page->Hide(false);
-                                                           });
-            chassisButton->SetTooltip("The whole amp as a chassis in 3D (drag to turn it): the preamp tubes, four sockets "
-                                      "for more preamp tubes (gain stages, followers or boosts), the power tubes and "
-                                      "output transformer, the turret board's parts, the Variac. Click anything to see and "
-                                      "set it; double-click to go to its page.");
-            pGraphics->AttachControl(chassisButton);
-            chassisButton->Hide(true);
-            mPedalDetailControls[p].push_back(chassisButton);
+            auto* rack = new NAMRackPanelControl(rackArea, kRackEar, {tabBarArea.B + 8.f, topRow.B + 9.f});
+            pGraphics->AttachControl(rack);
+            rack->Hide(true);
+            mPedalDetailControls[p].push_back(rack);
           }
+          // The tabs, all the same width; CHASSIS (1.62.0) opens the preamp as a chassis (TubeChassisControls.h)
+          // instead of a page.
           auto* tabBar = new NAMTabBarControl(
-            tabBarArea.GetReducedFromRight(tabBarArea.W() * 0.16f + 4.f), {"PREAMP", "POWER AMP", "FEEL"},
-            [this]() { return mTubeTab; },
-            [this](int tab) {
+            tabBarArea, {"PREAMP", "POWER AMP", "FEEL", "CHASSIS"}, [this]() { return mTubeTab; },
+            [this, pGraphics](int tab) {
+              if (tab == 3)
+              {
+                if (auto* page = pGraphics->GetControlWithTag(kCtrlTagTubeChassis))
+                  page->Hide(false);
+                return;
+              }
               mTubeTab = tab;
               _ApplyTubeTab();
             });
+          tabBar->SetTooltip("PREAMP, POWER AMP, FEEL: the Tube Lab's pages. CHASSIS: the whole amp in 3D (drag to turn "
+                             "it): the preamp (or, on the MODULAR chassis, its module bays), the power tubes and output "
+                             "transformer, the Variac. Click anything to see and set it; double-click to go to its page.");
           pGraphics->AttachControl(tabBar);
           tabBar->Hide(true);
           mPedalDetailControls[p].push_back(tabBar);
@@ -3080,7 +3109,24 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                                      [this]() { return mThemeIndex; }, [this]() { return mThemeLight; },
                                      [this]() { return mShowSpecStrip; },
                                      [this](int theme, bool light) { _SetTheme(theme, light); },
-                                     [this](bool show) { _SetSpecStripShown(show); }})),
+                                     [this](bool show) { _SetSpecStripShown(show); }}),
+                        new NAMDisplaySettingsControl(
+                          IRECT(),
+                          NAMDisplaySettingsControl::Callbacks{
+                            [this]() { return mUiFps; }, [this](int fps) { _SetFrameRate(fps); },
+                            [this]() { return _WindowResolutionShown(); },
+                            [this](int i) { return _WindowResolutionFits(i); },
+                            [this](int i) {
+                              mPendingWindowResolution = i;
+                              mReopenSettingsAfterResize = true;
+                            }},
+#if defined(APP_API) && defined(OS_WIN)
+                          true // a DAW owns its plug-in windows' sizes
+#else
+                          false
+#endif
+                          ),
+                        [this]() { return mSettingsTab; }, [this](int tab) { mSettingsTab = tab; }),
                       kCtrlTagSettingsBox)
       ->Hide(true);
     // A theme change from Settings rebuilds the UI; put Settings back up so you can keep choosing.
@@ -3255,7 +3301,9 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       pGraphics->AttachControl(page, kCtrlTagTubeChassis);
       const IRECT body = b.GetReducedFromTop(52.f).GetPadded(-14.f);
       const IRECT sceneR = body.GetFromLeft(body.W() * 0.64f);
-      const IRECT side = body.GetReducedFromLeft(sceneR.W() + 10.f);
+      const IRECT sideAll = body.GetReducedFromLeft(sceneR.W() + 10.f);
+      // 1.72.0: which chassis this lab is, at the top of the side column; the rest under it.
+      const IRECT side = sideAll.GetReducedFromTop(30.f);
       NAMTubeChassisControl::Callbacks cb;
       cb.view = [this]() {
         View v;
@@ -3280,6 +3328,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           v.level[i] = mUiStageLevel[i].load(std::memory_order_relaxed);
         v.powerAmp = tp.circuit && tp.powerAmp;
         v.sixL6 = tp.sixL6;
+        v.powerName = tp.PowerName();
+        v.smallPower = tp.powerTube != tube::kPowerStock;
         v.quad = tp.quad;
         for (int k = 0; k < 4; k++)
         {
@@ -3333,7 +3383,38 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       cb.go = [this](int link) { _ChassisGo(link); };
       cb.yaw = &mChassisYaw;
       cb.pitch = &mChassisPitch;
-      page->AddChildControl(new NAMTubeChassisControl(sceneR, cb));
+      mChassisTubeScene = new NAMTubeChassisControl(sceneR, cb);
+      page->AddChildControl(mChassisTubeScene);
+      // 1.72.0: the MODULAR chassis: the same power section and camera, the bays in place of the preamp.
+      {
+        NAMModularChassisControl::ModCallbacks mcb;
+        mcb.view = [this, view = cb.view]() {
+          chassis::ModView mv;
+          mv.base = view();
+          mv.base.title = mUiLab == 0 ? "GRIFFIN  MODULAR" : "GRIFFIN  MODULAR 2";
+          const int bay = std::clamp(GetParam(_TP(kTubeModBay))->Int(), 0, 1);
+          for (int b = 0; b < 2; b++)
+            mv.module[b] = 1 + std::clamp(GetParam(_TP(ModBayParam(b)))->Int(), 0, tube::module::kNumModules - 2);
+          mv.playing = bay;
+          for (int k = 0; k < 3; k++) // The front panel's Bass, Middle, Treble: the playing bay's
+            mv.base.knob[1 + k] = GetParam(_TP(ModKnobParam(bay, tube::module::kKnobBass + k)))->GetNormalized();
+          const int n = mUiModuleStages.load(std::memory_order_relaxed);
+          for (int i = 0; i < tube::module::kMaxStages; i++)
+            mv.level[i] = i < n ? mUiModuleLevel[i].load(std::memory_order_relaxed) : 0.0;
+          return mv;
+        };
+        mcb.play = [this](int bay) {
+          const int param = _TP(kTubeModBay);
+          const double normalized = GetParam(param)->ToNormalized(bay);
+          BeginInformHostOfParamChangeFromUI(param);
+          SendParameterValueFromUI(param, normalized);
+          EndInformHostOfParamChangeFromUI(param);
+          if (auto* ui = GetUI())
+            ui->ForControlWithParam(param, [normalized](IControl* c) { c->SetValueFromDelegate(normalized); });
+        };
+        mChassisModScene = new NAMModularChassisControl(sceneR, cb, mcb);
+        page->AddChildControl(mChassisModScene);
+      }
 
       // The side column: what's selected and what it does, its controls, links to its pages, failing, the
       // power tubes.
@@ -3405,7 +3486,23 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
          "and drives this power amp."},
         {"SPEAKER JACK", "The power amp out to the speaker: on to the CAB / CAB LAB in your chain."},
         {"FRONT PANEL", "The knobs you'd reach for: Drive, Bass, Middle, Treble, Master, Presence. They show the Tube "
-                        "Lab's settings; set them here (Drive, Master) or on the PREAMP and POWER AMP tabs."}};
+                        "Lab's settings; set them here (Drive, Master) or on the PREAMP and POWER AMP tabs."},
+        {"", ""}, // The bays: see bayInfo
+        {"", ""}};
+      auto bayInfo = [this](int bay) {
+        const tube::module::ModuleDef& d =
+          tube::module::GetModule(1 + std::clamp(GetParam(_TP(ModBayParam(bay)))->Int(), 0, tube::module::kNumModules - 2));
+        const bool playing = GetParam(_TP(kTubeModBay))->Int() == bay;
+        char title[64];
+        snprintf(title, sizeof(title), "BAY %c  %s%s", 'A' + bay, d.name, playing ? "  (PLAYING)" : "");
+        char power[160];
+        snprintf(power, sizeof(power), " Its power amp: %s %s, feedback %.0f, presence %.0f.", d.power.quad ? "four" : "two",
+                 d.power.Name(), 10.0 * d.power.feedback, 10.0 * d.power.presence);
+        std::string text = std::string(d.description) + " " + std::to_string(d.numStages) + " gain stages." + power;
+        text += playing ? " Plugging in another module sets its power amp too; Drive is the guitar's level into it."
+                        : " Double-click its card (or set Playing) to play this bay.";
+        return std::make_pair(std::string(title), text);
+      };
       auto socketInfo = [this](int k) {
         static const char* roles[tube::kNumSocketRoles] = {
           "An empty socket. Give it a job: GAIN (another gain stage after the one before it), FOLLOWER (a cathode "
@@ -3444,10 +3541,12 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         return std::make_pair(std::string(title), text);
       };
       const float textH = std::max(96.f, side.H() * 0.29f);
-      page->AddChildControl(new NAMDynamicTextControl(side.GetFromTop(textH), [this, socketInfo]() {
+      page->AddChildControl(new NAMDynamicTextControl(side.GetFromTop(textH), [this, socketInfo, bayInfo]() {
         const int item = std::clamp(mChassisSelected, 0, (int)kNumItems - 1);
         if (IsSocket(item))
           return socketInfo(item - kSocket5);
+        if (IsBay(item))
+          return bayInfo(item - kBayA);
         return std::make_pair(std::string(kInfo[item].title), std::string(kInfo[item].text));
       }));
       // The selected item's fields: rows of 22 px under the text (each control shown only while its item is
@@ -3521,6 +3620,35 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         field(item, row(4).GetFromLeft(row(4).W() * 0.5f - 3.f), SocketParam(k, kSockCouple), "Couple", Mode::Stepper)
           ->SetTooltip("The coupling cap into it: small keeps a lot of gain tight, big passes the full low end.");
       }
+      // 1.72.0: a bay: its module, which bay plays, its knobs.
+      for (int bay = 0; bay < 2; bay++)
+      {
+        const int item = kBayA + bay;
+        field(item, row(0), ModBayParam(bay), "Module", Mode::Dropdown)
+          ->SetTooltip("The preamp module in this bay. Plugging one in sets this bay's knobs to it and, if it's the "
+                       "bay playing, the power amp to its amp's (tubes, feedback, presence, master, sag).");
+        field(item, row(1), kTubeModBay, "Playing", Mode::Segments)
+          ->SetTooltip("The bay the guitar plays through. Flipping bays swaps the preamp and the power tubes to "
+                       "that module's; feedback, presence and master stay as you set them.");
+        field(item, row(2).GetFromLeft(row(2).W() * 0.5f - 3.f), ModKnobParam(bay, tube::module::kKnobGain), "Gain",
+              Mode::Drag)
+          ->SetTooltip("The module's gain (or volume) pot: its real place in the circuit, with its bright cap.");
+        field(item, row(2).GetFromRight(row(2).W() * 0.5f - 3.f), ModKnobParam(bay, tube::module::kKnobGain2), "Gain 2",
+              Mode::Drag)
+          ->SetTooltip("Its second gain pot (lead drive, lead, or the tweed's second volume, which interacts with the first: all the way down, it mutes the amp): only the modules that have one.");
+        field(item, row(3).GetFromLeft(row(3).W() * 0.5f - 3.f), ModKnobParam(bay, tube::module::kKnobBass), "Bass",
+              Mode::Drag);
+        field(item, row(3).GetFromRight(row(3).W() * 0.5f - 3.f), ModKnobParam(bay, tube::module::kKnobMid), "Mid",
+              Mode::Drag);
+        field(item, row(4).GetFromLeft(row(4).W() * 0.5f - 3.f), ModKnobParam(bay, tube::module::kKnobTreble), "Treble",
+              Mode::Drag);
+        field(item, row(4).GetFromRight(row(4).W() * 0.5f - 3.f), kTubeDrive, "Drive", Mode::Drag)
+          ->SetTooltip("The guitar's level into the module's input jack (the Tube Lab's Drive).");
+      }
+      page->AddChildControl(new NAMLabFieldControl(sideAll.GetFromTop(24.f), kTubeModChassis, "Chassis", Mode::Dropdown, gold))
+        ->SetTooltip("TUBE LAB: the Tube Lab's own preamp (V1, V2, the sockets, the follower). MODULAR: two bays of "
+                     "preamp modules, each a real amp's preamp circuit; the playing bay is the preamp. The power amp, "
+                     "the bench and FEEL are the same on both.");
       // The selected item's links to its pages, then failing and the power tubes.
       const IRECT linksRow = row(5).GetTranslated(0.f, 2.f);
       page->AddChildControl(new NAMChassisLinksControl(
@@ -3538,6 +3666,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           const tube::TubeParams tp = _ReadTubeParams(mUiLab);
           r.powerAmp = tp.circuit && tp.powerAmp;
           r.sixL6 = tp.sixL6;
+          r.powerName = tp.PowerName();
           r.canFail = tp.canFail;
           r.quad = tp.quad;
           for (int k = 0; k < 4; k++)
@@ -4301,6 +4430,28 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
           report();
           return labChannels;
         }
+        if (params.ModuleOn() && numChannels > 1)
+        {
+          // 1.72.0: a preamp module is mono, as an amp (and the AMP block) is: the channels' average into
+          // one stage, its output to both. (Two would double the cost of its six stages for the same sound
+          // from a guitar.)
+          if (mCapIn.size() < numFrames)
+          {
+            mCapIn.resize(numFrames);
+            mCapOut.resize(numFrames);
+          }
+          for (size_t s = 0; s < numFrames; s++)
+            mCapIn[s] = 0.5 * (in[0][s] + in[1][s]);
+          sample* mono[1] = {mCapIn.data()};
+          stages[0].SetParams(params);
+          stages[0].SetWearMaster(true);
+          stages[0].SetUiWanted(chassis);
+          labChannels[0] = stages[0].Process(mono, 1, numFrames)[0];
+          labChannels[1] = labChannels[0];
+          stages[1].SetParams(params); // (Kept in step, so leaving the module finds it ready)
+          stages[1].SyncTubesFrom(stages[0]);
+        }
+        else
         for (size_t c = 0; c < numChannels && c < 2; c++)
         {
           sample* channel[1] = {in[c]};
@@ -4313,8 +4464,13 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         }
         report();
         if (chassis)
+        {
           for (int i = 0; i < tube::TubeStage::kNumStageLevels; i++)
             mUiStageLevel[i].store((float)stages[0].StageLevel(i), std::memory_order_relaxed);
+          mUiModuleStages.store(stages[0].ModuleStages(), std::memory_order_relaxed);
+          for (int i = 0; i < tube::module::kMaxStages; i++)
+            mUiModuleLevel[i].store((float)stages[0].ModuleStageLevel(i), std::memory_order_relaxed);
+        }
         return labChannels;
       }
       case kCabLabPedalIdx:
@@ -5335,6 +5491,7 @@ void NeuralAmpModeler::OnIdle()
 #endif
 
   _ApplyMidiMappings();
+  _ApplyWindowResolution();
 
   mInputSender.TransmitData(*this);
   mOutputSender.TransmitData(*this);
@@ -5549,6 +5706,11 @@ void NeuralAmpModeler::_LoadUiPrefs()
       mOutEqView.analyzer = value != 0;
     else if (key == "tube_probes_always")
       mTubeProbesAlways = value != 0;
+    else if (key == "fps")
+      mUiFps = value == 60 ? 60 : 30;
+    else if (key == "window_resolution")
+      mPendingWindowResolution = mWindowResolution =
+        value >= 0 && value < NAMDisplaySettingsControl::kNumResolutions ? value : -1;
     else if (key == "float_x")
       mSpecFloatRect.L = (float)value;
     else if (key == "float_y")
@@ -5573,7 +5735,79 @@ void NeuralAmpModeler::_SaveUiPrefs() const
     << "\nfloat_x=" << (int)mSpecFloatRect.L << "\nfloat_y=" << (int)mSpecFloatRect.T
     << "\nfloat_w=" << (int)mSpecFloatRect.W() << "\nfloat_h=" << (int)mSpecFloatRect.H()
     << "\npro_eq_analyzer=" << (mProEqView.analyzer ? 1 : 0) << "\nout_eq_analyzer=" << (mOutEqView.analyzer ? 1 : 0)
-    << "\ntube_probes_always=" << (mTubeProbesAlways ? 1 : 0) << "\n";
+    << "\ntube_probes_always=" << (mTubeProbesAlways ? 1 : 0) << "\nfps=" << mUiFps
+    << "\nwindow_resolution=" << mWindowResolution << "\n";
+}
+
+// Settings > Display (1.74.0).
+void NeuralAmpModeler::_SetFrameRate(int fps)
+{
+  mUiFps = fps == 60 ? 60 : 30;
+  if (auto* pGraphics = GetUI())
+    pGraphics->SetFPS(mUiFps);
+  _SaveUiPrefs();
+}
+
+void NeuralAmpModeler::_ApplyWindowResolution()
+{
+#if defined(APP_API) && defined(OS_WIN)
+  const int index = mPendingWindowResolution;
+  auto* pGraphics = GetUI();
+  if (index < 0 || !pGraphics || !pGraphics->GetWindow())
+    return;
+  mPendingWindowResolution = -1;
+  mWindowResolution = index;
+  _SaveUiPrefs();
+  HWND root = GetAncestor((HWND)pGraphics->GetWindow(), GA_ROOT);
+  if (IsZoomed(root))
+    ShowWindow(root, SW_RESTORE);
+  // A resize rebuilds the UI; put Settings back up, as a theme change does.
+  mReopenSettingsAfterRelayout = mReopenSettingsAfterResize;
+  mReopenSettingsAfterResize = false;
+  const auto& r = NAMDisplaySettingsControl::kResolutions[index];
+  const float scale = (float)r.w / (PLUG_WIDTH * pGraphics->GetScreenScale());
+  if (auto* pHost = IPlugAPPHost::sInstance.get())
+    pHost->SetWindowDrawScale(scale); // before the resize: the window's limits move with the zoom
+  pGraphics->Resize(PLUG_WIDTH, PLUG_HEIGHT, scale, true);
+#endif
+}
+
+int NeuralAmpModeler::_WindowResolutionShown()
+{
+#if defined(APP_API) && defined(OS_WIN)
+  auto* pGraphics = GetUI();
+  RECT client;
+  if (pGraphics && pGraphics->GetWindow() && GetClientRect((HWND)pGraphics->GetWindow(), &client))
+    for (int i = 0; i < NAMDisplaySettingsControl::kNumResolutions; i++)
+    {
+      const auto& r = NAMDisplaySettingsControl::kResolutions[i];
+      if (std::abs(client.right - r.w) <= 3 && std::abs(client.bottom - r.h) <= 3)
+        return i;
+    }
+#endif
+  return -1;
+}
+
+bool NeuralAmpModeler::_WindowResolutionFits(int index)
+{
+#if defined(APP_API) && defined(OS_WIN)
+  auto* pGraphics = GetUI();
+  if (!pGraphics || !pGraphics->GetWindow())
+    return false;
+  HWND root = GetAncestor((HWND)pGraphics->GetWindow(), GA_ROOT);
+  MONITORINFO info;
+  info.cbSize = sizeof(info);
+  RECT outer, inner;
+  if (!GetMonitorInfo(MonitorFromWindow(root, MONITOR_DEFAULTTONEAREST), &info) || !GetWindowRect(root, &outer)
+      || !GetClientRect(root, &inner))
+    return false;
+  // The title bar, menu and borders stay the size they are now.
+  const int chromeW = (outer.right - outer.left) - inner.right, chromeH = (outer.bottom - outer.top) - inner.bottom;
+  const auto& r = NAMDisplaySettingsControl::kResolutions[index];
+  return r.w + chromeW <= info.rcWork.right - info.rcWork.left && r.h + chromeH <= info.rcWork.bottom - info.rcWork.top;
+#else
+  return false;
+#endif
 }
 
 // Both rebuild the UI on the next OnIdle tick (they're called from inside a control's click).
@@ -6180,6 +6414,17 @@ void NeuralAmpModeler::OnParamChangeUI(int paramIdx, EParamSource source)
     }
     if (paramIdx == kTempoBPM && source == EParamSource::kUI)
       mTempoPushPending = true;
+    // 1.72.0: a module plugged into a bay brings its knobs' defaults and, playing, its amp's power amp; a
+    // bay flip or the chassis switched to MODULAR brings the playing module's power tubes.
+    if (source == EParamSource::kUI || source == EParamSource::kDelegate)
+    {
+      const int lab = Lab2Base(paramIdx) >= 0 ? 1 : 0;
+      const int base = lab == 1 ? Lab2Base(paramIdx) : paramIdx;
+      if (base == kTubeModA || base == kTubeModB)
+        _ApplyModuleToBay(lab, base == kTubeModA ? 0 : 1, true);
+      else if (base == kTubeModBay || base == kTubeModChassis)
+        _ApplyModuleToBay(lab, GetParam(LabParam(lab, kTubeModBay))->Int(), false);
+    }
     switch (which)
     {
       case kNoiseGateActive: pGraphics->GetControlWithParamIdx(kNoiseGateThreshold)->SetDisabled(!active); break;
@@ -7474,6 +7719,8 @@ void NeuralAmpModeler::_ResetChainGridParams()
     GetParam(p)->Set(GetParam(p)->GetDefault());
   for (int p = kTempoParamsFirst; p <= kTempoParamsLast; p++) // 1.71.0: nor tap tempo
     GetParam(p)->Set(GetParam(p)->GetDefault());
+  for (int p = kTubeModFirst; p <= kLab2ModLast; p++) // 1.72.0: nor the MODULAR chassis (the Tube Lab's own)
+    GetParam(p)->Set(GetParam(p)->GetDefault());
   GetParam(kCabLab3D)->Set(0.0);
   for (int b = 0; b < chaingrid::kNumIds; b++)
   {
@@ -7575,6 +7822,53 @@ void NeuralAmpModeler::_PrepareGridBuffers(const size_t numFrames)
       mExtraCabMono[k].resize(numFrames);
 }
 
+void NeuralAmpModeler::_ApplyModuleToBay(int lab, int bay, bool full)
+{
+  IGraphics* pGraphics = GetUI();
+  auto send = [this, pGraphics, lab](int baseParam, double value) {
+    const int param = LabParam(lab, baseParam);
+    const double normalized = GetParam(param)->ToNormalized(value);
+    if (GetParam(param)->GetNormalized() == normalized)
+      return;
+    BeginInformHostOfParamChangeFromUI(param);
+    SendParameterValueFromUI(param, normalized);
+    EndInformHostOfParamChangeFromUI(param);
+    if (pGraphics)
+      pGraphics->ForControlWithParam(param, [normalized](IControl* c) { c->SetValueFromDelegate(normalized); });
+  };
+  bay = std::clamp(bay, 0, 1);
+  const tube::module::ModuleDef& def =
+    tube::module::GetModule(1 + std::clamp(GetParam(LabParam(lab, ModBayParam(bay)))->Int(), 0,
+                                           tube::module::kNumModules - 2));
+  if (full)
+    for (int k = 0; k < tube::module::kNumKnobs; k++)
+      send(ModKnobParam(bay, k), 10.0 * def.knobDefault[k]);
+  const bool playing = GetParam(LabParam(lab, kTubeModChassis))->Int() == 1
+                       && GetParam(LabParam(lab, kTubeModBay))->Int() == bay;
+  if (playing)
+  {
+    // A module is a circuit-engine preamp, in place of the capture, into a power amp.
+    send(kTubeCircuit, 1.0);
+    send(kTubeCapture, 0.0);
+    send(kTubePower, 1.0);
+    send(kTube6L6, def.power.sixL6 ? 1.0 : 0.0);
+    send(kTubeQuad, def.power.quad ? 1.0 : 0.0);
+    if (full)
+    {
+      send(kTubeFeedback, 10.0 * def.power.feedback);
+      send(kTubePresence, 10.0 * def.power.presence);
+      send(kTubeMaster, 10.0 * def.power.master);
+      send(kTubePowerSag, 10.0 * def.power.sag);
+    }
+  }
+  mChassisSignature = -1.0;
+  if (pGraphics)
+  {
+    _RefreshTubeLabControls(pGraphics);
+    pGraphics->SetAllControlsDirty();
+  }
+}
+
 void NeuralAmpModeler::_ApplyTubePreset(int index)
 {
   if (index < 0 || index >= kNumTubePresets)
@@ -7599,6 +7893,8 @@ void NeuralAmpModeler::_ApplyTubePreset(int index)
   // isn't the sound it was voiced as.
   for (int param : kTubeBenchParams)
     send(param, GetParam(param)->GetDefault());
+  // 1.72.0: on the Tube Lab chassis (they're its preamp's settings), the bays left as they are.
+  send(kTubeModChassis, 0.0);
   // 1.68.0: and with the chassis sockets empty, on a pair of power tubes.
   for (int k = 0; k < tube::kNumSockets; k++)
     send(SocketParam(k, kSockRole), tube::kSocketOff);
@@ -8250,6 +8546,17 @@ tube::TubeParams NeuralAmpModeler::_ReadTubeParams(int lab) const
     s.plateCapPF = kTubePlateCapPF[std::clamp(get(kSockPlateCap)->Int(), 0, 5)];
     s.coupleNF = kTubeCoupleNF[std::clamp(get(kSockCouple)->Int(), 0, 5)];
   }
+  // 1.72.0: on the MODULAR chassis, the playing bay's module is the preamp (TubeParams::ModuleOn).
+  if (GetParam(LabParam(lab, kTubeModChassis))->Int() == 1)
+  {
+    const int bay = std::clamp(GetParam(LabParam(lab, kTubeModBay))->Int(), 0, 1);
+    params.module = 1 + std::clamp(GetParam(LabParam(lab, ModBayParam(bay)))->Int(), 0, tube::module::kNumModules - 2);
+    for (int k = 0; k < tube::module::kNumKnobs; k++)
+      params.moduleKnobs[k] = GetParam(LabParam(lab, ModKnobParam(bay, k)))->Value() / 10.0;
+    // 1.75.0: tubes and iron that aren't on the Tube Lab's own switches come with the module, so saved
+    // sessions and the parameters don't change.
+    tube::module::GetModule(params.module).power.ApplyTo(params);
+  }
   return params;
 }
 
@@ -8454,16 +8761,70 @@ void NeuralAmpModeler::_UpdateChassis()
     mChassisSignature = -1.0;
     return;
   }
+  // 1.72.0: the TUBE LAB or the MODULAR chassis, as this lab is set; a selection that belongs to the other
+  // one moves to its counterpart (a bay, or V1).
+  const int modular = GetParam(_TP(kTubeModChassis))->Int() == 1 ? 1 : 0;
+  // (Checked every tick: opening the page shows all its children.)
+  if (mChassisTubeScene && mChassisModScene
+      && (mChassisTubeScene->IsHidden() != (modular == 1) || mChassisModScene->IsHidden() != (modular == 0)))
+  {
+    mChassisTubeScene->Hide(modular == 1);
+    mChassisModScene->Hide(modular == 0);
+    mChassisSignature = -1.0;
+  }
+  {
+    using namespace chassis;
+    const bool tubeLabOnly = IsPart(mChassisSelected) || IsSocket(mChassisSelected) || mChassisSelected == kTubeV1
+                             || mChassisSelected == kTubeV2 || mChassisSelected == kTubeV3;
+    if (modular && tubeLabOnly)
+      mChassisSelected = kBayA + std::clamp(GetParam(_TP(kTubeModBay))->Int(), 0, 1);
+    else if (!modular && IsBay(mChassisSelected))
+      mChassisSelected = kTubeV1;
+  }
   for (auto& [item, control] : mChassisFields)
+  {
     if (control->IsHidden() != (item != mChassisSelected))
       control->Hide(item != mChassisSelected);
+    // A knob its module doesn't have (a second gain pot, or Mid on a two-knob stack) is greyed out.
+    if (chassis::IsBay(item))
+    {
+      const int bay = item - chassis::kBayA;
+      const int id = 1 + std::clamp(GetParam(_TP(ModBayParam(bay)))->Int(), 0, tube::module::kNumModules - 2);
+      for (int k = 0; k < tube::module::kNumKnobs; k++)
+        if (control->GetParamIdx() == _TP(ModKnobParam(bay, k)))
+        {
+          const bool none = !tube::module::GetModule(id).UsesKnob(k);
+          if (control->IsDisabled() != none)
+            control->SetDisabled(none);
+        }
+    }
+    // 1.75.0: a module's 6V6s or EL84s: the EL34 / 6L6 switch has nothing to switch.
+    if (control->GetParamIdx() == _TP(kTube6L6))
+    {
+      const int bay = std::clamp(GetParam(_TP(kTubeModBay))->Int(), 0, 1);
+      const int id = 1 + std::clamp(GetParam(_TP(ModBayParam(bay)))->Int(), 0, tube::module::kNumModules - 2);
+      const bool fixedTubes = modular && tube::module::GetModule(id).power.tube != tube::kPowerStock;
+      if (control->IsDisabled() != fixedTubes)
+        control->SetDisabled(fixedTubes);
+    }
+  }
   const auto now = std::chrono::steady_clock::now();
   if (now - mChassisLastDraw < std::chrono::milliseconds(40))
     return;
-  // A signature of everything drawn: glow levels (to ~1 dB), the params, the power tubes.
-  double sig = mChassisSelected;
+  const bool swapping = modular && mChassisModScene && static_cast<NAMModularChassisControl*>(mChassisModScene)->Animating();
+  // 1.74.0: the 3D scene is by far the dearest thing the UI draws, and comparing the glow to 1 dB
+  // redrew all of it at 25 fps for a noise floor nobody can see. The glow now counts in 3 dB steps,
+  // nothing below -60 dB, and redraws at 10 fps; what you change yourself still shows at once.
+  const auto glowStep = [](float level) {
+    return std::round(std::max(-60.0, 20.0 * std::log10(std::max(1e-6f, level))) / 3.0);
+  };
+  double glow = 0.0;
   for (int i = 0; i < tube::TubeStage::kNumStageLevels; i++)
-    sig = sig * 1.3 + std::round(20.0 * std::log10(std::max(1e-6f, mUiStageLevel[i].load())));
+    glow = glow * 1.3 + glowStep(mUiStageLevel[i].load());
+  for (int i = 0; i < tube::module::kMaxStages; i++)
+    glow = glow * 1.2 + glowStep(mUiModuleLevel[i].load());
+  // A signature of everything else drawn: the params, the power tubes.
+  double sig = mChassisSelected;
   for (int p : {kTubeVariac, kTubeBloom, kTubeBias, kTubeCathodeCap, kTubePlate, kTubePlateCap, kTubeCouple, kTubeGain2,
                 kTubeBias2, kTubeCap2, kTubePlateCap2, kTubeStage2, kTubeCathodeFollower, kTubePower, kTubeCircuit,
                 kTubeCanFail, kTube6L6, kTubeEngaged, kTubeCapture, kTubeDrive, kTubeBass, kTubeMid, kTubeTreble,
@@ -8471,12 +8832,16 @@ void NeuralAmpModeler::_UpdateChassis()
     sig = sig * 1.1 + GetParam(_TP(p))->Value();
   for (int p = kTubeChassisFirst; p <= kTubeChassisLast; p++) // 1.68.0: the sockets, the quad
     sig = sig * 1.05 + GetParam(_TP(p))->Value();
+  for (int p = kTubeModFirst; p <= kTubeModLast; p++) // 1.72.0: the bays
+    sig = sig * 1.03 + GetParam(_TP(p))->Value();
   for (int k = 0; k < 4; k++)
     sig = sig * 1.7 + std::round(100.0 * mUiPowerLife[k].load()) + (mUiPowerDead[k].load() ? 1000.0 : 0.0)
           + std::round(100.0 * mUiDissRatio[k].load());
-  if (sig == mChassisSignature)
+  const bool glowDue = glow != mChassisGlow && now - mChassisLastDraw >= std::chrono::milliseconds(100);
+  if (sig == mChassisSignature && !swapping && !glowDue)
     return;
   mChassisSignature = sig;
+  mChassisGlow = glow;
   mChassisLastDraw = now;
   for (int i = 0; i < page->NChildren(); i++)
   {

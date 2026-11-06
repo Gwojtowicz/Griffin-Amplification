@@ -8,6 +8,101 @@ that gets used, and add an entry here.
 - **Minor** (1.8.0): new features.
 - **Patch** (1.8.1): fixes only.
 
+## 1.75.0 (2026-11-05)
+
+- **Four low-gain modules for the MODULAR chassis**, each built stage by stage from its schematic, like the
+  first ten:
+  - **US CLEAN:** a mid-60s American 22 W reverb combo, its normal channel, with the tone stack before the
+    volume. Stays clean to about 5 on the Volume at a hot Drive and starts to break up at 7. Bass and
+    Treble; 6V6s.
+  - **US TWEED:** a 50s American 12 W combo. One Tone knob and two volumes wired to the same grid, so they
+    interact: **Gain 2 all the way down mutes the amp**, as it does on the real one. Early, furry breakup;
+    a 12AY7 first stage, 6V6s on cathode bias, no feedback.
+  - **US 4X10:** a late-50s American 40 W tweed bass amp, its bright channel: a cathode follower into a
+    three-knob stack, and the circuit the BRIT 45 came from. Big and clean to about 5, fat after that.
+  - **BRIT CHIME:** a British 30 W top-boost combo: a two-knob stack driven by a follower, four EL84s on
+    cathode bias, no feedback. Bright, and on the edge of breakup from about 3.
+- **New tubes that come with those modules:** 6V6 and EL84 power tubes, checked against their datasheets,
+  and the 12AY7. A module can also bring its amp's own plate supply and output transformer load. While one
+  of these is playing, the chassis shows its tubes (6V6 and EL84 are smaller bottles) and the 6L6 switch is
+  greyed out, as are any knobs the module doesn't have. Older sessions, the first ten modules and the Tube
+  Lab sound exactly as they did.
+
+## 1.74.0 (2026-11-05)
+
+- **The whole window now runs at one frame rate, 30 fps by default.** On Windows the window was redrawn
+  from the display's refresh, so its frame-rate setting did nothing. The meters, the chassis, the
+  spectrum and the comp and gate meters each kept their own timing, out of step with one another, and
+  every repaint redraws the whole window, so together they added up to far more frames than any one of
+  them asked for. They all land on the same frames now.
+- **The Tube Lab chassis stops redrawing for noise.** The 3D scene is the heaviest thing in the UI, and it
+  was redrawn up to 25 times a second for level changes too small to see. Its glow now redraws at up to
+  10 fps, in 3 dB steps, and not at all below -60 dB. Knobs and the module swap still respond at once.
+- **Settings has tabs: AUDIO, DISPLAY and ABOUT.** AUDIO holds calibration, output mode and the buffer;
+  ABOUT holds the model information and the version.
+- **DISPLAY has Frame Rate and Resolution.** Frame Rate picks 30 or 60 fps. Resolution sets the
+  standalone window to 1260 x 700, 1620 x 900, 2160 x 1200, 2700 x 1500 or 3240 x 1800 pixels, and the
+  whole UI scales with it; sizes that don't fit the screen are greyed out. Fewer pixels use less
+  graphics power. Both are remembered. The theme and spectrum choices moved here too.
+- **Settings covers the whole window at any size.** On a window larger than its background art, the
+  main window showed through around the edges.
+
+## 1.73.1 (2026-11-05)
+
+- **The window goes back to using almost no graphics power when nothing is moving.** The BPM box
+  redrew every frame for its beat light, which kept the whole window repainting at 60 fps even in
+  silence. It now redraws only when the light turns on or off.
+- **The IN and OUT meters redraw at 30 fps instead of 60**, all on the same frames, which halves how
+  often the window repaints while there's signal. A meter that has seen any signal, even noise,
+  keeps repainting, so this is what sets the graphics load while you play.
+
+## 1.73.0 (2026-10-27)
+
+- **The Tube Lab looks like a rack-mount unit.** Its popup is a brushed faceplate with a rack ear down
+  each side (a screw slot per unit), split into three rack units with screws in their corners: the tabs,
+  then the switches and the transfer curve, then the page.
+- **The tabs are at the top, all the same width:** PREAMP, POWER AMP, FEEL and CHASSIS (CHASSIS was a
+  smaller button at the end of the bar; it still opens the chassis page). They're rack buttons in a
+  recessed well: the page that's showing is pressed in, with its LED lit. They follow the colour theme
+  and light mode.
+
+## 1.72.0 (2026-10-27)
+
+- **MODULAR chassis: swappable preamp modules.** The Tube Lab's chassis page has a **Chassis** dropdown
+  at the top of its side column: **TUBE LAB** is the chassis as it was (V1, V2, the sockets, the
+  follower); **MODULAR** is a new 3D chassis with the same power section, Variac and camera, where the
+  preamp is a card plugged into one of two **bays**, A and B, like a memory stick in its slot.
+  - **Ten modules**, each a real preamp circuit built stage by stage from its schematic (every plate and
+    cathode resistor, bypass cap, coupling cap, divider, bright cap, grid stopper, cathode follower and
+    tone stack, at its supply voltage): **BRIT 45** (vintage 45 W, no master), **BRIT 100** (late-60s
+    100 W lead, bright channel), **BRIT MV** (80s master-volume lead with the cold-clipper stage),
+    **BRIT 90** (90s lead, four stages, two gain controls), **BRIT ULTRA** (late-90s lead, plate-driven
+    stack), **HG SIX** (early-90s high gain, six cascaded stages), **CAL CASCADE** and **CAL CASCADE 2**
+    (cascading leads with the tone stack right after the first tube), **CAL MODERN** and **CAL VINTAGE**
+    (mid-90s modern high gain, its two modes). Where a schematic marks its tubes' voltages, the module's
+    resting voltages land within a few volts of them.
+  - **Pick a module** from a bay's dropdown (click its card on the chassis): its knobs go to the module's
+    defaults and, if that bay is playing, the power amp is set to its amp's: EL34s or 6L6s, pair or quad,
+    feedback, presence, master and sag. **Playing** (or double-clicking a card) flips between the bays:
+    the preamp and the power tubes swap, feedback, presence and master stay as you set them.
+  - Each bay has its own **Gain**, **Gain 2** (the modules with a second gain pot), **Bass**, **Mid** and
+    **Treble**: the module's real pots, where its circuit has them. **Drive** is the guitar's level into
+    the module; as with the Tube Lab's own preamp, half of Drive's dB is made up after it.
+  - Swapping a module or flipping bays crossfades (no click); on the chassis the old card lifts out of its
+    slot and the new one drops in. The playing card's tubes glow with their own stages' signal.
+  - **Levels**: every module, at its default knobs and with its own power amp, is matched within 0.2 dB
+    of the Tube Lab's own preamp on the same settings.
+  - **CPU and quality**: modules run at the Tube Lab's oversampling; the high-gain ones (BRIT 90, HG SIX,
+    the two CASCADEs, CAL MODERN) at the higher rate it uses for two stages, the rest at the normal
+    rate, where they alias as little as one Tube Lab stage. Through the whole plugin on a test rig, the
+    six-stage modules cost about 1.4x the Tube Lab with Stage 2 on; **Economy** halves that.
+  - TUBE LAB 2 has its own chassis setting and bays. Tube Lab presets set the chassis back to TUBE LAB
+    (they're its preamp's settings) and leave the bays alone. Sessions and presets from before 1.72.0
+    load on the TUBE LAB chassis and sound exactly as before (checked bit for bit).
+  - New engine: ModuleCircuit.h (each stage's netlist solved per sample with the triode's three nodes,
+    the linear network eliminated once per knob move), PreampModules.h (the circuits),
+    ModularChassisControls.h (the scene). The side panel's fields gained a dropdown mode.
+
 ## 1.71.1 (2026-10-23)
 
 - **The title fits again.** 1.71.0's TAP button and BPM counter narrowed the space for the title, and

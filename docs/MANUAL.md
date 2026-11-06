@@ -20,8 +20,13 @@ The two **LABS** have their own section in the AMP NEST, apart from the pedals:
   **4 Tubes** makes the power amp a quad. It also has a bench (a Variac, a power-tube bias pot, tube
   age), power tubes that red-plate and fail, and **AMP Capture**, which runs the AMP block's capture
   as the Tube Lab's preamp so all of its power amp and physics work on any capture.
+  Its **Chassis** dropdown switches to the **MODULAR** chassis (1.72.0): two bays of plug-in preamp
+  **modules**, each a whole amp's preamp simulated stage by stage from its schematic, swapped in like
+  memory sticks.
 
 ![The Tube Lab's chassis in 3D](images/tube-lab-chassis.png)
+
+![The MODULAR chassis: two bays of preamp modules](images/tube-lab-modular-chassis.png)
 - **CAB LAB** has the **SPEAKER LAB**: 4x12, 2x12, 1x12 or 4x10 cabs, one or two at once, and up to
   four mics placed in X, Y and Z, each hearing every cone with its real delay and angle.
 
@@ -55,7 +60,9 @@ describes every version, with measurements.
   - [Levels](#levels)
   - [The Classic engine](#the-classic-engine)
   - [Debug page: seeing what the circuit does](#debug-page-seeing-what-the-circuit-does)
+  - [The panel: tabs and rack (1.73.0)](#the-panel-tabs-and-rack-1730)
   - [The chassis: the amp in 3D, sockets and a quad](#the-chassis-the-amp-in-3d-sockets-and-a-quad-1620-3d-1680)
+  - [The MODULAR chassis: preamp modules (1.72.0)](#the-modular-chassis-preamp-modules-1720)
 - [EQ and live spectrum](#eq-and-live-spectrum-1460)
 - [Themes](#themes-1480)
 - [Audio buffer and your interface](#audio-buffer-and-your-interface-1510)
@@ -446,7 +453,7 @@ It's a behavioural model (`RealFeel.h`), driven by the finished amp signal rathe
   pedal adds no delay, so the two line up. Shared B+'s turn-down of the AMP block's input is scaled
   the same way. At 100% the output is exactly the pedal's.
 
-On the user's chain (Tube Lab > AMP (5150 capture) > REAL FEEL > CAB > reverbs), at their playing
+On a typical chain (Tube Lab > AMP (5150 capture) > REAL FEEL > CAB > reverbs), at a normal playing
 level, a hard chord's pick drops by:
 
 | Depth | Squish | Coil Heat | All four | OT Iron (low end, held chord) |
@@ -511,13 +518,13 @@ Tube Lab's wet signal (A = Amount/10):
   so the switch lands on the untouched signal without a step.
 
 1.39.0's version only multiplied the gain by `1 + 0.16·A·(0.25 + 0.75·load)·r` (±8% at most),
-which changed the user's chain by -33 dB at Amount 5. The grind changes it by -19 dB (-11 at 10),
+which changed a typical chain by -33 dB at Amount 5. The grind changes it by -19 dB (-11 at 10),
 and loudness stays within 1 dB.
 
 This is a behavioural model, not a supply simulation. The ripple acts after the tubes, not inside
 the circuit. It works in both engines, with or without the power amp. It stays in the Tube Lab even
 with the REAL FEEL pedal placed. On/off and Amount glide over 20 ms; off is bit-identical.
-Presets turn it off. Everything after the Tube Lab amplifies the hum too: in the user's chain (Twin
+Presets turn it off. Everything after the Tube Lab amplifies the hum too: in a typical chain (Twin
 capture, Master Out) it's about 14 dB louder at the output. The AMP's gate shuts it off between notes.
 
 The **Hum Filter** switch (AMP popup, under Bass) does the opposite, for real hum on the guitar
@@ -566,7 +573,7 @@ stack.
 - **What it does:** class AB rectifies, so dig in and the pair's average current rises, the cathode
   rises, and the tubes bias colder. On a hard burst at Master 8 the cathode went 41 → 47 V, and the
   amp came out of the burst ~1 dB quieter than with fixed bias, recovering over ~50 ms. At low Master
-  (the user's 2) the tubes stay in class A and nothing moves (-55 dB difference), as on a real amp.
+  (2 here) the tubes stay in class A and nothing moves (-55 dB difference), as on a real amp.
 
 **Spkr FB: feedback from the speaker side** (`PowerAmp.h`). Real amps take the negative feedback
 from the output transformer's secondary. Before this, the loop here ended at the plates, and the
@@ -840,7 +847,7 @@ what 24-bit audio can hold. It now matches it to -157..-179 dB.
   on takes effect 50 ms later; switching off is instant, as before.
 
 Tube Lab alone, test settings, 48 kHz: 13.4% → 8.6% of a core when on, 8.6% → 0.07% when off. In the
-whole plugin on the user's chain at a 128-sample buffer: 33.7% → 19.7% as saved (Tube Lab
+whole plugin on a typical chain at a 128-sample buffer: 33.7% → 19.7% as saved (Tube Lab
 footswitched off), and 34.1% → ~28.5% with it on.
 
 A thing that measured worse and was not kept: cubic-Hermite tables (1024 points, interleaved value
@@ -930,10 +937,26 @@ How it measures:
   6% of the Tube Lab's CPU and changes nothing in the sound: the output is bit-for-bit identical with
   it on or off.
 
+### The panel: tabs and rack (1.73.0)
+
+The Tube Lab's popup is drawn as a rack-mount unit (`NAMRackPanelControl` in
+[`NeuralAmpModelerControls.h`](../NeuralAmpModeler/NeuralAmpModelerControls.h)): a brushed faceplate with a
+rack ear down each side, split into three rack units with a screw in each corner and a screw slot in the
+ears for each unit.
+- **Top unit, the tabs:** PREAMP, POWER AMP, FEEL and CHASSIS, all the same width. They're rack buttons
+  in a recessed well; the page that's showing is pressed in with its LED lit. CHASSIS opens the chassis
+  page rather than a page of the panel.
+- **Middle unit:** On, Circuit, AMP Capture, Spkr Load, Economy, 8x, PRESETS / DEBUG, and the transfer
+  curve.
+- **Bottom unit:** the open tab's page.
+
+It's drawn from the theme's colours, so it follows the colour theme and light mode, and it only redraws
+with the popup.
+
 ### The chassis: the amp in 3D, sockets and a quad (1.62.0, 3D 1.68.0)
 
 [`TubeChassisControls.h`](../NeuralAmpModeler/TubeChassisControls.h). It opens when you open TUBE LAB or
-TUBE LAB 2; its X shows the knobs underneath, and **CHASSIS** beside the tabs brings it back.
+TUBE LAB 2; its X shows the knobs underneath, and the **CHASSIS** tab brings it back.
 
 ![The chassis: V5 as a 12AT7 gain stage, V6 a follower, four power tubes](images/tube-lab-chassis.png)
 
@@ -1004,6 +1027,123 @@ TUBE LAB 2; its X shows the knobs underneath, and **CHASSIS** beside the tabs br
 **ALWAYS ON** (1.58.0, the debug page's bottom row) keeps the probes running with the page closed, so
 it opens with live readouts and scope history. Measured: about 3% more of a core the whole time
 (Tube Lab 18.7% → 21.9%). It asks before switching on. It's remembered in ui.ini.
+
+### The MODULAR chassis: preamp modules (1.72.0)
+
+Source files: [`ModuleCircuit.h`](../NeuralAmpModeler/ModuleCircuit.h) (the solver),
+[`PreampModules.h`](../NeuralAmpModeler/PreampModules.h) (the circuits) and
+[`ModularChassisControls.h`](../NeuralAmpModeler/ModularChassisControls.h) (the 3D page).
+
+The chassis page's **Chassis** dropdown (top of its side column) picks what the Tube Lab's preamp is:
+- **TUBE LAB:** its own preamp, as above (V1, V2, the sockets, the follower).
+- **MODULAR:** the same steel chassis, power section, Variac and camera, but in place of the turret board
+  and the preamp tubes, a backplane with two **bays**, A and B. Each holds a preamp **module**: a card
+  standing in its slot like a memory stick, its name and family colour on its face, a chip and a cap for
+  each stage, gold contacts in the slot, and its tubes along the top edge (one bottle per two triodes, as
+  twin triodes are). The bay that's **playing** glows: its tubes pulse with their own stages' signal, and
+  the signal wire runs from the input jack through its slot to the phase inverter. The other card sits
+  cold.
+
+![The MODULAR chassis: bay A (BRIT MV) playing, bay B (CAL MODERN) beside it, the bay's controls on the right](images/tube-lab-modular-chassis.png)
+
+**Using it:**
+- **Click a card** to set its bay in the side panel:
+  - **Module:** a dropdown of the ten modules.
+  - **Playing:** A or B.
+  - **Gain**, **Gain 2** (greyed out for modules without a second gain pot), **Bass**, **Mid** and **Treble**.
+  - **Drive.**
+- **Double-click a card** to make it the bay that plays.
+- **Picking a module** plugs it in: on the chassis the old card lifts out of its slot and the new one
+  drops in. Its knobs go to the module's defaults. If that bay is playing, the power amp is set to the
+  one on its amp's schematic: EL34s or 6L6s, a pair or a quad, feedback, presence, master and sag.
+- **Flipping bays** (Playing, a double-click, or a MIDI-mapped switch) swaps the preamp and the power
+  tubes (type, pair or quad). Feedback, presence and master stay as you set them.
+- **Switches crossfade:** module swaps and bay flips crossfade over 10 ms, from rest, so they don't click.
+  Measured on a strum: no more energy above 2 kHz at the switch than in the playing around it.
+- **Knobs** are the module's own pots, in their real place in the circuit: a gain pot with its bright cap
+  across it, a tone stack between two stages, and so on.
+- **Drive** is the guitar's level into the module's input jack. As with the Tube Lab's own preamp, half
+  of Drive's dB is made up after it.
+- **Everything else stays:** the power amp, the speaker load, the bench, Real Feel, 60 Hz and failing
+  tubes all work as they do on the TUBE LAB chassis.
+- **TUBE LAB 2** has its own chassis setting and bays.
+- **Tube Lab presets** set the chassis back to TUBE LAB (they're its preamp's settings) and leave the
+  bays alone.
+
+**The modules.** Each is a real preamp circuit at its schematic's part values, named for its family and
+era only:
+
+| Module | What it is | Stages | Power amp it brings |
+|---|---|---|---|
+| BRIT 45 | Vintage British 45 W, no master: two stages and a follower | 2 + follower | 2 x 6L6, tube-rectifier sag |
+| BRIT 100 | British 100 W lead, late 60s, the bright channel, no master | 2 + follower | 4 x EL34 |
+| BRIT MV | British master-volume lead, 80s, with the unbypassed 10k "cold clipper" stage | 3 + follower | 4 x EL34 |
+| BRIT 90 | British 90s lead: four stages, two gain controls | 4 + follower | 4 x EL34 |
+| BRIT ULTRA | British late-90s lead, the tone stack driven straight from a plate | 3 | 4 x EL34 |
+| HG SIX | American high gain, early 90s: six cascaded stages, a cold clipper, local feedback on the last | 6 | 4 x 6L6 |
+| CAL CASCADE | American cascading lead, early 80s: the tone stack right after the first tube, then five gain stages | 6 | 4 x 6L6 |
+| CAL CASCADE 2 | The 90s version: a tighter input stage, hotter lead stages | 6 | 2 x 6L6 |
+| CAL MODERN | American modern high gain, mid 90s, modern mode: no feedback | 4 + follower | 4 x 6L6 |
+| CAL VINTAGE | The same amp's vintage mode: looser input stages, a treble roll-off, feedback on | 4 + follower | 4 x 6L6 |
+| US CLEAN | Mid-60s American 22 W reverb combo, normal channel: the tone stack before the volume | 2 | 2 x 6V6 |
+| US TWEED | 50s American 12 W combo: one tone knob, two interacting volumes | 2 | 2 x 6V6, cathode bias, no feedback |
+| US 4X10 | Late-50s American 40 W tweed bass amp, bright channel: a follower into a three-knob stack | 2 + follower | 2 x 6L6, 430 V, a 2k load |
+| BRIT CHIME | British 30 W top-boost combo: a two-knob stack driven by a follower | 2 + follower | 4 x EL84, cathode bias, no feedback |
+
+Where a module's schematic sets parts with relays or pull switches, it's the channel and mode named
+above, switched as that mode switches them. Graphic EQs, reverb, effects loops and line outs aren't in
+the modules. A master volume after the tone stack is the power amp's Master. Where a schematic marks its
+tubes' resting voltages, a module's land within a few volts of them (one marks 200 / 280 / 384 V on
+three stages; the module rests at 207 / 283 / 390 V).
+
+**How a module is solved.** A module is a chain of triode stages, then an output network (usually the
+tone stack and what loads it). Each stage is a small circuit built from a netlist: the linear network
+from the previous plate to this grid (coupling caps, dividers, pots, bright caps, a tone stack, the grid
+stopper), the triode with its Miller capacitances, the cathode resistor and bypass cap (or any other
+cathode parts), and the plate resistor and plate cap to the stage's own B+.
+- **The triode** is the same Dempwolf model as the Tube Lab's, read from the same tables, with grid
+  current. So blocking on the coupling caps, and grid conduction limited by a divider's resistance, come
+  out of the solve.
+- **Caps** are trapezoidal companions, as everywhere in the Tube Lab.
+- **The linear nodes are eliminated** whenever a knob moves (a Schur complement onto G, K and P), so each
+  sample's Newton iterations solve only the tube's three nodes, as `TriodeStageCircuit` does. Every cap's
+  new voltage is then one row over the sources plus three terms in G, K and P.
+- **Newton** stops when a step moves G, K and P by under 10 mV. From the straight-line predictor that
+  takes about 1.1 iterations a sample, and the output stays within -82 dB (re its RMS) of a solve to
+  1e-7 V, for every module.
+- **Stages are chained** through a Thevenin source: the next stage is driven by this stage's output
+  swing through its small-signal output resistance. That resistance is computed at rest with the caps at
+  their 1 kHz conductance, so it includes an unbypassed cathode's local feedback. Each stage is solved in
+  turn rather than all at once, so the next network's loading on a plate is carried by that source
+  resistance.
+- **Cathode followers** are DC-coupled to their stage's plate, with the schematic's parts. A follower has
+  no memory, so its grid current, slope and cathode swing are tabulated once over the plate's whole
+  range, and read back inside each Newton step instead of a nested solve. The table is rebuilt when the
+  Variac moves the follower's rail by more than 0.2%.
+- **The Variac** scales every stage's B+.
+
+**Levels.** Each module's output trim is measured, not part of its circuit. At its default knobs, with
+its own power amp and a speaker load, every module comes out within 0.2 dB of the Tube Lab's own preamp
+on the same settings (a two-stage, hot setting at Drive 20 dB). So flipping bays doesn't jump in level.
+
+**Oversampling and CPU.** Modules run at the Tube Lab's oversampling, from the same filters, with the
+same latency:
+- **Higher rate** (8x at 44.1/48 kHz, the one it uses for two stages): the high-gain modules (BRIT 90,
+  HG SIX, both CASCADEs, CAL MODERN). At 4x, a high E aliased at -34 to -51 dB under its harmonics there;
+  at 8x, -44 to -62 dB.
+- **Normal rate:** the rest, which alias under -53 dB at 4x, as one Tube Lab stage does.
+
+The whole plugin at a 128-sample buffer on a test rig, against the Tube Lab with Stage 2 on (42%):
+
+| Module | Whole plugin |
+|---|---|
+| BRIT MV | 34% |
+| CAL MODERN | 51% |
+| HG SIX / CAL CASCADE | 60% |
+| CAL CASCADE with **Economy** | 42% |
+
+Economy halves the oversampling. A module swap (resetting six stages from rest) takes about 0.2 ms on
+the audio thread.
 
 ## EQ and live spectrum (1.46.0)
 
@@ -1415,7 +1555,7 @@ Open it with **OUTPUT** under Master Out, OUT on the grid, or a click on the OUT
   the grid. Drag one onto the grid (the drawer stays open), drag one off the grid to put it back, or
   click one for its settings.
 - **CAB** can leave the grid too since 1.61.1. It then waits in the drawer's first slot.
-- **CPU when off:** measured through the whole plugin on the user's chain, everything on is 7.8% of
+- **CPU when off:** measured through the whole plugin on a typical chain, everything on is 7.8% of
   a core, every block switched off 0.51%, an empty grid 0.41%. A switched-off block costs next to
   nothing.
 
@@ -1613,7 +1753,9 @@ params on load. After the capture-pedal paths come `###CabLabIRV1###` (CAB LAB's
 of the A/B slot that isn't live, then its model, cab IR and right-channel IR paths; `ABSlot` is
 the live one). The 1.66.0 pedals have grid ids 43-47 and their params are saved by name (`TrackGate*`,
 `DigiDelay*`, `AnalogDelay*`, `TapeEcho*`, `SpringVerb*`). Since 1.61.0 a section, `###CabLabIR2V1###`, holds CAB LAB cab 2's IR path, and since 1.67.0 a last one,
-`###TubeLab2CaptureV1###`, TUBE LAB 2's capture path. A
+`###TubeLab2CaptureV1###`, TUBE LAB 2's capture path. The MODULAR chassis (1.72.0) is saved by name too
+(`TubeModChassis`, `TubeModBay`, `TubeModA` / `TubeModB` and each bay's knobs, and TUBE LAB 2's `Lab2TubeMod*`
+copies); a state without them loads on the TUBE LAB chassis. A
 state without a section clears what it holds. The autosave is in
 `%LOCALAPPDATA%\GriffinAmplification\autosave.namstate`.
 

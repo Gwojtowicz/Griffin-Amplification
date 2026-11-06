@@ -1136,7 +1136,8 @@ public:
     // POWER TUBES: average current and dissipation per tube, with a bar against the rating.
     {
       const IRECT col = column(3);
-      g.DrawText(title, s.sixL6 ? "POWER TUBES (6L6)" : "POWER TUBES (EL34)", col);
+      const std::string powerTitle = std::string("POWER TUBES (") + s.powerName + ")";
+      g.DrawText(title, powerTitle.c_str(), col);
       if (!mPowerAmp || s.paSamples <= 0)
       {
         row(col, 0, "Power amp", "off");

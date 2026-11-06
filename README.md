@@ -8,34 +8,48 @@
 
 <p align="center">
   <a href="https://github.com/Gwojtowicz/Griffin-Amplification/releases/latest"><b>Download for Windows</b></a>
-  &nbsp;·&nbsp; <a href="#tube-lab-a-real-circuit-simulated">How it works</a>
+  &nbsp;·&nbsp; <a href="#the-math">The math</a>
   &nbsp;·&nbsp; <a href="docs/MANUAL.md">Manual</a>
 </p>
 
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-f2a541">
   <img alt="Platform: Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-5cc8ff">
-  <img alt="Version 1.57.0" src="https://img.shields.io/badge/version-1.57.0-c49bff">
+  <img alt="Version 1.75.0" src="https://img.shields.io/badge/version-1.75.0-c49bff">
 </p>
-
-Most amp sims are black boxes: you turn a knob and something changes. Griffin Amplification
-simulates the actual tube circuit, part by part, and **shows you what it's doing while you play**:
-the voltage on every tube, where it's clipping, and the waveform on an oscilloscope.
-
-- **See why it sounds the way it does.** Turn up the drive and watch the tube's grid start to clamp.
-  The knobs are real parts (bias, caps, plate resistor, power supply), and the debug page explains
-  what each setting is doing in plain English.
-- **Free and open.** No account, no license key, no subscription. It's MIT-licensed, and every line
-  of the source is here.
-- **Light.** A 2.3 MB download with no installer, built for an ordinary laptop: a full rig runs at a
-  128-sample buffer (about 5 ms round trip).
-
-It also loads the neural amp captures (`.nam` files) the guitar community already shares, so you
-can play a captured amp and the simulated one in the same chain.
 
 <p align="center">
-  <img src="docs/images/app-main.png" alt="The main window: the chain grid, the AMP NEST library and the pedal list" width="100%">
+  <img src="docs/images/inside-the-amp.gif" alt="One note through the simulated amp as Drive rises from 0 to 30 dB: the V1 grid clamps at -0.2 V, the V1 and V2 plates flatten, the power plates swing against each other, and the speaker wave changes shape" width="100%">
 </p>
+
+<p align="center"><sub>Recorded from the simulation's own probes: the same voltages the debug page shows while you play.</sub></p>
+
+---
+
+## What's inside
+
+<table>
+  <tr>
+    <td width="50%"><a href="#the-chassis"><img src="docs/images/tube-lab-chassis-amp.png" alt="The Tube Lab chassis in 3D"></a><br><b>The chassis.</b> Every tube, cap and resistor, in 3D. Click a part to set it.</td>
+    <td width="50%"><a href="#the-modular-chassis-fourteen-amps"><img src="docs/images/tube-lab-modular-chassis.png" alt="The MODULAR chassis: two bays of preamp modules"></a><br><b>Fourteen preamps.</b> Modules built stage by stage from schematics, swapped like memory sticks.</td>
+  </tr>
+  <tr>
+    <td><a href="#example-the-debug-pages-schematic-and-oscilloscope"><img src="docs/images/app-tube-debug.png" alt="The debug page"></a><br><b>The debug page.</b> A live schematic, 20 probe points and a two-channel scope.</td>
+    <td><a href="#example-the-debug-pages-schematic-and-oscilloscope"><img src="docs/images/tube-scope.png" alt="Probe traces at the Lead setting"></a><br><b>The probes.</b> Grids clamping, plates clipping, push-pull swinging.</td>
+  </tr>
+  <tr>
+    <td><a href="#tube-lab-a-real-circuit-simulated"><img src="docs/images/app-tube-lab.png" alt="The Tube Lab panel"></a><br><b>The Tube Lab.</b> The knobs are real parts: bias, caps, plate resistor, supply.</td>
+    <td><a href="#example-what-drive-does"><img src="docs/images/tube-drive.png" alt="Waveforms and harmonics at Clean, Crunch and Lead"></a><br><b>The harmonics.</b> What Drive does to the wave and its spectrum.</td>
+  </tr>
+  <tr>
+    <td><a href="#cab-lab-place-the-mics-in-3d"><img src="docs/images/app-speaker-lab.png" alt="The Speaker Lab"></a><br><b>The cab.</b> Drag four mics around a speaker cab.</td>
+    <td><a href="#eq-with-a-live-analyzer"><img src="docs/images/app-output-eq.png" alt="The Output EQ"></a><br><b>The EQ.</b> Eight bands over a live spectrum.</td>
+  </tr>
+</table>
+
+Every picture here is a screenshot or the simulation's own output, and [every formula](#the-math) is on this
+page, next to the source file that runs it. It's free, MIT-licensed, needs no account, and also loads
+neural amp captures (`.nam` files).
 
 ---
 
@@ -44,8 +58,24 @@ can play a captured amp and the simulated one in the same chain.
 - [What it does](#what-it-does)
 - [The signal chain](#the-signal-chain)
 - [Tube Lab: a real circuit, simulated](#tube-lab-a-real-circuit-simulated)
-  - [The math](#the-math)
+  - [The math](#the-math): every stage, equation and measurement
+    - [Why simulate the circuit](#why-simulate-the-circuit)
+    - [Stage 1: one 12AX7 gain stage](#stage-1-one-12ax7-gain-stage)
+    - [Stage 2: the cascaded stage](#stage-2-the-cascaded-stage)
+    - [The power amp](#the-power-amp)
+    - [Speaker load](#speaker-load)
+    - [Real Feel switches](#real-feel-switches)
+    - [60 Hz: supply ripple, grind and hum](#60-hz-supply-ripple-grind-and-hum-1390-grind-1400)
+    - [Circuit+](#circuit-1450)
+    - [The bench: Variac, bias pot, tube age](#the-bench-variac-bias-pot-tube-age-1580)
+    - [Power tubes that fail](#power-tubes-that-fail-1620)
+    - [AMP Capture](#amp-capture-a-capture-as-the-preamp-1640)
+    - [Presets](#presets-1630)
+    - [Oversampling](#oversampling)
+    - [Levels](#levels)
+    - [The Classic engine](#the-classic-engine)
   - [The chassis](#the-chassis)
+  - [The MODULAR chassis: fourteen amps](#the-modular-chassis-fourteen-amps)
   - [Example: what Drive does](#example-what-drive-does)
   - [Example: the debug page's schematic and oscilloscope](#example-the-debug-pages-schematic-and-oscilloscope)
 - [Cab Lab: place the mics in 3D](#cab-lab-place-the-mics-in-3d)
@@ -78,6 +108,10 @@ can play a captured amp and the simulated one in the same chain.
 
 ## The signal chain
 
+<p align="center">
+  <img src="docs/images/app-main.png" alt="The main window: the chain grid, the AMP NEST library and the pedal list" width="100%">
+</p>
+
 Blocks sit on a grid. **Columns are the processing order**, and blocks in the **same column run in
 parallel**, each getting the same input. Where paths merge, the faster ones are delayed to line up
 with the slowest.
@@ -94,7 +128,7 @@ flowchart LR
     class CH,COMP,TUBE,AMP,RF,CAB,CAB2,R2,CAB3,R1,LI,LO blk
 ```
 
-<sub>The chain in the screenshot above: two cab-and-reverb paths in parallel after the amp, merged before the FX loop.</sub>
+<sub>The chain in that screenshot: two cab-and-reverb paths in parallel after the amp, merged before the FX loop.</sub>
 
 ---
 
@@ -473,7 +507,7 @@ It's a behavioural model (`RealFeel.h`), driven by the finished amp signal rathe
   pedal adds no delay, so the two line up. Shared B+'s turn-down of the AMP block's input is scaled
   the same way. At 100% the output is exactly the pedal's.
 
-On the user's chain (Tube Lab > AMP (5150 capture) > REAL FEEL > CAB > reverbs), at their playing
+On a typical chain (Tube Lab > AMP (5150 capture) > REAL FEEL > CAB > reverbs), at a normal playing
 level, a hard chord's pick drops by:
 
 | Depth | Squish | Coil Heat | All four | OT Iron (low end, held chord) |
@@ -538,13 +572,13 @@ Tube Lab's wet signal (A = Amount/10):
   so the switch lands on the untouched signal without a step.
 
 1.39.0's version only multiplied the gain by `1 + 0.16·A·(0.25 + 0.75·load)·r` (±8% at most),
-which changed the user's chain by -33 dB at Amount 5. The grind changes it by -19 dB (-11 at 10),
+which changed a typical chain by -33 dB at Amount 5. The grind changes it by -19 dB (-11 at 10),
 and loudness stays within 1 dB.
 
 This is a behavioural model, not a supply simulation. The ripple acts after the tubes, not inside
 the circuit. It works in both engines, with or without the power amp. It stays in the Tube Lab even
 with the REAL FEEL pedal placed. On/off and Amount glide over 20 ms; off is bit-identical.
-Presets turn it off. Everything after the Tube Lab amplifies the hum too: in the user's chain (Twin
+Presets turn it off. Everything after the Tube Lab amplifies the hum too: in a typical chain (Twin
 capture, Master Out) it's about 14 dB louder at the output. The AMP's gate shuts it off between notes.
 
 The **Hum Filter** switch (AMP popup, under Bass) does the opposite, for real hum on the guitar
@@ -593,7 +627,7 @@ stack.
 - **What it does:** class AB rectifies, so dig in and the pair's average current rises, the cathode
   rises, and the tubes bias colder. On a hard burst at Master 8 the cathode went 41 → 47 V, and the
   amp came out of the burst ~1 dB quieter than with fixed bias, recovering over ~50 ms. At low Master
-  (the user's 2) the tubes stay in class A and nothing moves (-55 dB difference), as on a real amp.
+  (2 here) the tubes stay in class A and nothing moves (-55 dB difference), as on a real amp.
 
 **Spkr FB: feedback from the speaker side** (`PowerAmp.h`). Real amps take the negative feedback
 from the output transformer's secondary. Before this, the loop here ended at the plates, and the
@@ -867,7 +901,7 @@ what 24-bit audio can hold. It now matches it to -157..-179 dB.
   on takes effect 50 ms later; switching off is instant, as before.
 
 Tube Lab alone, test settings, 48 kHz: 13.4% → 8.6% of a core when on, 8.6% → 0.07% when off. In the
-whole plugin on the user's chain at a 128-sample buffer: 33.7% → 19.7% as saved (Tube Lab
+whole plugin on a typical chain at a 128-sample buffer: 33.7% → 19.7% as saved (Tube Lab
 footswitched off), and 34.1% → ~28.5% with it on.
 
 A thing that measured worse and was not kept: cubic-Hermite tables (1024 points, interleaved value
@@ -913,6 +947,44 @@ any part to see what it does and set it:
 - **The Variac:** the mains voltage, 90 to 135 V.
 
 Double-click a part to jump to its knobs or to its probe on the debug scope.
+
+### The MODULAR chassis: fourteen amps
+
+<p align="center">
+  <img src="docs/images/tube-lab-modular-chassis.png" alt="The MODULAR chassis: bay A playing, bay B beside it, the bay's controls on the right" width="100%">
+</p>
+
+The chassis page's **Chassis** dropdown swaps the Tube Lab's preamp for a backplane with two bays. Each
+holds a **module**: a whole amp's preamp, solved stage by stage at its schematic's part values, with the
+power section that amp came with. Pick a module and the old card lifts out while the new one drops in;
+swaps crossfade over 10 ms, so nothing clicks.
+
+<p align="center">
+  <img src="docs/images/fourteen-amps.png" alt="One note through all fourteen modules: the waveform each one puts out, from near-sine on the low-gain modules to hard clipped edges on the high-gain ones" width="100%">
+</p>
+
+| Module | What it is | Stages | Power amp it brings |
+|---|---|---|---|
+| BRIT 45 | Vintage British 45 W, no master: two stages and a follower | 2 + follower | 2 x 6L6, tube-rectifier sag |
+| BRIT 100 | British 100 W lead, late 60s, the bright channel, no master | 2 + follower | 4 x EL34 |
+| BRIT MV | British master-volume lead, 80s, with the unbypassed 10k "cold clipper" stage | 3 + follower | 4 x EL34 |
+| BRIT 90 | British 90s lead: four stages, two gain controls | 4 + follower | 4 x EL34 |
+| BRIT ULTRA | British late-90s lead, the tone stack driven straight from a plate | 3 | 4 x EL34 |
+| HG SIX | American high gain, early 90s: six cascaded stages, a cold clipper, local feedback on the last | 6 | 4 x 6L6 |
+| CAL CASCADE | American cascading lead, early 80s: the tone stack right after the first tube, then five gain stages | 6 | 4 x 6L6 |
+| CAL CASCADE 2 | The 90s version: a tighter input stage, hotter lead stages | 6 | 2 x 6L6 |
+| CAL MODERN | American modern high gain, mid 90s, modern mode: no feedback | 4 + follower | 4 x 6L6 |
+| CAL VINTAGE | The same amp's vintage mode: looser input stages, a treble roll-off, feedback on | 4 + follower | 4 x 6L6 |
+| US CLEAN | Mid-60s American 22 W reverb combo, normal channel: the tone stack before the volume | 2 | 2 x 6V6 |
+| US TWEED | 50s American 12 W combo: one tone knob, two interacting volumes | 2 | 2 x 6V6, cathode bias, no feedback |
+| US 4X10 | Late-50s American 40 W tweed bass amp, bright channel: a follower into a three-knob stack | 2 + follower | 2 x 6L6, 430 V, a 2k load |
+| BRIT CHIME | British 30 W top-boost combo: a two-knob stack driven by a follower | 2 + follower | 4 x EL84, cathode bias, no feedback |
+
+The low-gain modules bring their own tubes too (6V6 and EL84, each checked against its datasheet), their
+amp's plate supply and its output transformer load. Sources:
+[`ModuleCircuit.h`](NeuralAmpModeler/ModuleCircuit.h) (the solver) and
+[`PreampModules.h`](NeuralAmpModeler/PreampModules.h) (the circuits).
+The [manual](docs/MANUAL.md#the-modular-chassis-preamp-modules-1720) has the rest.
 
 ### Example: what Drive does
 
@@ -1043,6 +1115,7 @@ range comes forward, and the top octave falls away instead of fizzing.
 - **Output:** Master Out, a lookahead limiter (0.7 ms), a soft safety clip, and stereo **Width** (0%
   sums left and right for a single speaker).
 - **Themes:** several color themes, in light or dark.
+- **Display:** Settings has AUDIO, DISPLAY and ABOUT tabs: a 30 or 60 fps cap and five window resolutions.
 
 ---
 
@@ -1054,6 +1127,7 @@ range comes forward, and the top octave falls away instead of fizzing.
 - The amp-capture engine has a hand-written SSE kernel plus an AVX2/FMA one picked at run time
   (about 5x faster than the generic matrix code), and cab IRs use a zero-latency partitioned FFT.
 - The UI only redraws what changes, clipped in hardware, so the meters don't redraw the whole window.
+- The UI runs at 30 fps by default, and the 3D chassis redraws only for changes you can see.
 - On an ordinary laptop, a full rig runs at a 128-sample buffer: about 5.3 ms round trip plus the
   interface's driver.
 

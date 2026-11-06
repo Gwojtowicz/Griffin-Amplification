@@ -64,8 +64,12 @@ enum Item
   kInputJack,
   kSpeakerJack,
   kFrontPanel,
+  // 1.72.0: the MODULAR chassis's two bays, each with its preamp module (ModularChassisControls.h).
+  kBayA,
+  kBayB,
   kNumItems
 };
+inline bool IsBay(int i) { return i == kBayA || i == kBayB; }
 constexpr int kNumSockets = 2, kNumPreamp = 4 + kNumSockets, kNumPower = 4;
 inline bool IsPart(int i) { return i >= 0 && i < kNumParts; }
 inline bool IsSocket(int i) { return i >= kSocket5 && i <= kSocket6; }
@@ -133,6 +137,8 @@ inline int LinksOf(int item, int out[2])
     add(kLinkPreamp);
     add(kLinkPowerAmp);
   }
+  else if (IsBay(item))
+    add(kLinkPowerAmp);
   return n;
 }
 // The debug scope channel (tube::ProbeChannel) that shows an item best.
@@ -179,6 +185,8 @@ struct View
   std::string value[kNumParts]; // Each part's value, as its control shows it
   int socketRole[kNumSockets] = {}, socketTube[kNumSockets] = {}; // tube::SocketRole / TubeType
   bool engaged = true, powerAmp = false, sixL6 = false, quad = false;
+  const char* powerName = "EL34"; // 1.75.0: what's in the power sockets
+  bool smallPower = false; // 6V6s and EL84s: smaller bottles
   double life[kNumPower] = {1.0, 1.0, 1.0, 1.0}, dissipation[kNumPower] = {};
   bool dead[kNumPower] = {};
   double knob[6] = {0.5, 0.5, 0.5, 0.5, 0.5, 0.5}; // Front panel: Drive, Bass, Mid, Treble, Master, Presence (0..1)
@@ -397,7 +405,8 @@ public:
     SetDirty(false);
   }
 
-private:
+protected:
+  // (1.72.0: protected, not private: NAMModularChassisControl draws its scene with the same pieces.)
   using V3 = chassis::V3;
 
   // Where each item landed on screen last frame (for clicks), and how near it is.
@@ -835,7 +844,8 @@ private:
   {
     using namespace chassis;
     mCur = kPowerTube1 + k;
-    const double x = kPowerX[k], z = kPowerZ, r = v.sixL6 ? 0.0165 : 0.0175, h = v.sixL6 ? 0.1 : 0.094;
+    const double x = kPowerX[k], z = kPowerZ, r = v.smallPower ? 0.0135 : v.sixL6 ? 0.0165 : 0.0175,
+                 h = v.smallPower ? 0.074 : v.sixL6 ? 0.1 : 0.094;
     // Octal socket and the brown bakelite base.
     _Cyl(g, {x, 0.0035, z}, 1, r * 1.45, 0.007, IColor(255, 30, 30, 32), IColor(255, 52, 50, 50), 16);
     if (k >= 2 && !v.quad)
@@ -1019,8 +1029,7 @@ private:
                           : !v.powerAmp  ? "OFF"
                           : v.dead[k]    ? "FAILED"
                           : v.dissipation[k] > 1.0 ? "RED PLATING"
-                          : v.sixL6      ? "6L6"
-                                         : "EL34";
+                                         : v.powerName;
       _Label(g, {kPowerX[k], 0.0, kPowerZ + 0.028}, powerNames[k], state, fitted && v.powerAmp && !v.dead[k],
              mCb.selected && mCb.selected() == kPowerTube1 + k, mOver == kPowerTube1 + k);
     }
@@ -1156,6 +1165,7 @@ public:
   {
     double life[4] = {1.0, 1.0, 1.0, 1.0}, dissipation[4] = {};
     bool dead[4] = {}, powerAmp = false, sixL6 = false, canFail = false, quad = false;
+    const char* powerName = "EL34";
   };
   NAMPowerTubeStatusControl(const IRECT& bounds, std::function<Reading()> read, std::function<void(int)> replace)
   : IControl(bounds)
@@ -1170,8 +1180,7 @@ public:
     g.FillRoundRect(COLOR_BLACK.WithOpacity(0.28f), mRECT, 6.f);
     const IRECT a = mRECT.GetPadded(-8.f);
     g.DrawText(IText(10.f, PluginColors::NAM_THEMECOLOR, "Michroma-Regular", EAlign::Near, EVAlign::Top),
-               r.quad ? (r.sixL6 ? "POWER TUBES (4 x 6L6)" : "POWER TUBES (4 x EL34)")
-                      : (r.sixL6 ? "POWER TUBES (6L6)" : "POWER TUBES (EL34)"),
+               (std::string("POWER TUBES (") + (r.quad ? "4 x " : "") + r.powerName + ")").c_str(),
                a);
     if (!r.powerAmp)
     {

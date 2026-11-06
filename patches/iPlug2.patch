@@ -394,10 +394,20 @@ index 2be656bce..ef94dde35 100644
      {
        int nVals = pCapturedControl->NVals();
 diff --git a/IGraphics/IGraphics.h b/IGraphics/IGraphics.h
-index cba296cf2..955dcb8d4 100644
+index cba296cf2..b7e95c401 100644
 --- a/IGraphics/IGraphics.h
 +++ b/IGraphics/IGraphics.h
-@@ -1208,6 +1208,11 @@ private:
+@@ -1073,6 +1073,9 @@ public:
+    * @return A whole number representing the desired frame rate at which the graphics context is redrawn. NOTE: the actual frame rate might be different */
+   int FPS() const { return mFPS; }
+ 
++  /** Griffin Amp (1.74.0): the frame rate can change while the UI is open (Settings > Display). */
++  void SetFPS(int fps) { mFPS = fps; }
++
+   /** Gets the graphics context scaling factor.
+    * @return The scaling applied to the graphics context */
+   float GetDrawScale() const { return mDrawScale; }
+@@ -1208,6 +1211,11 @@ private:
     * @param bounds \todo
     * @param scale \todo */
    void Draw(const IRECT& bounds, float scale);
@@ -409,8 +419,60 @@ index cba296cf2..955dcb8d4 100644
    
    /** \todo
     * @param pControl \todo
+diff --git a/IGraphics/Platforms/IGraphicsWin.cpp b/IGraphics/Platforms/IGraphicsWin.cpp
+index f9d755bd4..c49766867 100755
+--- a/IGraphics/Platforms/IGraphicsWin.cpp
++++ b/IGraphics/Platforms/IGraphicsWin.cpp
+@@ -21,6 +21,7 @@
+ 
+ #include <wininet.h>
+ #include <VersionHelpers.h>
++#include <chrono>
+ 
+ #if defined __clang__
+ #undef CCSIZEOF_STRUCT
+@@ -247,6 +248,19 @@ void IGraphicsWin::OnDisplayTimer(int vBlankCount)
+     return; // TODO: check this!
+   }
+ 
++  // Griffin Amp (1.74.0): the vblank thread ticks at the display's rate whatever FPS() says, so FPS() was
++  // ignored here. Every control's repaint now lands on these ticks; separate clocks in the controls
++  // added up, since each repaint composites the whole window. The slack keeps a tick that lands a
++  // little early on the same vblank instead of dropping to half the rate.
++  if (mVSYNCEnabled && FPS() > 0)
++  {
++    using namespace std::chrono;
++    const long long nowUs = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
++    if (nowUs - mLastFrameUs < 1000000 / FPS() - 6000)
++      return;
++    mLastFrameUs = nowUs;
++  }
++
+   // TODO: move this... listen to the right messages in windows for screen resolution changes, etc.
+   if (!GetCapture()) // workaround Windows issues with window sizing during mouse move
+   {
+@@ -314,7 +328,6 @@ LRESULT CALLBACK IGraphicsWin::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
+ 
+     if(pGraphics->mVSYNCEnabled) // use VBLANK thread
+     {
+-      assert((pGraphics->FPS() == 60) && "If you want to run at frame rates other than 60FPS");
+       pGraphics->StartVBlankThread(hWnd);
+     }
+     else // use WM_TIMER -- its best to get below 16ms because the windows time quanta is slightly above 15ms.
+diff --git a/IGraphics/Platforms/IGraphicsWin.h b/IGraphics/Platforms/IGraphicsWin.h
+index 458bb57b5..9e3218908 100644
+--- a/IGraphics/Platforms/IGraphicsWin.h
++++ b/IGraphics/Platforms/IGraphicsWin.h
+@@ -153,6 +153,7 @@ private:
+   volatile DWORD mVBlankCount = 0; // running count of vblank events since the start of the window.
+   int mVBlankSkipUntil = 0; // support for skipping vblank notification if the last callback took  too long.  This helps keep the message pump clear in the case of overload.
+   bool mVSYNCEnabled = false;
++  long long mLastFrameUs = 0; // Griffin Amp (1.74.0): when the last accepted frame tick came
+   
+   const IParam* mEditParam = nullptr;
+   IText mEditText;
 diff --git a/IPlug/APP/IPlugAPP_dialog.cpp b/IPlug/APP/IPlugAPP_dialog.cpp
-index a6c0c0b14..a23909fa0 100644
+index a6c0c0b14..d4df011ff 100644
 --- a/IPlug/APP/IPlugAPP_dialog.cpp
 +++ b/IPlug/APP/IPlugAPP_dialog.cpp
 @@ -28,6 +28,56 @@ using namespace iplug;
@@ -470,8 +532,17 @@ index a6c0c0b14..a23909fa0 100644
  #if defined OS_MAC
  extern int GetTitleBarOffset();
  #endif
+@@ -742,7 +792,7 @@ WDL_DLGRET IPlugAPPHost::MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
+       mmi->ptMaxTrackSize.y = pPlug->GetMaxHeight();
+ 
+ #ifdef OS_WIN 
+-      float scale = GetScaleForHWND(hwndDlg);
++      float scale = GetScaleForHWND(hwndDlg) * pAppHost->GetWindowDrawScale();
+       mmi->ptMinTrackSize.x = static_cast<LONG>(static_cast<float>(mmi->ptMinTrackSize.x) * scale);
+       mmi->ptMinTrackSize.y = static_cast<LONG>(static_cast<float>(mmi->ptMinTrackSize.y) * scale);
+       mmi->ptMaxTrackSize.x = static_cast<LONG>(static_cast<float>(mmi->ptMaxTrackSize.x) * scale);
 diff --git a/IPlug/APP/IPlugAPP_host.h b/IPlug/APP/IPlugAPP_host.h
-index 1503c6c49..ff9e327bb 100644
+index 1503c6c49..99e6b357e 100644
 --- a/IPlug/APP/IPlugAPP_host.h
 +++ b/IPlug/APP/IPlugAPP_host.h
 @@ -69,8 +69,8 @@ extern HINSTANCE gHINSTANCE;
@@ -485,7 +556,7 @@ index 1503c6c49..ff9e327bb 100644
  const int kDeviceDS = 0; const int kDeviceCoreAudio = 0; const int kDeviceAlsa = 0;
  const int kDeviceASIO = 1; const int kDeviceJack = 1;
  extern UINT gSCROLLMSG;
-@@ -177,6 +177,31 @@ public:
+@@ -177,6 +177,36 @@ public:
    bool Init();
    bool InitState();
    void UpdateINI();
@@ -507,6 +578,11 @@ index 1503c6c49..ff9e327bb 100644
 +   * Windows sound settings for other driver types. Call on the main thread. */
 +  void OpenDriverControlPanel();
 +
++  /** Griffin Amplification (1.74.0): the UI's zoom, set by Settings > Display. The window's size limits
++   * are in UI units, so the main window's minimum and maximum scale with it. */
++  void SetWindowDrawScale(float scale) { mWindowDrawScale = scale; }
++  float GetWindowDrawScale() const { return mWindowDrawScale; }
++
 +  /** Griffin Amplification (1.51.0): opens the Preferences dialog (device, sample rate, channels, MIDI). */
 +  void OpenPreferencesDialog();
 +
@@ -517,10 +593,11 @@ index 1503c6c49..ff9e327bb 100644
    
    /** Returns the name of the audio device at idx
     * @param idx The index RTAudio has given the audio device
-@@ -239,6 +264,7 @@ private:
+@@ -239,6 +269,8 @@ private:
    uint32_t mSamplesElapsed = 0;
    uint32_t mVecWait = 0;
    uint32_t mBufferSize = 512;
++  float mWindowDrawScale = 1.f; // Griffin Amplification (1.74.0)
 +  long mDriverPreferredBufferSize = 0; // Griffin Amplification: last ASIO preferred size seen (0 = none yet)
    uint32_t mBufIndex = 0; // index for signal vector, loops from 0 to mSigVS
    bool mExiting = false;

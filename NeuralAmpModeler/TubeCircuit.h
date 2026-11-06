@@ -70,7 +70,10 @@ enum TubeType
   k12AT7, // ECC81: mu 60, ~4x the 12AX7's current -- hotter, less gain, more headroom
   k12AU7, // ECC82: mu 17, low gain, a lot of headroom: the clean-boost / driver tube
   k5751, // mu 70: a 12AX7 with ~30% less gain, smoother breakup
-  kNumTubeTypes
+  kNumTubeTypes,
+  // Modules only (1.75.0), past the sockets' menu: mu 44, about half a 12AX7's gain with more headroom
+  k12AY7 = kNumTubeTypes,
+  kNumTriodeModels
 };
 
 inline TriodeModel Model12AX7()
@@ -92,12 +95,13 @@ inline TriodeModel FitTriode(double mu, double va, double vg, double ia)
 
 inline const TriodeModel& GetTriodeModel(int type)
 {
-  static const TriodeModel models[kNumTubeTypes] = {
+  static const TriodeModel models[kNumTriodeModels] = {
     Model12AX7(),
     FitTriode(60.0, 250.0, -2.0, 10e-3), // RCA 12AT7: 250 V, -2 V, 10 mA
     FitTriode(17.0, 250.0, -8.5, 10.5e-3), // RCA 12AU7: 250 V, -8.5 V, 10.5 mA
-    FitTriode(70.0, 250.0, -3.0, 1.0e-3)}; // GE 5751: 250 V, -3 V, 1.0 mA
-  return models[std::clamp(type, 0, kNumTubeTypes - 1)];
+    FitTriode(70.0, 250.0, -3.0, 1.0e-3), // GE 5751: 250 V, -3 V, 1.0 mA
+    FitTriode(44.0, 250.0, -4.0, 3.0e-3)}; // GE 12AY7: 250 V, -4 V, 3.0 mA
+  return models[std::clamp(type, 0, kNumTriodeModels - 1)];
 }
 
 struct TriodeCurrents
@@ -193,12 +197,13 @@ public:
   // 1.68.0: one set per tube type (TubeType), each built the first time it's asked for.
   static const TriodeTables& For(int type)
   {
-    switch (std::clamp(type, 0, kNumTubeTypes - 1))
+    switch (std::clamp(type, 0, kNumTriodeModels - 1))
     {
       // Built once, thread-safe (C++11 static init), then read-only. Heap-allocated: 512 kB each.
       case k12AT7: { static const TriodeTables* t = new TriodeTables(GetTriodeModel(k12AT7)); return *t; }
       case k12AU7: { static const TriodeTables* t = new TriodeTables(GetTriodeModel(k12AU7)); return *t; }
       case k5751: { static const TriodeTables* t = new TriodeTables(GetTriodeModel(k5751)); return *t; }
+      case k12AY7: { static const TriodeTables* t = new TriodeTables(GetTriodeModel(k12AY7)); return *t; }
       default: { static const TriodeTables* t = new TriodeTables(GetTriodeModel(k12AX7)); return *t; }
     }
   }

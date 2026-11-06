@@ -877,7 +877,8 @@ public:
     Segments,
     Stepper,
     Toggle,
-    Drag
+    Drag,
+    Dropdown // 1.72.0: an enum's choices in a menu (its value and a down arrow)
   };
 
   NAMLabFieldControl(const IRECT& bounds, int paramIdx, const char* label, Mode mode, IColor accent = IColor())
@@ -938,6 +939,13 @@ public:
       g.DrawText(valueText, ">", r.GetFromRight(14.f));
       g.DrawText(valueText, s.Get(), r.GetPadded(-14.f, 0.f, -14.f, 0.f));
     }
+    else if (mMode == Mode::Dropdown)
+    {
+      const IRECT arrow = r.GetFromRight(16.f);
+      const float cx = arrow.MW(), cy = arrow.MH();
+      g.FillTriangle(mAccent.WithOpacity(0.9f * dim), cx - 4.f, cy - 2.f, cx + 4.f, cy - 2.f, cx, cy + 3.f);
+      g.DrawText(valueText, s.Get(), r.GetReducedFromRight(16.f));
+    }
     else
       g.DrawText(valueText, s.Get(), r);
   }
@@ -950,6 +958,16 @@ public:
     if (mMode == Mode::Drag)
     {
       _Begin();
+      return;
+    }
+    if (mMode == Mode::Dropdown)
+    {
+      mMenu.Clear();
+      const int n = p->NDisplayTexts(), cur = p->Int() - (int)p->GetMin();
+      for (int i = 0; i < n; i++)
+        mMenu.AddItem(p->GetDisplayText(i), -1, i == cur ? IPopupMenu::Item::kChecked : IPopupMenu::Item::kNoFlags);
+      if (auto* ui = GetUI())
+        ui->CreatePopupMenu(*this, mMenu, mRECT);
       return;
     }
     double v = p->Value();
@@ -1012,6 +1030,20 @@ public:
     _End();
   }
 
+  void OnPopupMenuSelection(IPopupMenu* pSelectedMenu, int valIdx) override
+  {
+    const IParam* p = GetParam();
+    if (!p || !pSelectedMenu || mMode != Mode::Dropdown)
+      return;
+    const int idx = pSelectedMenu->GetChosenItemIdx();
+    if (idx < 0 || idx >= p->NDisplayTexts())
+      return;
+    _Begin();
+    SetValue(p->ToNormalized(p->GetMin() + idx));
+    SetDirty(true);
+    _End();
+  }
+
 private:
   void _Begin()
   {
@@ -1027,6 +1059,7 @@ private:
   std::string mLabel;
   Mode mMode;
   IColor mAccent;
+  IPopupMenu mMenu; // Dropdown's
 };
 
 // The selected mic's geometry, cone by cone.
