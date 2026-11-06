@@ -1,5 +1,5 @@
 diff --git a/NAM/wavenet/a2_fast.cpp b/NAM/wavenet/a2_fast.cpp
-index 8fd8fc1..1a7bfc6 100644
+index 8fd8fc1..895a2c8 100644
 --- a/NAM/wavenet/a2_fast.cpp
 +++ b/NAM/wavenet/a2_fast.cpp
 @@ -20,6 +20,7 @@
@@ -101,7 +101,20 @@ index 8fd8fc1..1a7bfc6 100644
  // =============================================================================
  // A2FastModel<Channels>
  //
-@@ -551,6 +629,111 @@ void A2FastModel<Channels>::_layer_forward_k(Layer& L, const float* cond, int nu
+@@ -172,7 +250,11 @@ A2FastModel<Channels>::A2FastModel(std::vector<float> weights, double expected_s
+ 
+   _load_weights(weights);
+ 
+-  int prewarm = 0;
++  // Receptive field = 1 (the sample being produced) + sum of per-layer lookbacks +
++  // (head kernel - 1). The leading 1 matches the generic WaveNet's prewarm count
++  // (model.cpp: mPrewarmSamples starts at 1 when there's no condition DSP), so the
++  // fast path warms up by exactly the same number of samples as the model it replaces.
++  int prewarm = 1;
+   for (int i = 0; i < kNumLayers; i++)
+     prewarm += _layers[i].max_lookback;
+   prewarm += kHeadKernelSize - 1;
+@@ -551,6 +633,111 @@ void A2FastModel<Channels>::_layer_forward_k(Layer& L, const float* cond, int nu
        lin[2] += lb2 + lw02 * a0 + lw12 * a1 + lw22 * a2;
      }
    }
@@ -213,7 +226,7 @@ index 8fd8fc1..1a7bfc6 100644
    else
    {
      // Use Eigen's tuned 8x8 × 8xN GEMM for the whole block at once. Unlike a
-@@ -635,6 +818,24 @@ void A2FastModel<Channels>::_head_forward(float* output, int num_frames)
+@@ -635,6 +822,24 @@ void A2FastModel<Channels>::_head_forward(float* output, int num_frames)
  
    for (int f = 0; f < num_frames; f++)
    {
@@ -238,3 +251,170 @@ index 8fd8fc1..1a7bfc6 100644
      float y = _head_b;
      for (int k = 0; k < kHeadKernelSize; k++)
      {
+@@ -763,6 +968,17 @@ bool is_a2_shape(const nlohmann::json& config, int* channels)
+   if (head_it != config.end() && !head_it->is_null())
+     return false;
+ 
++  // No conditioning DSP. When given a non-null condition_dsp the generic WaveNet
++  // builds a nested model and routes the conditioning signal through it before the
++  // layer stack; the fast path has no such stage and feeds the raw input as the
++  // condition. The condition DSP carries its own weights, so the parent weight
++  // stream is identical with or without it and the loader cannot detect the
++  // difference -- the detector must reject it here, or the fast path would silently
++  // produce different audio than the model it replaces.
++  auto cond_it = config.find("condition_dsp");
++  if (cond_it != config.end() && !cond_it->is_null())
++    return false;
++
+   // head_scale is loaded from the trailing weight, but require the field to
+   // stay schema-compatible with the generic WaveNet parser.
+   auto hs_it = config.find("head_scale");
+@@ -827,6 +1043,14 @@ bool is_a2_shape(const nlohmann::json& config, int* channels)
+       return false;
+   }
+ 
++  // Legacy boolean `gated` (the pre-gating_mode schema): the generic parser maps
++  // gated==true to GATED layers, which the fast path does not implement. A genuinely
++  // gated model has a larger weight stream and the loader would throw, but reject it
++  // here so the boundary is enforced by the detector rather than a downstream error.
++  auto gated_it = la.find("gated");
++  if (gated_it != la.end() && gated_it->is_boolean() && gated_it->get<bool>())
++    return false;
++
+   // secondary_activation: all null (or field absent)
+   auto sa_it = la.find("secondary_activation");
+   if (sa_it != la.end() && !sa_it->is_null())
+@@ -857,6 +1081,8 @@ bool is_a2_shape(const nlohmann::json& config, int* channels)
+     return false;
+   if (lah_it->value("kernel_size", 0) != kHeadKernelSize)
+     return false;
++  if (lah_it->value("head_dilation", 1) != 1)
++    return false;
+   if (!lah_it->value("bias", false))
+     return false;
+ 
+diff --git a/NAM/wavenet/model.cpp b/NAM/wavenet/model.cpp
+index eaf74ad..a4fd780 100644
+--- a/NAM/wavenet/model.cpp
++++ b/NAM/wavenet/model.cpp
+@@ -262,14 +262,17 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
+     if (this->_layer1x1)
+     {
+       this->_layer1x1->process_(this->_z.topRows(bottleneck), num_frames);
+-      if (this->_layer1x1_post_film)
+-      {
+-        Eigen::MatrixXf& layer1x1_output = this->_layer1x1->GetOutput();
+-        this->_layer1x1_post_film->Process_(layer1x1_output, condition, num_frames);
+-      }
+     }
+   }
+ 
++  // layer1x1_post_film is independent of the gating mode and must be applied
++  // whenever layer1x1 is active.
++  if (this->_layer1x1 && this->_layer1x1_post_film)
++  {
++    Eigen::MatrixXf& layer1x1_output = this->_layer1x1->GetOutput();
++    this->_layer1x1_post_film->Process_(layer1x1_output, condition, num_frames);
++  }
++
+   if (this->_head1x1)
+   {
+     if (this->_gating_mode == GatingMode::NONE)
+@@ -380,7 +383,7 @@ void nam::wavenet::detail::Layer::Process(const Eigen::MatrixXf& input, const Ei
+ nam::wavenet::detail::LayerArray::LayerArray(const LayerArrayParams& params)
+ : _rechannel(params.input_size, params.channels, false)
+ , _head_rechannel(params.head1x1_params.active ? params.head1x1_params.out_channels : params.bottleneck,
+-                  params.head_size, params.head_kernel_size, params.head_bias ? 1 : 0, 1, 1)
++                  params.head_size, params.head_kernel_size, params.head_bias ? 1 : 0, params.head_dilation, 1)
+ , _head_output_size(params.head1x1_params.active ? params.head1x1_params.out_channels : params.bottleneck)
+ {
+   const size_t num_layers = params.dilations.size();
+@@ -419,7 +422,7 @@ long nam::wavenet::detail::LayerArray::get_receptive_field() const
+   long result = 0;
+   for (size_t i = 0; i < this->_layers.size(); i++)
+     result += this->_layers[i].get_dilation() * (this->_layers[i].get_kernel_size() - 1);
+-  result += (long)this->_head_rechannel.get_kernel_size() - 1;
++  result += this->_head_rechannel.get_dilation() * ((long)this->_head_rechannel.get_kernel_size() - 1);
+   return result;
+ }
+ 
+@@ -869,6 +872,7 @@ nam::wavenet::WaveNetConfig nam::wavenet::parse_config_json(const nlohmann::json
+     const int condition_size = layer_config["condition_size"];
+ 
+     int head_size = 0;
++    int head_dilation = 1;
+     int head_kernel_size = 1;
+     bool head_bias = false;
+ 
+@@ -881,6 +885,12 @@ nam::wavenet::WaveNetConfig nam::wavenet::parse_config_json(const nlohmann::json
+         throw std::runtime_error("Layer array " + std::to_string(i) + ": 'head' must be a JSON object");
+       }
+       head_size = head_json.at("out_channels").get<int>();
++
++      if (head_json.contains("head_dilation"))
++      {
++        head_dilation = head_json.at("head_dilation").get<int>();
++      }
++
+       head_kernel_size = head_json.at("kernel_size").get<int>();
+       head_bias = head_json.at("bias").get<bool>();
+     }
+@@ -1137,7 +1147,7 @@ nam::wavenet::WaveNetConfig nam::wavenet::parse_config_json(const nlohmann::json
+     }
+ 
+     wc.layer_array_params.push_back(nam::wavenet::LayerArrayParams(
+-      input_size, condition_size, head_size, head_kernel_size, channels, bottleneck, std::move(kernel_sizes), dilations,
++      input_size, condition_size, head_size, head_dilation, head_kernel_size, channels, bottleneck, std::move(kernel_sizes), dilations,
+       std::move(activation_configs), std::move(gating_modes), head_bias, groups, groups_input_mixin, layer1x1_params,
+       head1x1_params, std::move(secondary_activation_configs), conv_pre_film_params, conv_post_film_params,
+       input_mixin_pre_film_params, input_mixin_post_film_params, activation_pre_film_params,
+diff --git a/NAM/wavenet/params.h b/NAM/wavenet/params.h
+index 3ac3849..5da9b75 100644
+--- a/NAM/wavenet/params.h
++++ b/NAM/wavenet/params.h
+@@ -181,6 +181,7 @@ public:
+   /// \param input_size_ Input size (number of channels) to the layer array
+   /// \param condition_size_ Size of the conditioning input
+   /// \param head_size_ Size of the head output (after head rechannel)
++  /// \param head_dilation_ Dilation of the head rechannel convolution
+   /// \param channels_ Number of channels in each layer
+   /// \param bottleneck_ Bottleneck size (internal channel count)
+   /// \param kernel_sizes_ Per-layer kernel sizes, one per layer
+@@ -204,7 +205,7 @@ public:
+   /// \param head1x1_post_film_params_ FiLM parameters after head1x1 convolutions
+   /// \throws std::invalid_argument If dilations, activation_configs, gating_modes, or secondary_activation_configs
+   /// sizes don't match
+-  LayerArrayParams(const int input_size_, const int condition_size_, const int head_size_, const int head_kernel_size_,
++  LayerArrayParams(const int input_size_, const int condition_size_, const int head_size_, const int head_dilation_, const int head_kernel_size_,
+                    const int channels_, const int bottleneck_, const std::vector<int>&& kernel_sizes_,
+                    const std::vector<int>&& dilations_,
+                    const std::vector<activations::ActivationConfig>&& activation_configs_,
+@@ -219,6 +220,7 @@ public:
+   : input_size(input_size_)
+   , condition_size(condition_size_)
+   , head_size(head_size_)
++  , head_dilation(head_dilation_)
+   , head_kernel_size(head_kernel_size_)
+   , channels(channels_)
+   , bottleneck(bottleneck_)
+@@ -277,6 +279,7 @@ public:
+   const int input_size; ///< Input size (number of channels)
+   const int condition_size; ///< Size of conditioning input
+   const int head_size; ///< Size of head output (after rechannel)
++  const int head_dilation; ///< Dilation of the head rechannel convolution
+   const int head_kernel_size; ///< Kernel size of head rechannel convolution (>= 1)
+   const int channels; ///< Number of channels in each layer
+   const int bottleneck; ///< Bottleneck size (internal channel count)
+diff --git a/NAM/wavenet/slimmable.cpp b/NAM/wavenet/slimmable.cpp
+index 19b019e..60d92fe 100644
+--- a/NAM/wavenet/slimmable.cpp
++++ b/NAM/wavenet/slimmable.cpp
+@@ -265,7 +265,7 @@ std::vector<wavenet::LayerArrayParams> modify_params_for_channels(
+     int new_head_size = (i < num_arrays - 1) ? new_channels_per_array[i + 1] : p.head_size;
+ 
+     modified.push_back(wavenet::LayerArrayParams(
+-      new_input_size, p.condition_size, new_head_size, p.head_kernel_size, new_ch, new_bottleneck,
++      new_input_size, p.condition_size, new_head_size, p.head_dilation, p.head_kernel_size, new_ch, new_bottleneck,
+       std::vector<int>(p.kernel_sizes), std::vector<int>(p.dilations),
+       std::vector<activations::ActivationConfig>(p.activation_configs),
+       std::vector<wavenet::GatingMode>(p.gating_modes), p.head_bias, p.groups_input, p.groups_input_mixin,

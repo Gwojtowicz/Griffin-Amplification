@@ -16,7 +16,7 @@
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-f2a541">
   <img alt="Platform: Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-5cc8ff">
-  <img alt="Version 1.75.0" src="https://img.shields.io/badge/version-1.75.0-c49bff">
+  <img alt="Version 1.75.1" src="https://img.shields.io/badge/version-1.75.1-c49bff">
   <a href="https://www.neuralampmodeler.com"><img alt="Plays NAM captures" src="https://img.shields.io/badge/plays-NAM%20captures-7ee081"></a>
   <a href="https://www.tone3000.com"><img alt="Tones from TONE3000" src="https://img.shields.io/badge/tones-TONE3000-ff6b6b"></a>
 </p>
@@ -26,27 +26,6 @@
 </p>
 
 <p align="center"><sub>Recorded from the simulation's own probes: the same voltages the debug page shows while you play.</sub></p>
-
----
-
-## NAM and TONE3000
-
-**Griffin Amplification is built on [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com), and
-[TONE3000](https://www.tone3000.com) is where your tones come from.**
-
-NAM is Steven Atkinson's open-source engine for neural amp captures: it learns a real amp or pedal and
-plays it back. TONE3000 is the community library where players share those captures and cab IRs, free.
-Download a tone there and it plugs straight in here:
-
-| Where it goes | What it does with a capture from TONE3000 |
-|---|---|
-| **AMP block** | Plays a NAM capture of an amp, with A/B slots, a noise gate and a tone stack. |
-| **PACK dropdown** | Unzip a TONE3000 pack and switch between its captures, level-matched. |
-| **CAPTURE pedals** | Two more slots for NAM captures of pedals. **GET PEDALS (TONE3000)** opens the site. |
-| **[AMP Capture](#amp-capture-a-capture-as-the-preamp-1640)** | Runs a NAM capture inside the Tube Lab, in place of its preamp tubes, so the simulated power amp, bias and Variac all act on it. |
-| **CAB and CAB LAB** | Loads cab IRs (`.wav`). |
-
-So you can play a captured amp and a simulated one in the same chain, or put one inside the other.
 
 ---
 
@@ -76,8 +55,34 @@ page, next to the source file that runs it. It's free and MIT-licensed, and it n
 
 ---
 
+## NAM and TONE3000
+
+**Griffin Amplification is built on [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com), and
+[TONE3000](https://www.tone3000.com) is where your tones come from.**
+
+NAM is Steven Atkinson's open-source engine for neural amp captures: it learns a real amp or pedal and
+plays it back. TONE3000 is the community library where players share those captures and cab IRs, free.
+Download a tone there and it plugs straight in here:
+
+| Where it goes | What it does with a capture from TONE3000 |
+|---|---|
+| **AMP block** | Plays a NAM capture of an amp, with A/B slots, a noise gate and a tone stack. |
+| **PACK dropdown** | Unzip a TONE3000 pack and switch between its captures, level-matched. |
+| **CAPTURE pedals** | Two more slots for NAM captures of pedals. **GET PEDALS (TONE3000)** opens the site. |
+| **[AMP Capture](#amp-capture-a-capture-as-the-preamp-1640)** | Runs a NAM capture inside the Tube Lab, in place of its preamp tubes, so the simulated power amp, bias and Variac all act on it. |
+| **CAB and CAB LAB** | Loads cab IRs (`.wav`). |
+
+So you can play a captured amp and a simulated one in the same chain, or put one inside the other.
+
+**NAM A2 captures load too.** A2 is NAM's newer format, and one file holds the same capture at more than
+one size. The AMP block shows a Slim button on these files: its knob at 0 plays the smallest model, and at
+1 the full one, which sounds closest and uses more CPU.
+
+---
+
 ## Contents
 
+- [What's inside](#whats-inside)
 - [NAM and TONE3000](#nam-and-tone3000)
 - [What it does](#what-it-does)
 - [The signal chain](#the-signal-chain)

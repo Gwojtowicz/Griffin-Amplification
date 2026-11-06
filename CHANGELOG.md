@@ -8,6 +8,13 @@ that gets used, and add an entry here.
 - **Minor** (1.8.0): new features.
 - **Patch** (1.8.1): fixes only.
 
+## 1.75.1 (2026-11-05)
+
+- **Newer capture files play correctly.** Four fixes from the core library: a model's last modulation stage
+  was skipped unless the model used blended gating, head dilation was ignored, and two details of the fast
+  path for standard A2 models. Tested on 578 capture files, 220 of them A2: only two synthetic test files
+  changed, and all 578 now render bit for bit like the library's latest version.
+
 ## 1.75.0 (2026-11-05)
 
 - **Four low-gain modules for the MODULAR chassis**, each built stage by stage from its schematic, like the
