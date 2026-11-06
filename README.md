@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/Gwojtowicz/Griffin-Amplification/releases/latest"><b>Download for Windows</b></a>
+  &nbsp;·&nbsp; <a href="#nam-and-tone3000">NAM + TONE3000</a>
   &nbsp;·&nbsp; <a href="#the-math">The math</a>
   &nbsp;·&nbsp; <a href="docs/MANUAL.md">Manual</a>
 </p>
@@ -16,6 +17,8 @@
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-f2a541">
   <img alt="Platform: Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-5cc8ff">
   <img alt="Version 1.75.0" src="https://img.shields.io/badge/version-1.75.0-c49bff">
+  <a href="https://www.neuralampmodeler.com"><img alt="Plays NAM captures" src="https://img.shields.io/badge/plays-NAM%20captures-7ee081"></a>
+  <a href="https://www.tone3000.com"><img alt="Tones from TONE3000" src="https://img.shields.io/badge/tones-TONE3000-ff6b6b"></a>
 </p>
 
 <p align="center">
@@ -23,6 +26,27 @@
 </p>
 
 <p align="center"><sub>Recorded from the simulation's own probes: the same voltages the debug page shows while you play.</sub></p>
+
+---
+
+## NAM and TONE3000
+
+**Griffin Amplification is built on [Neural Amp Modeler (NAM)](https://www.neuralampmodeler.com), and
+[TONE3000](https://www.tone3000.com) is where your tones come from.**
+
+NAM is Steven Atkinson's open-source engine for neural amp captures: it learns a real amp or pedal and
+plays it back. TONE3000 is the community library where players share those captures and cab IRs, free.
+Download a tone there and it plugs straight in here:
+
+| Where it goes | What it does with a capture from TONE3000 |
+|---|---|
+| **AMP block** | Plays a NAM capture of an amp, with A/B slots, a noise gate and a tone stack. |
+| **PACK dropdown** | Unzip a TONE3000 pack and switch between its captures, level-matched. |
+| **CAPTURE pedals** | Two more slots for NAM captures of pedals. **GET PEDALS (TONE3000)** opens the site. |
+| **[AMP Capture](#amp-capture-a-capture-as-the-preamp-1640)** | Runs a NAM capture inside the Tube Lab, in place of its preamp tubes, so the simulated power amp, bias and Variac all act on it. |
+| **CAB and CAB LAB** | Loads cab IRs (`.wav`). |
+
+So you can play a captured amp and a simulated one in the same chain, or put one inside the other.
 
 ---
 
@@ -48,13 +72,13 @@
 </table>
 
 Every picture here is a screenshot or the simulation's own output, and [every formula](#the-math) is on this
-page, next to the source file that runs it. It's free, MIT-licensed, needs no account, and also loads
-neural amp captures (`.nam` files).
+page, next to the source file that runs it. It's free and MIT-licensed, and it needs no account.
 
 ---
 
 ## Contents
 
+- [NAM and TONE3000](#nam-and-tone3000)
 - [What it does](#what-it-does)
 - [The signal chain](#the-signal-chain)
 - [Tube Lab: a real circuit, simulated](#tube-lab-a-real-circuit-simulated)
@@ -93,7 +117,7 @@ neural amp captures (`.nam` files).
 
 | | |
 |---|---|
-| 🎛️ **Amp captures** | Load neural amp captures (`.nam` files) into the AMP block, with A/B slots, a noise gate and a tone stack. Two **CAPTURE** pedals load pedal captures. |
+| 🎛️ **NAM captures** | Load [NAM](https://www.neuralampmodeler.com) captures (`.nam` files, thousands of them on [TONE3000](https://www.tone3000.com)) into the AMP block, with A/B slots, a noise gate and a tone stack. Two **CAPTURE** pedals load pedal captures. |
 | 🔌 **Patchable chain** | A 4 × 14 grid between IN and OUT. Drag blocks in and cable them in series or parallel. Parallel paths are latency-aligned, so they never comb-filter. |
 | 🔥 **Tube Lab** | A 12AX7 preamp (one or two stages), tone stack, phase inverter and push-pull EL34/6L6 power amp into a speaker load, solved as an electrical circuit every sample. |
 | 🔬 **Debug page** | A live schematic with the circuit's real voltages, a two-channel oscilloscope on any of 20 probe points, a plain-English readout and a CSV log. |
@@ -1169,10 +1193,10 @@ it into `C:\Program Files\Common Files\VST3`, which needs an admin prompt. See t
 
 Griffin Amplification is open source under the **MIT license**: see [LICENSE](LICENSE).
 
-It's built on Steven Atkinson's open-source amp-modeling plug-in and core library
-([source](https://github.com/sdatkinson/NeuralAmpModelerPlugin), MIT), whose copyright notice is kept
-in [LICENSE](LICENSE) as that license requires. It's an independent project and isn't affiliated with
-or endorsed by the original authors. The bundled libraries keep their own licenses:
+It's built on [Neural Amp Modeler](https://www.neuralampmodeler.com), Steven Atkinson's open-source
+plug-in and core library ([source](https://github.com/sdatkinson/NeuralAmpModelerPlugin), MIT), whose
+copyright notice is kept in [LICENSE](LICENSE) as that license requires. It's an independent project
+and isn't affiliated with or endorsed by the NAM authors or TONE3000. The bundled libraries keep their own licenses:
 [iPlug2](https://iplug2.github.io) (zlib-style), the core amp-model library and AudioDSPTools (MIT),
 Eigen (MPL-2.0) and the VST3 SDK (MIT). See `NeuralAmpModeler/installer/ThirdPartyNotices.txt`.
 
