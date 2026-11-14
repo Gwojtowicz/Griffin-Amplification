@@ -28,6 +28,7 @@ that gets used, and add an entry here.
 - **AVX2 builds.** The 64-bit app and plug-in are now compiled for AVX2 + FMA instead of the x64 default
   (SSE2). Standard WaveNet captures run about 1.7x faster (350 -> 205 ms for the NAM benchmark); the
   8-channel A2 layers already had their own AVX2 kernel and stay the same. Needs a CPU from 2013 or later.
+  Measured on the whole plugin at 64-sample blocks: a rig with a standard (A1) WaveNet capture went from 23% to 18% of real time; a rig with an A2 capture (whose layers already had a run-time AVX2 kernel) and the Tube Lab got 3-5% heavier (9.5% -> 9.8%, one Tube Lab 8.4% -> 8.9%), because the Tube Lab's solver doesn't gain from AVX2.
   Every block gives the same output as before to rounding (-130 dB or less), except PITCH RACK in Smart
   splice: it picks its splice points by matching the waveform, so a rounding-sized change moves them and
   its output waveform differs while sounding the same.

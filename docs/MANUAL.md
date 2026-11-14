@@ -39,6 +39,11 @@ guitar wherever it sits) and a **PRO COMP** studio compressor (Clean, Opto or FE
 Footswitches and pedals on a MIDI controller can drive any knob or switch: click **MIDI** in the
 top bar and map them Ableton-style (see [MIDI control](#midi-control)).
 
+For bigger rigs, **Settings > DSP** has **EXTENDED DSP**: a 6 x 20 grid, and parallel blocks processed on
+several CPU cores at once. It also puts the **FX loop** on spare channels of your audio interface in the
+standalone app, so your own pedals or rack can sit in the middle of the chain (see
+[Settings > DSP](#settings--dsp-extended-dsp-cpu-cores-and-the-fx-loop-1810)).
+
 The version number appears in the main window's bottom-right corner, and on Settings > About. [CHANGELOG.md](../CHANGELOG.md)
 describes every version, with measurements.
 
@@ -66,10 +71,16 @@ describes every version, with measurements.
 - [EQ and live spectrum](#eq-and-live-spectrum-1460)
 - [Themes](#themes-1480)
 - [Audio buffer and your interface](#audio-buffer-and-your-interface-1510)
+- [Settings > DSP: EXTENDED DSP, CPU cores and the FX loop](#settings--dsp-extended-dsp-cpu-cores-and-the-fx-loop-1810)
+- [LOW GPU and live cables](#low-gpu-and-live-cables-1790-1800)
 - [CAB LAB](#cab-lab)
   - [SPEAKER LAB: cabs and mics in 3D](#speaker-lab-cabs-and-mics-in-3d-1590)
   - [Dual cabs](#dual-cabs-1610)
 - [GATE and PRO COMP](#gate-and-pro-comp-1520)
+- [TRACK GATE, delays and spring reverb](#track-gate-delays-and-spring-reverb-1660)
+- [PITCH RACK](#pitch-rack-1760)
+- [More copies: WAH, PRO EQ and the delays](#more-copies-wah-pro-eq-and-the-delays-1820)
+- [TUBE LAB 2: dual amps](#tube-lab-2-dual-amps-1670)
 - [OUTPUT page: limiter and stereo width](#output-page-limiter-and-stereo-width-1580)
 - [LABS and the PEDALS drawer](#labs-and-the-pedals-drawer-1600)
 - [Other blocks](#other-blocks)
@@ -81,8 +92,8 @@ describes every version, with measurements.
 
 ## Signal chain
 
-The chain is a Fractal-style grid ([`ChainGrid.h`](../NeuralAmpModeler/ChainGrid.h)), 4 rows by 14
-columns, between IN and OUT. AMP (an amp capture with A/B slots, then the noise gate and tone stack), CAB
+The chain is a grid ([`ChainGrid.h`](../NeuralAmpModeler/ChainGrid.h)), 4 rows by 14 columns (6 by 20
+with [EXTENDED DSP](#settings--dsp-extended-dsp-cpu-cores-and-the-fx-loop-1810)), between IN and OUT. AMP (an amp capture with A/B slots, then the noise gate and tone stack), CAB
 (the IR loader), the FX loop's Send and Return, and the pedals are all blocks on it.
 
 ```
@@ -101,7 +112,8 @@ columns, between IN and OUT. AMP (an amp capture with A/B slots, then the noise 
 - **Cables:** drag from a block's port (the dot on either side) to another block, or to IN / OUT, to
   add a cable or remove one that's already there. Click a cable to remove it. Cables are routed at
   right angles through the gaps between cells. Bright cables carry signal from IN to OUT; dim ones
-  are dead ends, such as the FX Loop Send, which is a tap.
+  are dead ends, such as the FX Loop Send, which is a tap. A live cable also shows its level as you
+  play (see [live cables](#low-gpu-and-live-cables-1790-1800)).
 - **Latency:** each path's latency is tracked, and where paths merge the faster ones are delayed
   (from a short history buffer per block) to line up with the slowest, so parallel paths never
   comb-filter. The DAW is told the latency of the longest path into OUT.
@@ -1301,6 +1313,85 @@ How it works:
   calls it once more.
 - The Preferences dialog's buffer list (`kBufferSizeOptions`) gained 48 and 384 to match.
 
+## Settings > DSP: EXTENDED DSP, CPU cores and the FX loop (1.81.0)
+
+Settings has a **DSP** tab, between AUDIO and DISPLAY.
+
+**EXTENDED DSP** (off by default) gives you more to build with:
+
+- **A bigger grid: 6 rows by 20 columns** instead of 4 by 14. Turning it on asks first, with a warning:
+  everything you add costs processing power, and without enough of it, audio dropouts and crashes become
+  more likely. Raise the audio buffer if you hear dropouts.
+- **CPU CORES** (1 to 4, 2 by default): parallel blocks processed at the same time on several cores.
+
+A preset made with EXTENDED DSP on still plays in full with it off: the grid grows to show any block
+placed outside 4 x 14.
+
+**How the cores share the work.** Blocks in the same column only read the columns before them, and each
+writes its own buffers, so they can run at the same time. When a column holds two or more heavy blocks
+(AMP, the Tube Labs, the capture pedals, the cabs and CAB LAB, the reverbs, PITCH RACK, TAPE ECHO,
+HI-GAIN PRE), the audio thread publishes the column's blocks as a batch of tasks and works through them
+alongside the worker threads ([`DspThreadPool.h`](../NeuralAmpModeler/DspThreadPool.h)):
+
+- A task is claimed with a compare-and-swap on a counter tagged with the batch's number, so a worker
+  still finishing one batch can never take a task from the next. Nothing on the audio path allocates,
+  locks or waits on the operating system; the audio thread only spins briefly for tasks a worker is
+  already running.
+- Only as many workers wake as the column has tasks beyond the audio thread's own. They run at the
+  audio thread's scheduling class ("Pro Audio"), flush denormals like it, spin for about 150
+  microseconds after a batch (the next column's usually follows), and then sleep.
+- Each worker has its own scratch buffers for the On-switch fades, and TUBE LAB and TUBE LAB 2 have their
+  own capture buffers. A column that holds REAL FEEL or the FX loop, or both AMP and TUBE LAB (which
+  share the AMP block's capture in AMP Capture mode), runs serially.
+- The output is bit-identical to running the blocks one after another.
+
+Measured offline at 64-sample blocks: two Tube Labs in parallel went from 14.4% of real time on one core
+to about 10% on two; a rig with two reverbs in parallel from 11.8% to 9.2%. More than two cores didn't
+help on the test machine, where a third and fourth worker shared physical cores with the
+audio thread.
+
+**LOOP SEND / LOOP RETURN** (standalone app) put the FX loop's two blocks on your interface. Each is a
+stereo pair of channels, or OFF:
+
+- **LOOP SEND**: the outputs LOOP OUT plays on. Cable them to your pedals, a rack unit or another amp.
+- **LOOP RETURN**: the inputs LOOP IN listens to. With Mix at 100% the return replaces the signal at LOOP
+  IN; lower blends the signal arriving at LOOP IN back in.
+- The note under each row says what it's doing, or that the interface doesn't have that pair, or that it
+  clashes with the main outputs or the guitar input.
+- The trip through the hardware adds the interface's input and output latency to the loop's path, so a
+  Mix below 100% can sound slightly phasey, as with a hardware loop's mix knob.
+
+In a DAW the plug-in uses its aux bus for the loop instead, as before.
+
+How it works: RtAudio opens one contiguous run of channels per direction, so the app's host (a local
+edit of iPlug2's `IPlugAPP_host`) opens the run that covers both the main and the loop channels. The
+audio callback finds the main channels and the loop's by their offsets in it, silences the rest of the
+run, and hands the loop's to the plug-in through `IPlugAPP::mAppLoopIn` / `mAppLoopOut`. The choices are
+saved in `settings.ini` as `loop_in` and `loop_out` (the first channel of the pair, 0 = off), and
+EXTENDED DSP and CPU CORES in `ui.ini` as `extended_dsp` and `dsp_cores`.
+
+**AVX2.** Since 1.81.0 the 64-bit app and plug-in are compiled for AVX2 + FMA (`common-win.props`).
+Standard WaveNet captures run about 1.7x faster than with the default x64 build (SSE2), but not
+everything gains: Measured on the whole plugin at 64-sample blocks: a rig with a standard (A1) WaveNet capture went from 23% to 18% of real time; a rig with an A2 capture (whose layers already had a run-time AVX2 kernel) and the Tube Lab got 3-5% heavier (9.5% -> 9.8%, one Tube Lab 8.4% -> 8.9%), because the Tube Lab's solver doesn't gain from AVX2. Every block's
+output is the same as before to rounding (-130 dB), except PITCH RACK's Smart splice, which picks its
+splice points by matching the waveform, so a rounding-sized change moves them: the waveform differs, the
+sound doesn't. It needs a CPU from 2013 or later.
+
+## LOW GPU and live cables (1.79.0, 1.80.0)
+
+**LOW GPU** (Settings > Display, off by default). Every repaint composites the whole window, so what
+costs graphics power is how often something asks to repaint, not how much of the window it covers. With
+LOW GPU on, the controls that animate by themselves (the live spectrum strip, the EQ analyzers and the
+IN/OUT meters) repaint at most 12 times a second, all on one shared clock so they share frames
+([`UiPerf.h`](../NeuralAmpModeler/UiPerf.h)), and the analyzers stop after 1.5 s of quiet. Knobs, clicks
+and popups still move at the full frame rate.
+
+**Live cables.** The audio thread keeps each block's output peak, and a cable on the live path (IN to
+OUT) brightens and thickens with it as you play: full at 0 dBFS, at rest below -60 dBFS, falling back
+over about 0.6 s. It's one line, showing the louder side for a stereo cable (1.82.0; 1.80.0 drew a
+stereo cable as two lines). The grid repaints only while a level is moving, and with LOW GPU on, on its
+12 fps clock.
+
 ## CAB LAB
 
 [`CabLab.h`](../NeuralAmpModeler/CabLab.h): a speaker cab, two close mics and a room, mono in and stereo out.
@@ -1508,6 +1599,52 @@ round trip. The loop gain gives an RT60 of `1 + 3 * decay` seconds. Dwell is the
 transducer: gain `0.6 + 6 * dwell^2`, rolled off at 5 kHz, then `tanh`. The springs' read points wobble
 by 3 samples at 0.9 Hz.
 
+## PITCH RACK (1.76.0)
+
+A dual-voice studio pitch shifter ([`PitchRack.h`](../NeuralAmpModeler/PitchRack.h)), modelled on how the
+late-80s rack shifters worked rather than on any one unit. It opens in the big two-row card.
+
+- **Two voices,** A (left) and B (right), each a pitch shifter followed by its own delay and feedback.
+  The feedback goes back into the voice's shifter, so every repeat is shifted again: a fifth climbs in
+  fifths, an octave in octaves.
+- **The shifter** is the splicing kind: two read taps sweep through a short memory at the new speed and
+  crossfade with `sin^2` windows (which sum to one).
+- **Splice (1.78.0):** **Smart** places each new splice where the waveform best lines up with what's
+  playing (normalised correlation over one guitar period), so the splices don't beat against the note.
+  **Vintage** is the earliest shifters' fixed form: each tap sweeps through a fixed window and wraps
+  around, unaligned. On small detunes the two taps' comb filter sweeps slowly, which gives the warble:
+  about 1.1 dB of level movement on a held note, against 0.14 dB with Smart. Changing it crossfades.
+- **The wet path** has the bandwidth of the converters of the time (15 kHz, steep), and Hi Cut below that.
+
+Modes:
+
+- **Micro:** voice A up by Fine cents and B down by the same, after short delays: the stereo detune
+  thickener (about 9 cents and 10-20 ms).
+- **Dual:** each voice shifted by its own semitones (up to two octaves either way); Fine spreads them.
+- **Diatonic:** each voice a scale interval (a 3rd, a 5th...) above or below the note you play, in
+  **Key** and **Scale** (Major, Minor, Dorian, Phrygian, Lydian, Mixolydian, Harmonic Minor), so the
+  harmony stays in the key. The note tracker runs YIN on a band-limited copy decimated to about 12 kHz,
+  every 4 ms; a new note counts only when it's read twice in a row, and on chords it can't read it holds
+  the last one.
+- **Reverse:** each voice plays its last window (Delay A / Delay B long) backwards, shifted; with
+  Feedback the reversed, pitched repeats cascade.
+
+The output is always stereo; Width sets how far apart A and B are, and Mix at 50% has dry and wet both at
+full level. It comes with 18 presets.
+
+## More copies: WAH, PRO EQ and the delays (1.82.0)
+
+**WAH, PRO EQ, DIGI DELAY, ANALOG DLY and TAPE ECHO** come in three copies each (WAH 2, WAH 3, PRO EQ
+2...), handed out by the AMP NEST like the other effects' copies. Each copy has its own knobs and popup
+(PRO EQ's with its own spectrum), its own DSP object, and the delays' copies follow tap tempo by their
+own Tap division. A copy's output is bit-identical to its original's with the same settings.
+
+How it works: the copies are grid ids 50-59 (`chaingrid::LateCopyId`). Their params are copies of the
+original's, in the spans listed in `kLateCopySpans` (On, Engaged, the knobs and the Tap division), made
+with `IParam::Init` and named after the original's with " 2" or " 3" (`Wah Position 2`). `CopyParam(id, p)`
+is copy `id`'s version of the original's param `p`. The audio case and the popup are the original's,
+reading params through `CopyParam`.
+
 ## TUBE LAB 2: dual amps (1.67.0)
 
 TUBE LAB 2 is a second Tube Lab: its own `tube::TubeStage` pair (`mTubeStage2`) and its own capture
@@ -1634,8 +1771,10 @@ them that step fails, and the VST3 has to be copied there by hand. The build is 
 it over `NeuralAmpModeler.vst3\Contents\x86_64-win\NeuralAmpModeler.vst3` inside the installed
 bundle, from an elevated (admin) prompt.
 
-Compiler flags: SSE2 (the default). `/arch:AVX2` was measured in 1.45.0 and made the whole plugin
-slower on the test machine (19.6% → 20.9% of a core), so it isn't used.
+Compiler flags: AVX2 + FMA since 1.81.0 (`/arch:AVX2` for x64 in `common-win.props`; SSE2 before).
+In 1.45.0 it measured slower on the whole plugin (19.6% → 20.9% of a core): the Tube Lab's solver
+doesn't gain from it. What changed is the amp captures: standard (A1) captures are about 1.7x faster
+with it. Measured on the whole plugin at 64-sample blocks: a rig with a standard (A1) WaveNet capture went from 23% to 18% of real time; a rig with an A2 capture (whose layers already had a run-time AVX2 kernel) and the Tube Lab got 3-5% heavier (9.5% -> 9.8%, one Tube Lab 8.4% -> 8.9%), because the Tube Lab's solver doesn't gain from AVX2.
 
 Versioning: `PLUG_VERSION_STR` / `PLUG_VERSION_HEX` in `NeuralAmpModeler/config.h`, with a
 [CHANGELOG.md](../CHANGELOG.md) entry for every build that gets used. A patch release is fixes only, a
@@ -1745,7 +1884,11 @@ loading, and older versions skip settings they don't recognize. The chain grid i
 too: `GridCellN` (block N's cell, -1 = off the grid), `GridInN` and `GridOut` (bit masks of which
 blocks, or bit 15 = IN, are cabled into each block and into OUT), and `ChainGridV1`, for every block
 id N but 15. The masks are 64-bit since 1.34.0 (33 blocks), stored as whole-number doubles (exact up
-to 53 bits). Blocks after id 31 have their grid params at the end of the parameter list, so adding
+to 53 bits). Since 1.82.0 (60 blocks) each mask is two params: `GridInN` / `GridOut` hold bits 0-51
+(everything older presets have), and `GridInHiN` / `GridOutHi` the rest. Since 1.81.0 cells are numbered
+on an 8 x 20 grid (row x 20 + column); `GridLayoutV2` marks a state saved that way, and a state without
+it (numbered on 4 x 14) is converted on load. The 1.82.0 copies' params are saved by name, as
+`<original's name> 2` and `... 3`. Blocks after id 31 have their grid params at the end of the parameter list, so adding
 one never moves an existing parameter's index. A state without them is laid out from its old Slot
 params on load. After the capture-pedal paths come `###CabLabIRV1###` (CAB LAB's IR path),
 `###ExtraCabIRsV1###` (a count, then CAB 2 / CAB 3's IR paths), and since 1.42.0

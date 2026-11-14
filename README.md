@@ -1192,10 +1192,11 @@ range comes forward, and the top octave falls away instead of fizzing.
 - Anything you can't see or haven't switched on doesn't run: the debug probes, the spectrum
   analyzers and the tuner's pitch search all stop when they're hidden, and blocks that are off or
   not cabled in are skipped.
-- The whole app is built for AVX2 + FMA: standard amp captures run about 1.7x faster than with the
-  default x64 build. The A2 capture layers also have a hand-written AVX2/FMA kernel (about 5x faster
-  than the generic matrix code), and cab IRs use a zero-latency partitioned FFT. It needs a CPU from 2013
-  or later.
+- The whole app is built for AVX2 + FMA (it needs a CPU from 2013 or later). Standard (A1) amp captures
+  run about 1.7x faster than with the default x64 build, so a rig with one uses about 20% less CPU. The
+  A2 capture layers already had a hand-written AVX2/FMA kernel (about 5x faster than the generic matrix
+  code), and the Tube Lab's solver doesn't gain from AVX2, so rigs built on those are about the same
+  (3-5% heavier). Cab IRs use a zero-latency partitioned FFT.
 - With EXTENDED DSP, parallel blocks run on several cores (see [More room](#more-room-extended-dsp-and-the-fx-loop)).
 - **LOW GPU** cuts the graphics load further: meters and analyzers repaint together on one 12 fps clock
   and stop in silence.
