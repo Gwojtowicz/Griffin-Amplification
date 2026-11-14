@@ -16,7 +16,7 @@
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-f2a541">
   <img alt="Platform: Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-5cc8ff">
-  <img alt="Version 1.75.1" src="https://img.shields.io/badge/version-1.75.1-c49bff">
+  <img alt="Version 1.82.0" src="https://img.shields.io/badge/version-1.82.0-c49bff">
   <a href="https://www.neuralampmodeler.com"><img alt="Plays NAM captures" src="https://img.shields.io/badge/plays-NAM%20captures-7ee081"></a>
   <a href="https://www.tone3000.com"><img alt="Tones from TONE3000" src="https://img.shields.io/badge/tones-TONE3000-ff6b6b"></a>
 </p>
@@ -86,6 +86,7 @@ one size. The AMP block shows a Slim button on these files: its knob at 0 plays 
 - [NAM and TONE3000](#nam-and-tone3000)
 - [What it does](#what-it-does)
 - [The signal chain](#the-signal-chain)
+- [More room: EXTENDED DSP and the FX loop](#more-room-extended-dsp-and-the-fx-loop)
 - [Tube Lab: a real circuit, simulated](#tube-lab-a-real-circuit-simulated)
   - [The math](#the-math): every stage, equation and measurement
     - [Why simulate the circuit](#why-simulate-the-circuit)
@@ -123,13 +124,14 @@ one size. The AMP block shows a Slim button on these files: its knob at 0 plays 
 | | |
 |---|---|
 | 🎛️ **NAM captures** | Load [NAM](https://www.neuralampmodeler.com) captures (`.nam` files, thousands of them on [TONE3000](https://www.tone3000.com)) into the AMP block, with A/B slots, a noise gate and a tone stack. Two **CAPTURE** pedals load pedal captures. |
-| 🔌 **Patchable chain** | A 4 × 14 grid between IN and OUT. Drag blocks in and cable them in series or parallel. Parallel paths are latency-aligned, so they never comb-filter. |
+| 🔌 **Patchable chain** | A 4 × 14 grid between IN and OUT (6 × 20 with [EXTENDED DSP](#more-room-extended-dsp-and-the-fx-loop)). Drag blocks in and cable them in series or parallel. Parallel paths are latency-aligned, so they never comb-filter, and can run on several CPU cores at once. |
 | 🔥 **Tube Lab** | A 12AX7 preamp (one or two stages), tone stack, phase inverter and push-pull EL34/6L6 power amp into a speaker load, solved as an electrical circuit every sample. |
 | 🔬 **Debug page** | A live schematic with the circuit's real voltages, a two-channel oscilloscope on any of 20 probe points, a plain-English readout and a CSV log. |
 | 🎤 **CAB LAB** | A speaker cab (modeled or an IR), two mics from six types with position, distance and pan, and a stereo room. |
 | 📈 **PRO EQ / Output EQ** | 8-band parametric EQs (bells, shelves, 12-48 dB/oct cuts, notch) with a live IN/OUT spectrum analyzer. |
 | 🎚️ **Dynamics** | **GATE** (it can listen to your clean guitar wherever it sits) and **PRO COMP** (Clean, Opto or FET). |
-| 🎸 **Pedals** | Comp, OD, Tight Drive, Hi-Gain Preamp, Chorus, Flanger, Flange Doubler, Phaser, Tremolo, Wah, Delay, Reverb, Sky Verb, an FX loop, and up to three copies of each effect. |
+| 🎸 **Pedals** | Comp, OD, Tight Drive, Hi-Gain Preamp, Chorus, Flanger, Flange Doubler, Phaser, Tremolo, Wah, Delay, Digi Delay, Analog Delay, Tape Echo, Reverb, Sky Verb, Spring Verb, **Pitch Rack**, and three copies of each effect, Wah, PRO EQ and the delays included. |
+| 🔁 **FX loop** | LOOP OUT and LOOP IN blocks anywhere in the chain: your own pedals or rack on spare interface channels in the standalone app, or a DAW's aux bus in the plug-in. |
 | 🎹 **MIDI** | Map any knob or switch to a footswitch or an expression pedal, Ableton-style. |
 | 🎯 **Tuner, meters, Mono** | A tuner, IN/OUT meters with a clip warning, an output limiter and a Mono output switch. |
 
@@ -158,6 +160,40 @@ flowchart LR
 ```
 
 <sub>The chain in that screenshot: two cab-and-reverb paths in parallel after the amp, merged before the FX loop.</sub>
+
+---
+
+## More room: EXTENDED DSP and the FX loop
+
+**Settings > DSP** is where you trade processing power for a bigger rig.
+
+**EXTENDED DSP** (off by default) makes the grid **6 rows × 20 columns** instead of 4 × 14, so long serial
+chains and wide parallel rigs fit. It asks before switching on: everything you add costs processing power,
+and without enough of it, dropouts and crashes become more likely. Presets made with it on still load and
+play in full with it off; the grid grows to show their blocks.
+
+**CPU CORES** (with EXTENDED DSP on, 2 by default) spreads the grid over more than one core. Blocks in the
+same column don't depend on each other, so when a column holds two or more heavy blocks (amps, Tube Labs,
+captures, cabs, reverbs, Pitch Rack) the audio thread hands some of them to worker threads and runs the
+rest itself. Workers run at the audio thread's scheduling priority, never allocate or lock on the audio
+path, and sleep when there's nothing to do. The output is bit-identical to running the blocks one after
+another. Two amps in parallel cost about 30% less CPU on two cores than on one.
+[`DspThreadPool.h`](NeuralAmpModeler/DspThreadPool.h)
+
+**LOOP SEND / LOOP RETURN** put the FX loop on your audio interface in the standalone app. Pick a pair of
+outputs for **LOOP OUT** and a pair of inputs for **LOOP IN**: the app opens those channels next to the
+main ones, and whatever you patch between them (a pedalboard, a rack unit, a real amp's preamp) becomes a
+block in the chain, with a Mix knob. The notes under each choice say if the interface lacks that pair or
+it clashes with your guitar input or main outputs. In a DAW the plug-in uses its aux bus instead.
+
+### Pitch Rack
+
+A dual-voice studio pitch shifter: two voices panned left and right, each with its own shift, delay and
+feedback. **Micro** detunes for width, **Dual** shifts by semitones, **Diatonic** keeps harmonies in a key
+and scale, and **Reverse** plays reversed, pitched echoes. **Splice** picks how it joins the shifted
+pieces: **Smart** lines them up by matching the waveform, and **Vintage** sweeps through a fixed window,
+with the slow warble the earliest shifters had. It comes with 18 presets.
+[`PitchRack.h`](NeuralAmpModeler/PitchRack.h)
 
 ---
 
@@ -1138,13 +1174,16 @@ range comes forward, and the top octave falls away instead of fizzing.
   a 1/4, dotted 1/8, 1/8, triplet or 1/16 note.
 - **GATE and PRO COMP:** a gate that can key off your clean guitar even when it sits after a
   high-gain amp, and a studio compressor with Clean, Opto and FET styles and a gain-reduction meter.
-- **Pedals:** up to three copies of each effect, each with its own knobs and popup.
+- **Pedals:** three copies of each effect (Wah, PRO EQ and the three delays included), each with its
+  own knobs and popup; the delays' copies each follow tap tempo by their own division.
+- **Live cables:** a cable on the live path brightens and thickens with the signal it carries as you play.
 - **A/B amp slots:** two amp captures, each with its own cab IRs, switchable instantly.
 - **MIDI:** click **MIDI** in the top bar to map footswitches and expression pedals to any knob or switch.
 - **Output:** Master Out, a lookahead limiter (0.7 ms), a soft safety clip, and stereo **Width** (0%
   sums left and right for a single speaker).
 - **Themes:** several color themes, in light or dark.
-- **Display:** Settings has AUDIO, DISPLAY and ABOUT tabs: a 30 or 60 fps cap and five window resolutions.
+- **Settings:** AUDIO, DSP, DISPLAY and ABOUT tabs: buffer size, EXTENDED DSP and the FX loop's channels,
+  a 30 or 60 fps cap, five window resolutions and **LOW GPU** (meters and analyzers update less often).
 
 ---
 
@@ -1153,8 +1192,13 @@ range comes forward, and the top octave falls away instead of fizzing.
 - Anything you can't see or haven't switched on doesn't run: the debug probes, the spectrum
   analyzers and the tuner's pitch search all stop when they're hidden, and blocks that are off or
   not cabled in are skipped.
-- The amp-capture engine has a hand-written SSE kernel plus an AVX2/FMA one picked at run time
-  (about 5x faster than the generic matrix code), and cab IRs use a zero-latency partitioned FFT.
+- The whole app is built for AVX2 + FMA: standard amp captures run about 1.7x faster than with the
+  default x64 build. The A2 capture layers also have a hand-written AVX2/FMA kernel (about 5x faster
+  than the generic matrix code), and cab IRs use a zero-latency partitioned FFT. It needs a CPU from 2013
+  or later.
+- With EXTENDED DSP, parallel blocks run on several cores (see [More room](#more-room-extended-dsp-and-the-fx-loop)).
+- **LOW GPU** cuts the graphics load further: meters and analyzers repaint together on one 12 fps clock
+  and stop in silence.
 - The UI only redraws what changes, clipped in hardware, so the meters don't redraw the whole window.
 - The UI runs at 30 fps by default, and the 3D chassis redraws only for changes you can see.
 - On an ordinary laptop, a full rig runs at a 128-sample buffer: about 5.3 ms round trip plus the
@@ -1164,7 +1208,8 @@ range comes forward, and the top octave falls away instead of fizzing.
 
 ## Building from source
 
-Windows x64 with the Visual Studio 2019 Build Tools. The libraries are git submodules pinned to the
+Windows x64 with the Visual Studio 2019 Build Tools. The 64-bit builds target AVX2 (set in
+`common-win.props`). The libraries are git submodules pinned to the
 commits this was built on, and the changes to them are kept as patches in [`patches/`](patches/).
 
 ```powershell
