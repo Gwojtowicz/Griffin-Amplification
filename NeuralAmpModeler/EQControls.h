@@ -30,6 +30,7 @@
 #include "IControl.h"
 #include "ProEQ.h"
 #include "Spectrum.h"
+#include "UiPerf.h"
 
 using namespace iplug;
 using namespace igraphics;
@@ -63,11 +64,37 @@ public:
     mLast = std::chrono::steady_clock::now();
   }
 
-  // Redraws every frame only while it shows a live (on, not frozen) spectrum.
-  bool IsDirty() override { return (!IsHidden() && _Live()) || IControl::IsDirty(); }
+  // Redraws every frame only while it shows a live (on, not frozen) spectrum. With LOW GPU on
+  // (UiPerf.h): at most once per slot of the shared clock, and not at all once the shown taps have
+  // been quiet (below -80 dBFS) for 1.5 s, so the display can fall away first. Edits still repaint
+  // at once (IControl::IsDirty).
+  bool IsDirty() override
+  {
+    if (IControl::IsDirty())
+      return true;
+    if (IsHidden() || !_Live())
+      return false;
+    if (!namui::gLowGpu)
+      return true;
+    // Draw() keeps the taps fed; it may not run for a while now, so keep them fed from here.
+    float peak = 0.f;
+    for (spectrum::Tap* t : {_ShownTap(0), _ShownTap(1)})
+      if (t)
+      {
+        t->KeepAlive();
+        peak = std::max(peak, t->RecentPeak(2048));
+      }
+    const auto now = std::chrono::steady_clock::now();
+    if (peak > 1e-4f)
+      mLastLoud = now;
+    else if (now - mLastLoud > std::chrono::milliseconds(1500))
+      return false;
+    return namui::LowGpuSlot() != mDrawnSlot;
+  }
 
   void Draw(IGraphics& g) override
   {
+    mDrawnSlot = namui::LowGpuSlot();
     const auto now = std::chrono::steady_clock::now();
     const double dt = std::min(0.25, std::chrono::duration<double>(now - mLast).count());
     mLast = now;
@@ -927,6 +954,8 @@ private:
   std::function<void()> mOnClick;
   spectrum::Analyzer mAnalyzer;
   std::chrono::steady_clock::time_point mLast;
+  std::chrono::steady_clock::time_point mLastLoud = std::chrono::steady_clock::now(); // LOW GPU's quiet check
+  long long mDrawnSlot = -1; // LOW GPU: the clock slot of the last draw
   int mHover = -1, mDragBand = -1;
   Drag mDrag = Drag::None;
   float mDragStartX = 0.f, mDragStartY = 0.f;

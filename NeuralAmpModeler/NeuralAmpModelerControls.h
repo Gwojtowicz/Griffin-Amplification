@@ -16,6 +16,7 @@
 #include "IControls.h"
 #include "ChainGrid.h"
 #include "IPlugPaths.h"
+#include "UiPerf.h"
 
 #ifdef OS_WIN
   #include <Windows.h>
@@ -270,16 +271,21 @@ struct NAMChainGridGeometry
   IRECT grid; // the cells
   IRECT inStub, outStub;
   float cellW = 0.f, cellH = 0.f;
+  // 1.81.0: how much of the grid is shown (4 x 14, or 6 x 20 with EXTENDED DSP).
+  int rows = chaingrid::kStandardRows, cols = chaingrid::kStandardCols;
 
   NAMChainGridGeometry() = default;
   // Fills `area`'s width; cells are taller than wide (pedal-shaped, with room for a two-line
   // name), up to maxH for the whole grid.
-  NAMChainGridGeometry(const IRECT& area, float maxH)
+  NAMChainGridGeometry(const IRECT& area, float maxH, int numRows = chaingrid::kStandardRows,
+                       int numCols = chaingrid::kStandardCols)
+  : rows(std::clamp(numRows, 1, chaingrid::kRows))
+  , cols(std::clamp(numCols, 1, chaingrid::kCols))
   {
     const float stubW = std::clamp(area.W() * 0.045f, 22.f, 34.f);
-    cellW = (area.W() - 2.f * stubW) / chaingrid::kCols;
-    cellH = std::clamp(cellW * 1.5f, 30.f, std::max(30.f, maxH / chaingrid::kRows));
-    grid = IRECT(area.L + stubW, area.T, area.R - stubW, area.T + cellH * chaingrid::kRows);
+    cellW = (area.W() - 2.f * stubW) / cols;
+    cellH = std::clamp(cellW * 1.5f, 30.f, std::max(30.f, maxH / rows));
+    grid = IRECT(area.L + stubW, area.T, area.R - stubW, area.T + cellH * rows);
     const float stubH = std::min(cellH * 0.55f, 26.f);
     inStub = IRECT(area.L, RowY(0) - stubH * 0.5f, grid.L - 3.f, RowY(0) + stubH * 0.5f);
     outStub = IRECT(grid.R + 3.f, RowY(0) - stubH * 0.5f, area.R, RowY(0) + stubH * 0.5f);
@@ -298,8 +304,8 @@ struct NAMChainGridGeometry
   // The cell under (x, y), or the nearest one if it's off the grid.
   int CellAtClamped(float x, float y) const
   {
-    const int col = std::clamp((int)((x - grid.L) / cellW), 0, chaingrid::kCols - 1);
-    const int row = std::clamp((int)((y - grid.T) / cellH), 0, chaingrid::kRows - 1);
+    const int col = std::clamp((int)((x - grid.L) / cellW), 0, cols - 1);
+    const int row = std::clamp((int)((y - grid.T) / cellH), 0, rows - 1);
     return chaingrid::MakeCell(row, col);
   }
 
@@ -369,7 +375,7 @@ struct NAMChainGridGeometry
       else
       {
         float yg = grid.T, best = 1e9f;
-        for (int k = 0; k <= chaingrid::kRows; k++)
+        for (int k = 0; k <= rows; k++)
         {
           const float y = grid.T + k * cellH;
           const float cost = std::fabs(y - y0) + std::fabs(y - y3);
@@ -410,6 +416,32 @@ public:
   // 1.58.0: a click on OUT (not on its port) opens the OUTPUT page.
   void SetOutClick(std::function<void()> f) { mOutClick = std::move(f); }
 
+  // 1.80.0: live cables. takePeak(node, side) returns the loudest sample since the last call (and
+  // resets it); channels(node) is 1 or 2.
+  void SetLevelFuncs(std::function<float(int, int)> takePeak, std::function<int(int)> channels)
+  {
+    mTakePeak = std::move(takePeak);
+    mChannels = std::move(channels);
+  }
+
+  // Repaints while a cable's shown level moves visibly (with LOW GPU on, at most once per slot of its
+  // shared clock); still and silent, it doesn't.
+  bool IsDirty() override
+  {
+    if (IControl::IsDirty())
+      return true;
+    if (!mTakePeak || IsHidden())
+      return false;
+    if (namui::gLowGpu && namui::LowGpuSlot() == mDrawnSlot)
+      return false; // the peaks keep collecting until the next slot
+    _PullLevels();
+    for (int n = 0; n < chaingrid::kNumIds; n++)
+      for (int c = 0; c < 2; c++)
+        if (std::fabs(mShown[n][c] - mDrawnLevel[n][c]) > 0.02f)
+          return true;
+    return false;
+  }
+
   // Highlights the cell a dragged block would land in (-1 for none).
   void SetDropPreview(int cell)
   {
@@ -429,7 +461,7 @@ public:
 
     // Empty cells: a faint dot, so the grid reads as places to put things.
     for (int c = 0; c < chaingrid::kNumCells; c++)
-      if (grid.BlockAt(c) < 0)
+      if (chaingrid::CellRow(c) < mGeom.rows && chaingrid::CellCol(c) < mGeom.cols && grid.BlockAt(c) < 0)
       {
         const IRECT cell = mGeom.Cell(c);
         g.FillCircle(PluginColors::NAM_INK.WithOpacity(0.13f), cell.MW(), cell.MH(), 1.5f);
@@ -454,17 +486,34 @@ public:
       g.DrawText(stubText, isIn ? "IN" : "OUT", textArea);
     }
 
-    // Cables, dim ones first so the live path draws on top.
+    // Cables, dim ones first so the live path draws on top. 1.80.0: a live cable shows what it
+    // carries -- one line for mono, two (left above, right below) for stereo -- and
+    // each line brightens and thickens with that side's level as you play, falling back in silence.
+    mDrawnSlot = namui::LowGpuSlot();
+    for (int n = 0; n < chaingrid::kNumIds; n++)
+      mDrawnLevel[n][0] = mShown[n][0], mDrawnLevel[n][1] = mShown[n][1];
     for (int pass = 0; pass < 2; pass++)
       _ForEachEdge(grid, [&](int src, int dst) {
         const bool live = fromInput[src] && toOutput[dst];
         if (live != (pass == 1))
           return;
         const bool hovered = mHoverSrc == src && mHoverDst == dst;
-        const IColor color = hovered ? PluginColors::NAM_INK.WithOpacity(0.9f)
-                             : live  ? theme.WithOpacity(0.85f)
-                                     : PluginColors::NAM_INK.WithOpacity(0.22f);
-        _StrokeRoute(g, mGeom.Route(grid, src, dst), color, hovered ? 3.f : 2.f);
+        const auto route = mGeom.Route(grid, src, dst);
+        if (!live || !mTakePeak)
+        {
+          const IColor color = hovered ? PluginColors::NAM_INK.WithOpacity(0.9f)
+                               : live  ? theme.WithOpacity(0.85f)
+                                       : PluginColors::NAM_INK.WithOpacity(0.22f);
+          _StrokeRoute(g, route, color, hovered ? 3.f : 2.f);
+          return;
+        }
+        // 1.81.0: always one line (the user didn't want stereo cables split in two), showing the
+        // louder side's level.
+        const bool stereo = mChannels(src) == 2;
+        const float v = std::max(mShown[src][0], mShown[src][stereo ? 1 : 0]);
+        const IColor color =
+          hovered ? PluginColors::NAM_INK.WithOpacity(0.9f) : theme.WithOpacity(0.4f + 0.6f * v);
+        _StrokeRoute(g, route, color, (hovered ? 3.f : 2.f) + 1.6f * v);
       });
 
     // Ports: out on the right of IN and of each block, in on the left of OUT and of each block.
@@ -533,6 +582,7 @@ public:
     SetDirty(false);
   }
 
+
   void OnMouseDrag(float x, float y, float dX, float dY, const IMouseMod& mod) override
   {
     mMouseX = x;
@@ -558,6 +608,56 @@ public:
   }
 
 private:
+  // Live cables' scale: 0 at -60 dBFS (or quieter), 1 at 0 dBFS. Lines rise at once and fall back
+  // across the whole scale in about 0.6 s.
+  static constexpr float kLevelRangeDB = 60.f;
+  static constexpr float kTwinGap = 2.2f; // px either side of a stereo cable's centre line
+
+  void _PullLevels()
+  {
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::clamp(std::chrono::duration<float>(now - mLastPull).count(), 0.f, 0.25f);
+    mLastPull = now;
+    for (int n = 0; n < chaingrid::kNumIds; n++)
+      for (int c = 0; c < 2; c++)
+      {
+        const float peak = mTakePeak(n, c);
+        const float fresh =
+          peak > 0.f ? std::clamp(1.f + 20.f * std::log10(peak) / kLevelRangeDB, 0.f, 1.f) : 0.f;
+        mShown[n][c] = std::max(fresh, mShown[n][c] - 1.7f * dt);
+      }
+  }
+
+  // The route moved sideways by d px (positive: right of the direction of travel), corner by corner.
+  // Routes are right-angled, so at a corner the two segments' normals add up to the offset point.
+  static std::vector<std::pair<float, float>> _OffsetRoute(const std::vector<std::pair<float, float>>& pts, float d)
+  {
+    std::vector<std::pair<float, float>> p;
+    for (const auto& q : pts)
+      if (p.empty() || std::fabs(q.first - p.back().first) + std::fabs(q.second - p.back().second) > 0.01f)
+        p.push_back(q);
+    if (p.size() < 2)
+      return p;
+    auto normal = [&](size_t i) { // of segment i -> i + 1
+      const float dx = p[i + 1].first - p[i].first, dy = p[i + 1].second - p[i].second;
+      const float len = std::sqrt(dx * dx + dy * dy);
+      return std::make_pair(-dy / len, dx / len);
+    };
+    std::vector<std::pair<float, float>> out(p.size());
+    for (size_t i = 0; i < p.size(); i++)
+    {
+      auto n = i == 0 ? normal(0) : normal(i - 1);
+      if (i > 0 && i + 1 < p.size())
+      {
+        const auto m = normal(i);
+        if (std::fabs(n.first - m.first) + std::fabs(n.second - m.second) > 0.01f)
+          n = {n.first + m.first, n.second + m.second};
+      }
+      out[i] = {p[i].first + n.first * d, p[i].second + n.second * d};
+    }
+    return out;
+  }
+
   template <typename F>
   static void _ForEachEdge(const chaingrid::Grid& grid, F&& f)
   {
@@ -728,6 +828,12 @@ private:
   bool mDragFromOut = true;
   float mMouseX = 0.f, mMouseY = 0.f;
   const char* mLastTip = nullptr;
+  std::function<float(int, int)> mTakePeak; // 1.80.0, see SetLevelFuncs
+  std::function<int(int)> mChannels;
+  float mShown[chaingrid::kNumIds][2] = {}; // Each source's level per side, as shown (0..1)
+  float mDrawnLevel[chaingrid::kNumIds][2] = {};
+  std::chrono::steady_clock::time_point mLastPull = std::chrono::steady_clock::now();
+  long long mDrawnSlot = -1; // LOW GPU: the clock slot of the last draw
 };
 
 /// A vertical scrollbar for a list taller than its view (the AMP NEST pedal list): drag the thumb,
@@ -2438,10 +2544,26 @@ public:
     this->SetClean();
   }
 
-  bool IsDirty() override { return mMoving || Base::IsDirty(); }
+  // With LOW GPU on (UiPerf.h), at most once per slot of the shared clock. A reading that arrives in
+  // a slot already drawn is kept (mLowGpuPending) and drawn in the next one: IGraphics cleans every
+  // control after a paint, so the dirty flag alone would lose it.
+  bool IsDirty() override
+  {
+    const bool want = mMoving || mLowGpuPending || Base::IsDirty();
+    if (!want || !namui::gLowGpu)
+      return want;
+    if (namui::LowGpuSlot() == mDrawnSlot)
+    {
+      mLowGpuPending = true;
+      return false;
+    }
+    return true;
+  }
 
   void Draw(IGraphics& g) override
   {
+    mDrawnSlot = namui::LowGpuSlot();
+    mLowGpuPending = false;
     // Time since the last frame, so the motion below is the same at any frame rate.
     const auto now = Clock::now();
     const float dt = std::clamp(std::chrono::duration<float>(now - mLastDraw).count(), 0.f, 0.1f);
@@ -2598,6 +2720,8 @@ private:
   std::array<Clock::time_point, NC> mHoldSince{};
   std::array<Clock::time_point, NC> mClipUntil{};
   bool mMoving = true;
+  bool mLowGpuPending = false; // LOW GPU: a reading waiting for the next clock slot
+  long long mDrawnSlot = -1; // LOW GPU: the clock slot of the last draw
   std::function<void()> mClickFunc; // See SetClickFunc
 };
 
@@ -3296,6 +3420,8 @@ public:
   {
     std::function<int()> getFps;
     std::function<void(int)> setFps;
+    std::function<bool()> getLowGpu; // 1.79.0
+    std::function<void(bool)> setLowGpu;
     std::function<int()> getResolution; // Which one the window is at, or -1
     std::function<bool(int)> resolutionFits; // Does it fit this screen?
     std::function<void(int)> setResolution;
@@ -3318,6 +3444,11 @@ public:
     _Segment(g, mFps30, "30 FPS", fps == 30, kHoverFps30, true);
     _Segment(g, mFps60, "60 FPS", fps == 60, kHoverFps60, true);
     g.DrawText(note, "Lower uses less graphics power", mFpsNote);
+    g.DrawText(heading, "LOW GPU", mLowLabel);
+    const bool low = mCallbacks.getLowGpu();
+    _Segment(g, mLowOff, "OFF", !low, kHoverLowOff, true);
+    _Segment(g, mLowOn, "ON", low, kHoverLowOn, true);
+    g.DrawText(note, "Meters and spectrum update slower; the spectrum rests in silence", mLowNote);
     if (!mHasResolution)
       return;
     g.DrawText(heading, "RESOLUTION", mResLabel);
@@ -3334,6 +3465,10 @@ public:
       mCallbacks.setFps(30);
     if (mFps60.Contains(x, y))
       mCallbacks.setFps(60);
+    if (mLowOff.Contains(x, y))
+      mCallbacks.setLowGpu(false);
+    if (mLowOn.Contains(x, y))
+      mCallbacks.setLowGpu(true);
     if (mHasResolution)
       for (int i = 0; i < kNumResolutions; i++)
         if (mRes[i].Contains(x, y) && mCallbacks.resolutionFits(i))
@@ -3349,6 +3484,10 @@ public:
       hover = kHoverFps30;
     if (mFps60.Contains(x, y))
       hover = kHoverFps60;
+    if (mLowOff.Contains(x, y))
+      hover = kHoverLowOff;
+    if (mLowOn.Contains(x, y))
+      hover = kHoverLowOn;
     if (mHasResolution)
       for (int i = 0; i < kNumResolutions; i++)
         if (mRes[i].Contains(x, y))
@@ -3368,7 +3507,7 @@ public:
   }
 
 private:
-  static constexpr int kHoverFps30 = 100, kHoverFps60 = 101;
+  static constexpr int kHoverFps30 = 100, kHoverFps60 = 101, kHoverLowOff = 102, kHoverLowOn = 103;
 
   void _Layout()
   {
@@ -3379,6 +3518,11 @@ private:
     mFps30 = IRECT(x, y, x + 90.f, y + segH);
     mFps60 = IRECT(x + 90.f, y, x + 180.f, y + segH);
     mFpsNote = IRECT(x + 196.f, y, mRECT.R, y + segH);
+    y += segH + rowGap;
+    mLowLabel = IRECT(mRECT.L, y, mRECT.L + labelW, y + segH);
+    mLowOff = IRECT(x, y, x + 90.f, y + segH);
+    mLowOn = IRECT(x + 90.f, y, x + 180.f, y + segH);
+    mLowNote = IRECT(x + 196.f, y, mRECT.R, y + segH);
     y += segH + rowGap;
     mResLabel = IRECT(mRECT.L, y, mRECT.L + labelW, y + segH);
     const float segW = (mRECT.R - x) / kNumResolutions;
@@ -3399,9 +3543,142 @@ private:
 
   Callbacks mCallbacks;
   bool mHasResolution;
-  IRECT mFpsLabel, mFps30, mFps60, mFpsNote, mResLabel, mResNote;
+  IRECT mFpsLabel, mFps30, mFps60, mFpsNote, mLowLabel, mLowOff, mLowOn, mLowNote, mResLabel, mResNote;
   IRECT mRes[kNumResolutions];
   int mHover = -1;
+};
+
+/// Settings > DSP (1.81.0): rows of choices, each a label, a strip of segments and a note under it.
+/// Holds EXTENDED DSP (and its CPU CORES) and, in the standalone, the FX loop's interface channels.
+/// Everything is read through the callbacks each draw, so the rows follow changes made elsewhere.
+class NAMDspSettingsControl : public IControl
+{
+public:
+  struct Row
+  {
+    std::string label;
+    std::function<std::vector<std::string>()> options; // the segments' names
+    std::function<int()> selected; // which segment is lit (-1 = none)
+    std::function<void(int)> choose;
+    std::function<bool()> enabled; // nullptr = always
+    std::function<std::string()> note; // under the segments (may be empty)
+    bool warn = false; // the note is a warning (drawn in the accent colour)
+  };
+
+  NAMDspSettingsControl(const IRECT& bounds, std::vector<Row> rows)
+  : IControl(bounds)
+  , mRows(std::move(rows))
+  {
+  }
+
+  // Redrawn about twice a second while shown: the loop rows' notes report whether the interface opened them.
+  bool IsDirty() override
+  {
+    if (!IsHidden())
+    {
+      const auto now = std::chrono::steady_clock::now();
+      if (now - mLastDraw > std::chrono::milliseconds(500))
+        return true;
+    }
+    return IControl::IsDirty();
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    mLastDraw = std::chrono::steady_clock::now();
+    const IText heading(15.f, PluginColors::NAM_THEMEFONTCOLOR, "Michroma-Regular", EAlign::Near);
+    const IText note(12.f, PluginColors::NAM_THEMEFONTCOLOR.WithOpacity(0.65f), "Roboto-Regular", EAlign::Near);
+    const IText warnText(12.f, PluginColors::NAM_THEMECOLOR, "Roboto-Regular", EAlign::Near);
+    for (int r = 0; r < (int)mRows.size(); r++)
+    {
+      const Row& row = mRows[r];
+      const bool enabled = !row.enabled || row.enabled();
+      g.DrawText(heading.WithFGColor(heading.mFGColor.WithOpacity(enabled ? 1.f : 0.4f)), row.label.c_str(), _Label(r));
+      const std::vector<std::string> options = row.options();
+      const int sel = row.selected();
+      for (int i = 0; i < (int)options.size(); i++)
+      {
+        const IRECT seg = _Segment(r, i, (int)options.size());
+        const bool on = i == sel;
+        const IColor fill = on ? PluginColors::NAM_THEMECOLOR.WithOpacity(enabled ? 1.f : 0.4f)
+                               : PluginColors::NAM_SURFACE.WithContrast(enabled && mHoverRow == r && mHoverSeg == i ? 0.1f : 0.f);
+        g.FillRect(fill, seg);
+        g.DrawRect(PluginColors::NAM_INK.WithOpacity(0.25f), seg, nullptr, 1.f);
+        const IColor ink = on ? PluginColors::NAM_ONACCENT : PluginColors::NAM_THEMEFONTCOLOR;
+        g.DrawText(IText(13.f, ink.WithOpacity(enabled ? 1.f : 0.35f), "Roboto-Regular"), options[i].c_str(), seg);
+      }
+      if (row.note)
+      {
+        const std::string text = row.note();
+        if (!text.empty())
+          g.DrawText(row.warn ? warnText : note, text.c_str(), _Note(r));
+      }
+    }
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod& mod) override
+  {
+    int r, i;
+    if (_HitTest(x, y, r, i))
+      mRows[r].choose(i);
+    SetDirty(false);
+  }
+
+  void OnMouseOver(float x, float y, const IMouseMod& mod) override
+  {
+    int r = -1, i = -1;
+    if (!_HitTest(x, y, r, i))
+      r = i = -1;
+    if (r != mHoverRow || i != mHoverSeg)
+    {
+      mHoverRow = r;
+      mHoverSeg = i;
+      SetDirty(false);
+    }
+    IControl::OnMouseOver(x, y, mod);
+  }
+
+  void OnMouseOut() override
+  {
+    mHoverRow = mHoverSeg = -1;
+    IControl::OnMouseOut();
+  }
+
+private:
+  static constexpr float kLabelW = 170.f, kSegH = 28.f, kNoteH = 18.f, kRowH = 28.f + 4.f + 18.f + 16.f;
+  static constexpr float kMaxSegW = 90.f;
+
+  IRECT _RowRect(int r) const { return IRECT(mRECT.L, mRECT.T + r * kRowH, mRECT.R, mRECT.T + r * kRowH + kSegH); }
+  IRECT _Label(int r) const { return _RowRect(r).GetFromLeft(kLabelW); }
+  IRECT _Segment(int r, int i, int n) const
+  {
+    const IRECT strip = _RowRect(r).GetReducedFromLeft(kLabelW);
+    const float w = std::min(kMaxSegW, strip.W() / std::max(1, n));
+    return IRECT(strip.L + i * w, strip.T, strip.L + (i + 1) * w, strip.B);
+  }
+  IRECT _Note(int r) const
+  {
+    const IRECT row = _RowRect(r);
+    return IRECT(row.L + kLabelW, row.B + 4.f, row.R, row.B + 4.f + kNoteH);
+  }
+
+  bool _HitTest(float x, float y, int& r, int& i) const
+  {
+    for (r = 0; r < (int)mRows.size(); r++)
+    {
+      if (mRows[r].enabled && !mRows[r].enabled())
+        continue;
+      const int n = (int)mRows[r].options().size();
+      for (i = 0; i < n; i++)
+        if (_Segment(r, i, n).Contains(x, y))
+          return true;
+    }
+    return false;
+  }
+
+  std::vector<Row> mRows;
+  int mHoverRow = -1, mHoverSeg = -1;
+  std::chrono::steady_clock::time_point mLastDraw;
 };
 
 /// Preferences (1.48.0): the colour theme (six palettes, dark or light) and the spectrum strip.
@@ -3555,10 +3832,11 @@ public:
                          NAMBufferSizeControl::Callbacks bufferCallbacks = NAMBufferSizeControl::Callbacks(),
                          bool bufferEditable = false, IControl* themePicker = nullptr,
                          IControl* displaySettings = nullptr, std::function<int()> getTab = nullptr,
-                         std::function<void(int)> setTab = nullptr)
+                         std::function<void(int)> setTab = nullptr, IControl* dspSettings = nullptr)
   : IContainerBaseWithNamedChildren(bounds)
   , mThemePicker(themePicker)
   , mDisplaySettings(displaySettings)
+  , mDspSettings(dspSettings)
   , mGetTab(std::move(getTab))
   , mSetTab(std::move(setTab))
   , mBufferCallbacks(std::move(bufferCallbacks))
@@ -3729,12 +4007,17 @@ public:
       AddNamedChildControl(new AboutControl(aboutArea, leftStyle, leftText), mControlNames.about));
     if (mDisplaySettings)
     {
-      mDisplaySettings->SetTargetAndDrawRECTs(IRECT(titleArea.L, contentTop, titleArea.R, contentTop + 100.f));
+      mDisplaySettings->SetTargetAndDrawRECTs(IRECT(titleArea.L, contentTop, titleArea.R, contentTop + 150.f));
       mTabControls[kTabDisplay].push_back(AddNamedChildControl(mDisplaySettings, mControlNames.display));
+    }
+    if (mDspSettings) // 1.81.0
+    {
+      mDspSettings->SetTargetAndDrawRECTs(IRECT(titleArea.L, contentTop, titleArea.R, pageArea.B - 10.f));
+      mTabControls[kTabDsp].push_back(AddNamedChildControl(mDspSettings, mControlNames.dsp));
     }
     if (mThemePicker)
     {
-      const float top = contentTop + 124.f;
+      const float top = contentTop + 174.f;
       mThemePicker->SetTargetAndDrawRECTs(IRECT(titleArea.L, top, titleArea.R, top + 54.f));
       mTabControls[kTabDisplay].push_back(AddNamedChildControl(mThemePicker, mControlNames.theme));
     }
@@ -3760,6 +4043,7 @@ private:
   enum ETab
   {
     kTabAudio = 0,
+    kTabDsp, // 1.81.0
     kTabDisplay,
     kTabAbout,
     kNumTabs
@@ -3779,7 +4063,7 @@ private:
 
     void Draw(IGraphics& g) override
     {
-      static const char* const names[kNumTabs] = {"AUDIO", "DISPLAY", "ABOUT"};
+      static const char* const names[kNumTabs] = {"AUDIO", "DSP", "DISPLAY", "ABOUT"};
       const int current = mGet();
       for (int i = 0; i < kNumTabs; i++)
       {
@@ -3849,6 +4133,7 @@ private:
   bool mBufferEditable = false;
   IControl* mThemePicker = nullptr;
   IControl* mDisplaySettings = nullptr;
+  IControl* mDspSettings = nullptr;
   std::function<int()> mGetTab;
   std::function<void(int)> mSetTab;
   std::vector<IControl*> mTabControls[kNumTabs];
@@ -3871,6 +4156,7 @@ private:
     const std::string calibrateInput = "CalibrateInput";
     const std::string close = "Close";
     const std::string display = "Display";
+    const std::string dsp = "Dsp";
     const std::string inputCalibrationLevel = "InputCalibrationLevel";
     const std::string modelInfo = "ModelInfo";
     const std::string outputMode = "OutputMode";

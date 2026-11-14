@@ -14,9 +14,17 @@
 
 namespace chaingrid
 {
-constexpr int kRows = 4;
-constexpr int kCols = 14;
+// 1.81.0: cells are numbered on an 8 x 20 grid (row * kCols + col), the most EXTENDED DSP can show.
+// How much of it is in use is up to the plugin (Grid::rows / cols): 4 x 14 normally, as before, and
+// 6 x 20 with EXTENDED DSP on. States saved before 1.81.0 numbered cells on 4 x 14; FromLegacyCell
+// converts them (see kGridLayoutV2 in the plugin).
+constexpr int kRows = 8;
+constexpr int kCols = 20;
 constexpr int kNumCells = kRows * kCols;
+constexpr int kLegacyCols = 14;
+constexpr int kStandardRows = 4, kStandardCols = 14;
+constexpr int kExtendedRows = 6, kExtendedCols = 20;
+constexpr int FromLegacyCell(int c) { return c < 0 ? c : (c / kLegacyCols) * kCols + c % kLegacyCols; }
 
 // Block ids. 0..kNumPedalBlocks-1 are the pedals (same indices as kPedals in the plugin), then the
 // fixed blocks. CAB / SEND / RETURN deliberately match the plugin's kCabPedalIdx /
@@ -67,33 +75,71 @@ constexpr int kTapeEcho = kFirstLatePedal + 16;
 constexpr int kSpringVerb = kFirstLatePedal + 17;
 // 1.67.0: TUBE LAB 2, a second Tube Lab (its own params, stages and capture), for dual amps.
 constexpr int kTubeLab2 = kFirstLatePedal + 18;
-constexpr int kNumLatePedals = 19;
-// Every id: blocks 0..kInput-1, Input, the extra pedals, then the late pedals.
-constexpr int kNumIds = kFirstLatePedal + kNumLatePedals;
+// 1.76.0: PITCH RACK, a dual-voice studio pitch shifter (PitchRack.h).
+constexpr int kPitchRack = kFirstLatePedal + 19;
+constexpr int kNumLatePedals = 20;
+// 1.82.0: two more copies each of WAH, PRO EQ, DIGI DELAY, ANALOG DLY and TAPE ECHO ("WAH 2", "WAH 3").
+// Copy k (1..kLateCopiesPerType) of kLateCopyTypes[t] has id LateCopyId(t, k).
+constexpr int kNumLateCopyTypes = 5;
+constexpr int kLateCopyTypes[kNumLateCopyTypes] = {kWah, kProEq, kDigiDelay, kAnalogDelay, kTapeEcho};
+constexpr int kLateCopiesPerType = 2;
+constexpr int kFirstLateCopy = kFirstLatePedal + kNumLatePedals;
+constexpr int kNumLateCopies = kNumLateCopyTypes * kLateCopiesPerType;
+// Every id: blocks 0..kInput-1, Input, the extra pedals, the late pedals, then their copies.
+constexpr int kNumIds = kFirstLateCopy + kNumLateCopies;
 constexpr int kOutput = kNumIds;
 using Mask = uint64_t;
-// One bit per source id (Output is never a source). 64 bits since 1.34.0 (32 ids filled the old
-// 32-bit masks); the mask params are stepped doubles, exact for whole numbers up to 2^53, so they
-// hold any mask of up to 53 ids, and states saved with 32-bit masks load unchanged.
-static_assert(kNumIds <= 53, "mask params are doubles: exact up to 2^53");
+// One bit per source id (Output is never a source). The mask params are stepped doubles, exact for
+// whole numbers up to 2^53, so since 1.82.0 (more than 53 ids) each mask is two params: GridIn holds
+// bits 0..kMaskLoBits-1 (all that older states have) and GridInHi the rest.
+static_assert(kNumIds <= 64, "masks are 64 bits");
+constexpr int kMaskLoBits = 52;
+constexpr Mask kMaskLo = ((Mask)1 << kMaskLoBits) - 1;
+constexpr bool IsLateCopy(int id) { return id >= kFirstLateCopy && id < kNumIds; }
+// Which kLateCopyTypes entry a late pedal is (-1: it has no copies).
+constexpr int LateCopyTypeIndex(int type)
+{
+  for (int t = 0; t < kNumLateCopyTypes; t++)
+    if (kLateCopyTypes[t] == type)
+      return t;
+  return -1;
+}
+constexpr int LateCopyId(int t, int copy) { return kFirstLateCopy + t * kLateCopiesPerType + copy - 1; }
 constexpr Mask Bit(int id) { return (Mask)1 << id; }
 
 constexpr bool IsExtraPedal(int id) { return id >= kFirstExtraPedal && id < kFirstLatePedal; }
-constexpr bool IsLatePedal(int id) { return id >= kFirstLatePedal && id < kNumIds; }
+constexpr bool IsLatePedal(int id) { return id >= kFirstLatePedal && id < kFirstLateCopy; } // originals only
 constexpr bool IsPedal(int id)
 {
-  return (id >= 0 && id < kNumPedalBlocks) || IsExtraPedal(id) || IsLatePedal(id);
+  return (id >= 0 && id < kNumPedalBlocks) || IsExtraPedal(id) || IsLatePedal(id) || IsLateCopy(id);
 }
 // A pedal type (a row in the AMP NEST): an original pedal, or a late pedal (its own type).
 constexpr bool IsPedalType(int t) { return (t >= 0 && t < kNumPedalBlocks) || IsLatePedal(t); }
 // Which kPedals entry a pedal is a copy of, and which copy (0 = the original).
-constexpr int PedalType(int id) { return IsExtraPedal(id) ? (id - kFirstExtraPedal) / kExtraCopiesPerType : id; }
-constexpr int PedalCopy(int id) { return IsExtraPedal(id) ? 1 + (id - kFirstExtraPedal) % kExtraCopiesPerType : 0; }
+constexpr int PedalType(int id)
+{
+  return IsExtraPedal(id)  ? (id - kFirstExtraPedal) / kExtraCopiesPerType
+         : IsLateCopy(id) ? kLateCopyTypes[(id - kFirstLateCopy) / kLateCopiesPerType]
+                          : id;
+}
+constexpr int PedalCopy(int id)
+{
+  return IsExtraPedal(id)  ? 1 + (id - kFirstExtraPedal) % kExtraCopiesPerType
+         : IsLateCopy(id) ? 1 + (id - kFirstLateCopy) % kLateCopiesPerType
+                          : 0;
+}
 constexpr int PedalCopyId(int type, int copy)
 {
-  return copy == 0 ? type : kFirstExtraPedal + type * kExtraCopiesPerType + copy - 1;
+  return copy == 0                    ? type
+         : type < kNumMultiPedalTypes ? kFirstExtraPedal + type * kExtraCopiesPerType + copy - 1
+                                      : LateCopyId(LateCopyTypeIndex(type), copy);
 }
-constexpr int NumCopies(int type) { return type < kNumMultiPedalTypes ? 1 + kExtraCopiesPerType : 1; }
+constexpr int NumCopies(int type)
+{
+  return type < kNumMultiPedalTypes        ? 1 + kExtraCopiesPerType
+         : LateCopyTypeIndex(type) >= 0 ? 1 + kLateCopiesPerType
+                                         : 1;
+}
 // Grid params exist for every id but Input: slot = id, less one past Input.
 constexpr int ParamSlot(int id) { return id < kInput ? id : id - 1; }
 constexpr int kNumParamSlots = kNumIds - 1;
@@ -107,6 +153,11 @@ struct Grid
   int cell[kNumIds]; // -1 = not on the grid (always, for kInput)
   Mask in[kNumIds]; // bit s set = cable from source s (a block id, or kInput)
   Mask out = 0; // sources cabled to Output
+  // 1.81.0: the part of the grid in use (shown, and offered to Insert / NearestFreeCell).
+  int rows = kRows, cols = kCols;
+
+  // Is cell c inside the part in use?
+  bool InArea(int c) const { return c >= 0 && c < kNumCells && CellRow(c) < rows && CellCol(c) < cols; }
 
   Grid()
   {
@@ -211,7 +262,7 @@ struct Grid
   //    feeds the nearest block to its right.
   void Insert(int b, int c)
   {
-    if (b < 0 || b >= kNumIds || b == kInput || c < 0 || c >= kNumCells || BlockAt(c) >= 0)
+    if (b < 0 || b >= kNumIds || b == kInput || !InArea(c) || BlockAt(c) >= 0)
       return;
     Remove(b);
     const int row = CellRow(c), col = CellCol(c);
@@ -302,6 +353,8 @@ struct Grid
     int best = -1, bestDist = 1 << 30;
     for (int k = 0; k < kNumCells; k++)
     {
+      if (!InArea(k))
+        continue;
       const int occupant = BlockAt(k);
       if (occupant >= 0 && occupant != ignore)
         continue;

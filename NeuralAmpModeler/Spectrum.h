@@ -126,6 +126,19 @@ public:
   }
   uint32_t WritePosition() const { return mWrite.load(std::memory_order_acquire); }
 
+  // UI thread: the loudest of the newest n samples (absolute), for LOW GPU's quiet check.
+  float RecentPeak(int n) const
+  {
+    const uint32_t w = mWrite.load(std::memory_order_acquire);
+    float peak = 0.f;
+    for (int i = 1; i <= n; i++)
+    {
+      const float v = mBuf[(w - (uint32_t)i) & (kSize - 1)];
+      peak = std::max(peak, v < 0.f ? -v : v);
+    }
+    return peak;
+  }
+
   // 1.47.0: only taps someone is looking at are fed. A view showing a live spectrum calls KeepAlive
   // every frame; half a second after the last call (the view hidden, its analyzer off or frozen) the
   // audio thread stops writing.

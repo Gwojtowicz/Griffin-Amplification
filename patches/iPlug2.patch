@@ -471,6 +471,23 @@ index 458bb57b5..9e3218908 100644
    
    const IParam* mEditParam = nullptr;
    IText mEditText;
+diff --git a/IPlug/APP/IPlugAPP.h b/IPlug/APP/IPlugAPP.h
+index c1e7a9c00..ad85293e4 100644
+--- a/IPlug/APP/IPlugAPP.h
++++ b/IPlug/APP/IPlugAPP.h
+@@ -55,6 +55,12 @@ public:
+   //IPlugAPP
+   void AppProcess(double** inputs, double** outputs, int nFrames);
+ 
++  /** Griffin Amplification (1.81.0): the standalone's FX loop, on interface channels of its own (picked
++   * in Settings > DSP). For the AppProcess call in progress: the return's left/right input and the
++   * send's left/right output, nullptr where that side of the loop is off. Set by IPlugAPPHost. */
++  double* mAppLoopIn[2] = {nullptr, nullptr};
++  double* mAppLoopOut[2] = {nullptr, nullptr};
++
+ private:
+   IPlugAPPHost* mAppHost = nullptr;
+   IPlugQueue<IMidiMsg> mMidiMsgsFromCallback {MIDI_TRANSFER_SIZE};
 diff --git a/IPlug/APP/IPlugAPP_dialog.cpp b/IPlug/APP/IPlugAPP_dialog.cpp
 index a6c0c0b14..d4df011ff 100644
 --- a/IPlug/APP/IPlugAPP_dialog.cpp
@@ -541,8 +558,197 @@ index a6c0c0b14..d4df011ff 100644
        mmi->ptMinTrackSize.x = static_cast<LONG>(static_cast<float>(mmi->ptMinTrackSize.x) * scale);
        mmi->ptMinTrackSize.y = static_cast<LONG>(static_cast<float>(mmi->ptMinTrackSize.y) * scale);
        mmi->ptMaxTrackSize.x = static_cast<LONG>(static_cast<float>(mmi->ptMaxTrackSize.x) * scale);
+diff --git a/IPlug/APP/IPlugAPP_host.cpp b/IPlug/APP/IPlugAPP_host.cpp
+index fa6238861..6a4f7a804 100644
+--- a/IPlug/APP/IPlugAPP_host.cpp
++++ b/IPlug/APP/IPlugAPP_host.cpp
+@@ -130,6 +130,8 @@ bool IPlugAPPHost::InitState()
+       mState.mAudioInChanR = GetPrivateProfileInt("audio", "in2", 2, mINIPath.Get());
+       mState.mAudioOutChanL = GetPrivateProfileInt("audio", "out1", 1, mINIPath.Get()); // 1 is first audio output
+       mState.mAudioOutChanR = GetPrivateProfileInt("audio", "out2", 2, mINIPath.Get());
++      mState.mLoopInChan = GetPrivateProfileInt("audio", "loop_in", 0, mINIPath.Get()); // Griffin Amplification (1.81.0)
++      mState.mLoopOutChan = GetPrivateProfileInt("audio", "loop_out", 0, mINIPath.Get());
+       //mState.mAudioInIsMono = GetPrivateProfileInt("audio", "monoinput", 0, mINIPath.Get());
+ 
+       mState.mBufferSize = GetPrivateProfileInt("audio", "buffer", 512, mINIPath.Get());
+@@ -194,6 +196,10 @@ void IPlugAPPHost::UpdateINI()
+   WritePrivateProfileString("audio", "out1", buf, ini);
+   sprintf(buf, "%u", mState.mAudioOutChanR);
+   WritePrivateProfileString("audio", "out2", buf, ini);
++  sprintf(buf, "%u", mState.mLoopInChan);
++  WritePrivateProfileString("audio", "loop_in", buf, ini);
++  sprintf(buf, "%u", mState.mLoopOutChan);
++  WritePrivateProfileString("audio", "loop_out", buf, ini);
+   //sprintf(buf, "%u", mState.mAudioInIsMono);
+   //WritePrivateProfileString("audio", "monoinput", buf, ini);
+ 
+@@ -435,6 +441,8 @@ bool IPlugAPPHost::AudioSettingsInStateAreEqual(AppState& os, AppState& ns)
+   if (os.mAudioInChanR != ns.mAudioInChanR) return false;
+   if (os.mAudioOutChanL != ns.mAudioOutChanL) return false;
+   if (os.mAudioOutChanR != ns.mAudioOutChanR) return false;
++  if (os.mLoopInChan != ns.mLoopInChan) return false;
++  if (os.mLoopOutChan != ns.mLoopOutChan) return false;
+ //  if (os.mAudioInIsMono != ns.mAudioInIsMono) return false;
+ 
+   return true;
+@@ -698,8 +706,20 @@ bool IPlugAPPHost::InitAudio(uint32_t inId, uint32_t outId, uint32_t sr, uint32_
+     return false;
+   }
+ 
++  // Griffin Amplification (1.81.0): besides the plug-in's main channels, the stream may carry the FX
++  // loop's (mLoopInChan / mLoopOutChan: the first of a stereo pair, 0 = off). RtAudio opens one
++  // contiguous run of channels per direction, so it opens the run covering both, and the callback
++  // picks the main and loop channels out of it by offset (the rest of the run is ignored / silent).
++  mDeviceInChans = inputInfo.probed ? inputInfo.inputChannels : 0;
++  mDeviceOutChans = outputInfo.probed ? outputInfo.outputChannels : 0;
++  mMainIns = GetPlug()->MaxNChannels(ERoute::kInput);
++  mMainOuts = GetPlug()->MaxNChannels(ERoute::kOutput);
++  mMainInOffset = mMainOutOffset = 0;
++  mLoopInOffset = mLoopOutOffset = -1;
++  mLoopInWidth = mLoopOutWidth = 0;
++
+   iParams.deviceId = inId;
+-  iParams.nChannels = GetPlug()->MaxNChannels(ERoute::kInput);
++  iParams.nChannels = mMainIns;
+   if (iParams.nChannels > 0)
+   {
+     if (!inputInfo.probed || inputInfo.inputChannels < iParams.nChannels)
+@@ -711,11 +731,22 @@ bool IPlugAPPHost::InitAudio(uint32_t inId, uint32_t outId, uint32_t sr, uint32_
+     mState.mAudioInChanL = ClampFirstChannel(mState.mAudioInChanL, inputInfo.inputChannels, iParams.nChannels);
+     mState.mAudioInChanR =
+       iParams.nChannels > 1 ? std::min(mState.mAudioInChanL + 1, inputInfo.inputChannels) : mState.mAudioInChanL;
+-    iParams.firstChannel = mState.mAudioInChanL - 1;
++    uint32_t first = mState.mAudioInChanL, last = mState.mAudioInChanL + iParams.nChannels - 1;
++    if (mState.mLoopInChan > 0 && mState.mLoopInChan <= inputInfo.inputChannels)
++    {
++      const uint32_t loopLast = std::min(mState.mLoopInChan + 1, inputInfo.inputChannels);
++      first = std::min(first, mState.mLoopInChan);
++      last = std::max(last, loopLast);
++      mLoopInOffset = (int)(mState.mLoopInChan - first);
++      mLoopInWidth = (int)(loopLast - mState.mLoopInChan + 1);
++    }
++    mMainInOffset = (int)(mState.mAudioInChanL - first);
++    iParams.firstChannel = first - 1;
++    iParams.nChannels = last - first + 1;
+   }
+ 
+   oParams.deviceId = outId;
+-  oParams.nChannels = GetPlug()->MaxNChannels(ERoute::kOutput);
++  oParams.nChannels = mMainOuts;
+   if (oParams.nChannels > 0)
+   {
+     if (!outputInfo.probed || outputInfo.outputChannels < oParams.nChannels)
+@@ -727,8 +758,21 @@ bool IPlugAPPHost::InitAudio(uint32_t inId, uint32_t outId, uint32_t sr, uint32_
+     mState.mAudioOutChanL = ClampFirstChannel(mState.mAudioOutChanL, outputInfo.outputChannels, oParams.nChannels);
+     mState.mAudioOutChanR =
+       oParams.nChannels > 1 ? std::min(mState.mAudioOutChanL + 1, outputInfo.outputChannels) : mState.mAudioOutChanL;
+-    oParams.firstChannel = mState.mAudioOutChanL - 1;
++    uint32_t first = mState.mAudioOutChanL, last = mState.mAudioOutChanL + oParams.nChannels - 1;
++    if (mState.mLoopOutChan > 0 && mState.mLoopOutChan <= outputInfo.outputChannels)
++    {
++      const uint32_t loopLast = std::min(mState.mLoopOutChan + 1, outputInfo.outputChannels);
++      first = std::min(first, mState.mLoopOutChan);
++      last = std::max(last, loopLast);
++      mLoopOutOffset = (int)(mState.mLoopOutChan - first);
++      mLoopOutWidth = (int)(loopLast - mState.mLoopOutChan + 1);
++    }
++    mMainOutOffset = (int)(mState.mAudioOutChanL - first);
++    oParams.firstChannel = first - 1;
++    oParams.nChannels = last - first + 1;
+   }
++  mOpenIns = iParams.nChannels;
++  mOpenOuts = oParams.nChannels;
+ 
+   mBufferSize = iovs; // mBufferSize may get changed by stream
+ 
+@@ -754,12 +798,15 @@ bool IPlugAPPHost::InitAudio(uint32_t inId, uint32_t outId, uint32_t sr, uint32_
+   {
+     mDAC->openStream(&oParams, iParams.nChannels > 0 ? &iParams : nullptr, RTAUDIO_FLOAT64, sr, &mBufferSize, &AudioCallback, this, &options /*, &ErrorCallback */);
+     
+-    for (int i = 0; i < iParams.nChannels; i++)
++    // The plug-in's main channels only (the loop's go through IPlugAPP::mAppLoopIn / mAppLoopOut).
++    mInputBufPtrs.Empty();
++    mOutputBufPtrs.Empty();
++    for (int i = 0; i < mMainIns; i++)
+     {
+       mInputBufPtrs.Add(nullptr); //will be set in callback
+     }
+-    
+-    for (int i = 0; i < oParams.nChannels; i++)
++
++    for (int i = 0; i < mMainOuts; i++)
+     {
+       mOutputBufPtrs.Add(nullptr); //will be set in callback
+     }
+@@ -831,36 +878,55 @@ int IPlugAPPHost::AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_
+ {
+   IPlugAPPHost* _this = (IPlugAPPHost*) pUserData;
+ 
+-  int nins = _this->GetPlug()->MaxNChannels(ERoute::kInput);
+-  int nouts = _this->GetPlug()->MaxNChannels(ERoute::kOutput);
+-  
++  // Griffin Amplification (1.81.0): the stream's channels (the main ones plus the FX loop's, see
++  // InitAudio), and where the plug-in's main and loop channels sit among them.
++  int nins = _this->mOpenIns;
++  int nouts = _this->mOpenOuts;
++  const int nMainIns = _this->mMainIns;
++  const int nMainOuts = _this->mMainOuts;
++
+   double* pInputBufferD = static_cast<double*>(pInputBuffer);
+   double* pOutputBufferD = static_cast<double*>(pOutputBuffer);
+ 
+   bool startWait = _this->mVecWait >= APP_N_VECTOR_WAIT; // wait APP_N_VECTOR_WAIT * iovs before processing audio, to avoid clicks
+   bool doFade = _this->mVecWait == APP_N_VECTOR_WAIT || _this->mAudioEnding;
+-  
++
+   if (startWait && !_this->mAudioDone)
+   {
+     if (doFade)
+       ApplyFades(pInputBufferD, nins, nFrames, _this->mAudioEnding);
+-    
++    // Channels in the open run that are neither main nor loop must be silent (the plug-in only writes its own).
++    if (nouts > nMainOuts)
++      memset(pOutputBufferD, 0, nFrames * nouts * sizeof(double));
++
+     for (int i = 0; i < nFrames; i++)
+     {
+       _this->mBufIndex %= APP_SIGNAL_VECTOR_SIZE;
+ 
+       if (_this->mBufIndex == 0)
+       {
+-        for (int c = 0; c < nins; c++)
++        for (int c = 0; c < nMainIns; c++)
+         {
+-          _this->mInputBufPtrs.Set(c, (pInputBufferD + (c * nFrames)) + i);
++          _this->mInputBufPtrs.Set(c, (pInputBufferD + ((_this->mMainInOffset + c) * nFrames)) + i);
+         }
+-        
+-        for (int c = 0; c < nouts; c++)
++
++        for (int c = 0; c < nMainOuts; c++)
+         {
+-          _this->mOutputBufPtrs.Set(c, (pOutputBufferD + (c * nFrames)) + i);
++          _this->mOutputBufPtrs.Set(c, (pOutputBufferD + ((_this->mMainOutOffset + c) * nFrames)) + i);
+         }
+-        
++
++        IPlugAPP* pPlug = _this->mIPlug.get();
++        for (int c = 0; c < 2; c++)
++        {
++          pPlug->mAppLoopIn[c] = (_this->mLoopInOffset >= 0 && pInputBufferD)
++                                   ? pInputBufferD + (_this->mLoopInOffset + std::min(c, _this->mLoopInWidth - 1)) * nFrames + i
++                                   : nullptr;
++          // A one-channel send (the last output) gets the left; the plug-in sums to it.
++          pPlug->mAppLoopOut[c] = (_this->mLoopOutOffset >= 0 && c < _this->mLoopOutWidth)
++                                    ? pOutputBufferD + (_this->mLoopOutOffset + c) * nFrames + i
++                                    : nullptr;
++        }
++
+         _this->mIPlug->AppProcess(_this->mInputBufPtrs.GetList(), _this->mOutputBufPtrs.GetList(), APP_SIGNAL_VECTOR_SIZE);
+ 
+         _this->mSamplesElapsed += APP_SIGNAL_VECTOR_SIZE;
 diff --git a/IPlug/APP/IPlugAPP_host.h b/IPlug/APP/IPlugAPP_host.h
-index 1503c6c49..99e6b357e 100644
+index 1503c6c49..477bfff37 100644
 --- a/IPlug/APP/IPlugAPP_host.h
 +++ b/IPlug/APP/IPlugAPP_host.h
 @@ -69,8 +69,8 @@ extern HINSTANCE gHINSTANCE;
@@ -556,7 +762,41 @@ index 1503c6c49..99e6b357e 100644
  const int kDeviceDS = 0; const int kDeviceCoreAudio = 0; const int kDeviceAlsa = 0;
  const int kDeviceASIO = 1; const int kDeviceJack = 1;
  extern UINT gSCROLLMSG;
-@@ -177,6 +177,36 @@ public:
+@@ -99,7 +99,12 @@ public:
+     uint32_t mAudioInChanR;
+     uint32_t mAudioOutChanL;
+     uint32_t mAudioOutChanR;
+-    
++
++    // Griffin Amplification (1.81.0): the FX loop's return input / send output, as the first channel
++    // of a stereo pair (1-based); 0 = off.
++    uint32_t mLoopInChan = 0;
++    uint32_t mLoopOutChan = 0;
++
+     AppState()
+     : mAudioInDev(DEFAULT_INPUT_DEV)
+     , mAudioOutDev(DEFAULT_OUTPUT_DEV)
+@@ -133,6 +138,8 @@ public:
+     , mAudioInChanR(obj.mAudioInChanR)
+     , mAudioOutChanL(obj.mAudioOutChanL)
+     , mAudioOutChanR(obj.mAudioOutChanR)
++    , mLoopInChan(obj.mLoopInChan)
++    , mLoopOutChan(obj.mLoopOutChan)
+     {
+     }
+     
+@@ -150,7 +157,9 @@ public:
+               rhs.mAudioInChanL == mAudioInChanL &&
+               rhs.mAudioInChanR == mAudioInChanR &&
+               rhs.mAudioOutChanL == mAudioOutChanL &&
+-              rhs.mAudioOutChanR == mAudioOutChanR
++              rhs.mAudioOutChanR == mAudioOutChanR &&
++              rhs.mLoopInChan == mLoopInChan &&
++              rhs.mLoopOutChan == mLoopOutChan
+ 
+       );
+     }
+@@ -177,6 +186,58 @@ public:
    bool Init();
    bool InitState();
    void UpdateINI();
@@ -573,6 +813,28 @@ index 1503c6c49..99e6b357e 100644
 +  /** Griffin Amplification (1.51.0): the buffer size the running stream actually got. A driver can
 +   * refuse the requested size (many interfaces only run the size set in their own control panel). */
 +  uint32_t GetStreamBufferSize() const { return (mDAC && mDAC->isStreamOpen()) ? mBufferSize : 0; }
++
++  /** Griffin Amplification (1.81.0): the FX loop's interface channels, set from Settings > DSP. Each is the
++   * first channel of a stereo pair (1-based), 0 = off. Saves them to the INI and restarts audio. Main thread. */
++  void SetLoopChannels(uint32_t returnIn, uint32_t sendOut)
++  {
++    if (returnIn == mState.mLoopInChan && sendOut == mState.mLoopOutChan)
++      return;
++    mState.mLoopInChan = returnIn;
++    mState.mLoopOutChan = sendOut;
++    UpdateINI();
++    TryToChangeAudio();
++  }
++  uint32_t GetLoopReturnChannel() const { return mState.mLoopInChan; }
++  uint32_t GetLoopSendChannel() const { return mState.mLoopOutChan; }
++  /** Whether the running stream actually carries the loop's return / send (the device has those channels). */
++  bool LoopReturnOpen() const { return mDAC && mDAC->isStreamOpen() && mLoopInOffset >= 0; }
++  bool LoopSendOpen() const { return mDAC && mDAC->isStreamOpen() && mLoopOutOffset >= 0; }
++  /** The open device's input / output channel counts (0 = unknown), and the main pair's first channels. */
++  uint32_t GetDeviceInputChannels() const { return mDeviceInChans; }
++  uint32_t GetDeviceOutputChannels() const { return mDeviceOutChans; }
++  uint32_t GetMainInputChannel() const { return mState.mAudioInChanL; }
++  uint32_t GetMainOutputChannel() const { return mState.mAudioOutChanL; }
 +
 +  /** Griffin Amplification (1.51.0): opens the audio interface's own control panel (ASIO), or the
 +   * Windows sound settings for other driver types. Call on the main thread. */
@@ -593,12 +855,33 @@ index 1503c6c49..99e6b357e 100644
    
    /** Returns the name of the audio device at idx
     * @param idx The index RTAudio has given the audio device
-@@ -239,6 +269,8 @@ private:
+@@ -239,7 +300,16 @@ private:
    uint32_t mSamplesElapsed = 0;
    uint32_t mVecWait = 0;
    uint32_t mBufferSize = 512;
 +  float mWindowDrawScale = 1.f; // Griffin Amplification (1.74.0)
 +  long mDriverPreferredBufferSize = 0; // Griffin Amplification: last ASIO preferred size seen (0 = none yet)
    uint32_t mBufIndex = 0; // index for signal vector, loops from 0 to mSigVS
++  // Griffin Amplification (1.81.0): the stream's channel layout (see InitAudio).
++  int mOpenIns = 0, mOpenOuts = 0; // channels in the open runs
++  int mMainIns = 0, mMainOuts = 0; // the plug-in's main channels
++  int mMainInOffset = 0, mMainOutOffset = 0; // where they start in the runs
++  int mLoopInOffset = -1, mLoopOutOffset = -1; // where the loop's start (-1 = off)
++  int mLoopInWidth = 0, mLoopOutWidth = 0; // 1 or 2 channels
++  uint32_t mDeviceInChans = 0, mDeviceOutChans = 0;
    bool mExiting = false;
    bool mAudioEnding = false;
+   bool mAudioDone = false;
+diff --git a/IPlug/IPlugParameter.cpp b/IPlug/IPlugParameter.cpp
+index 7397131f0..c929d5496 100644
+--- a/IPlug/IPlugParameter.cpp
++++ b/IPlug/IPlugParameter.cpp
+@@ -224,7 +224,7 @@ void IParam::Init(const IParam& p, const char* searchStr, const char* replaceStr
+     
+     if(pos)
+     {
+-      int insertionPos = static_cast<int>(str.Get() - pos);
++      int insertionPos = static_cast<int>(pos - str.Get()); // Griffin Amplification (1.82.0): was str - pos (negative)
+       str.DeleteSub(insertionPos, static_cast<int>(strlen(searchStr)));
+       str.Insert(replaceStr, insertionPos);
+     }

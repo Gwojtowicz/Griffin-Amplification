@@ -333,6 +333,36 @@ inline const char* BaseParamHelp(int p)
     case kSprTone: return "SPRING VERB Tone: dark to bright drip.";
     case kSprMix: return "SPRING VERB Mix: how much reverb.";
     case kSprDecay: return "SPRING VERB Decay: how long the springs ring (about 1 to 4 s).";
+    case kPRMode:
+      return "PITCH RACK Mode. Micro: voice A a few cents up, B down, after short delays (the wide stereo detune). "
+             "Dual: each voice its own interval. Diatonic: each voice a scale interval above or below the note you "
+             "play, in Key and Scale. Reverse: each voice plays its Delay window backwards, shifted.";
+    case kPRVoiceA: return "PITCH RACK Voice A (Dual, Reverse): semitones up or down, two octaves each way. Panned left.";
+    case kPRVoiceB: return "PITCH RACK Voice B (Dual, Reverse): semitones up or down, two octaves each way. Panned right.";
+    case kPRDiaA:
+      return "PITCH RACK Harm A (Diatonic): voice A's interval in the scale (+3rd, +5th, -Oct...). It follows your note, "
+             "so a 3rd is major or minor as the key needs.";
+    case kPRDiaB: return "PITCH RACK Harm B (Diatonic): voice B's interval in the scale.";
+    case kPRKey: return "PITCH RACK Key (Diatonic): the key you're playing in.";
+    case kPRScale: return "PITCH RACK Scale (Diatonic): the scale of that key the harmonies stay in.";
+    case kPRFine:
+      return "PITCH RACK Fine: cents, voice A up and voice B down. In Micro it's the whole effect: 5-12 is the classic "
+             "detune; higher gets seasick.";
+    case kPRDelayA:
+      return "PITCH RACK Delay A: voice A's delay, 0-1.5 s (10-30 ms for Micro). In Reverse, the length of its "
+             "backwards window.";
+    case kPRDelayB: return "PITCH RACK Delay B: voice B's delay (in Reverse, its window).";
+    case kPRFeedback:
+      return "PITCH RACK Feedback: each voice's repeats go back through its shifter, so they climb (or fall) by the "
+             "interval every time.";
+    case kPRMix: return "PITCH RACK Mix: 50% is your dry signal and both voices at full level; 100% is voices only.";
+    case kPRWidth: return "PITCH RACK Width: 100% is voice A hard left, B hard right; 0% both in the middle.";
+    case kPRHiCut:
+      return "PITCH RACK Hi Cut: the voices' top end. Full is 15 kHz, the bandwidth of a rack unit's converters.";
+    case kPRSplice:
+      return "PITCH RACK Splice. Smart: each splice lands where the waveform lines up, so the voices barely warble. "
+             "Vintage: the earliest shifters' sweeping window, with their slow warble on small detunes. (Not in "
+             "Reverse.)";
     case kTempoBPM:
       return "Tempo (BPM). Tap TAP (or the footswitch you MIDI-learned to it) to set it, drag up or down, or "
              "double-click to type it. Each delay's Tap setting follows it.";

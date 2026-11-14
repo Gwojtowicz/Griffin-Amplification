@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <thread> // std::thread::hardware_concurrency (Settings > DSP)
 #include <tuple>
 #include <typeinfo>
 #include <utility>
@@ -276,11 +277,40 @@ static const PedalDef kLatePedals[chaingrid::kNumLatePedals] = {
   {"SPRING VERB", kSprActive, kSprEngaged, -1, {{"Dwell", kSprDwell}, {"Tone", kSprTone}, {"Mix", kSprMix}, {"Decay", kSprDecay}}},
   // 1.67.0: TUBE LAB 2 shares the Tube Lab's popup (see _SetUiLab).
   {"TUBE LAB 2", kLab2Active, LabParam(1, kTubeEngaged), -1, {{nullptr, -1}, {nullptr, -1}, {nullptr, -1}, {nullptr, -1}}},
+  // 1.76.0 (PitchRack.h): the big card with two rows (see _IsRackPedal).
+  {"PITCH RACK", kPRActive, kPREngaged, -1, {{"Fine", kPRFine}, {"Feedback", kPRFeedback}, {"Mix", kPRMix}, {nullptr, -1}}},
 };
 
-// Any pedal's def, by grid id (an original pedal, an extra copy, or a late pedal).
+// 1.82.0: the late pedals' copies ("WAH 2", "PRO EQ 3"...): the original's def on the copy's params.
+static std::string gLateCopyNames[chaingrid::kNumLateCopies];
+static PedalDef gLateCopyPedals[chaingrid::kNumLateCopies];
+static bool _InitLateCopyDefs()
+{
+  for (int e = 0; e < chaingrid::kNumLateCopies; e++)
+  {
+    const int id = chaingrid::kFirstLateCopy + e;
+    const PedalDef& base = kLatePedals[chaingrid::PedalType(id) - chaingrid::kFirstLatePedal];
+    gLateCopyNames[e] = std::string(base.name) + " " + std::to_string(chaingrid::PedalCopy(id) + 1);
+    PedalDef& d = gLateCopyPedals[e];
+    d.name = gLateCopyNames[e].c_str();
+    d.activeParam = CopyParam(id, base.activeParam);
+    d.engagedParam = CopyParam(id, base.engagedParam);
+    d.slotParam = -1;
+    for (int k = 0; k < 4; k++)
+    {
+      d.knobs[k].label = base.knobs[k].label;
+      d.knobs[k].paramIdx = base.knobs[k].paramIdx >= 0 ? CopyParam(id, base.knobs[k].paramIdx) : -1;
+    }
+  }
+  return true;
+}
+static const bool gLateCopyDefsReady = _InitLateCopyDefs();
+
+// Any pedal's def, by grid id (an original pedal, an extra copy, a late pedal or its copy).
 static const PedalDef& PedalOf(int id)
 {
+  if (chaingrid::IsLateCopy(id))
+    return gLateCopyPedals[id - chaingrid::kFirstLateCopy];
   if (chaingrid::IsLatePedal(id))
     return kLatePedals[id - chaingrid::kFirstLatePedal];
   return chaingrid::IsExtraPedal(id) ? gExtraPedals[id - chaingrid::kFirstExtraPedal] : kPedals[id];
@@ -291,6 +321,8 @@ static const PedalDef& PedalOf(int id)
 static std::string ParamHelpFor(int p)
 {
   if (const int base = Lab2Base(p); base >= 0) // 1.67.0: TUBE LAB 2's copy says what TUBE LAB's does
+    return ParamHelpFor(base);
+  if (const int base = CopyParamBase(p); base >= 0) // 1.82.0: so do the late pedals' copies
     return ParamHelpFor(base);
   for (int e = 0; e < chaingrid::kNumExtraPedals; e++)
   {
@@ -341,9 +373,16 @@ const double kDefaultInputCalibrationLevel = 12.0;
 NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 : Plugin(info, MakeConfig(kNumParams, kNumPresets))
 {
+  for (int n = 0; n < chaingrid::kNumIds; n++)
+  {
+    mNodePeak[n][0].store(0.f, std::memory_order_relaxed);
+    mNodePeak[n][1].store(0.f, std::memory_order_relaxed);
+    mNodeCh[n].store(1, std::memory_order_relaxed);
+  }
   _InitToneStack();
   nam::activations::Activation::enable_fast_tanh();
   _LoadUiPrefs(); // colour theme and spectrum strip (1.48.0), before the UI is built
+  _ApplyDspThreads(); // 1.81.0: EXTENDED DSP's worker threads, if it's on
   mProEqView.onAnalyzerChanged = mOutEqView.onAnalyzerChanged = [this]() { _SaveUiPrefs(); };
   mTubeStage[0].SetProbe(&mTubeProbe); // Tube Lab debug page / CSV log (captures only while wanted)
 #ifndef APP_API
@@ -624,6 +663,32 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     GetParam(kSprDecay)->InitDouble("SpringVerbDecay", 5.0, 0.0, 10.0, 0.1);
   }
 
+  // PITCH RACK (1.76.0, PitchRack.h). Defaults: the classic stereo detune (A +9 cents after 12 ms, B -9
+  // cents after 20 ms), half wet.
+  {
+    GetParam(kPRActive)->InitBool("PitchRackActive", false);
+    GetParam(kPREngaged)->InitBool("PitchRackEngaged", true);
+    GetParam(kPRMode)->InitEnum("PitchRackMode", 0, {"Micro", "Dual", "Diatonic", "Reverse"});
+    GetParam(kPRVoiceA)->InitDouble("PitchRackVoiceA", 7.0, -24.0, 24.0, 1.0, "st");
+    GetParam(kPRVoiceB)->InitDouble("PitchRackVoiceB", 12.0, -24.0, 24.0, 1.0, "st");
+    const std::initializer_list<const char*> intervals = {"-Oct", "-7th", "-6th", "-5th", "-4th", "-3rd", "-2nd", "Unison",
+                                                           "+2nd", "+3rd", "+4th", "+5th", "+6th", "+7th", "+Oct"};
+    GetParam(kPRDiaA)->InitEnum("PitchRackDiatonicA", 9, intervals);
+    GetParam(kPRDiaB)->InitEnum("PitchRackDiatonicB", 11, intervals);
+    GetParam(kPRKey)->InitEnum("PitchRackKey", 0, {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"});
+    GetParam(kPRScale)->InitEnum("PitchRackScale", 0,
+                                 {"Major", "Minor", "Dorian", "Phrygian", "Lydian", "Mixolydian", "Harm Minor"});
+    GetParam(kPRFine)->InitDouble("PitchRackFine", 9.0, 0.0, 50.0, 0.1, "c");
+    GetParam(kPRDelayA)->InitDouble("PitchRackDelayA", 12.0, 0.0, 1500.0, 1.0, "ms", 0, "", IParam::ShapePowCurve(2.5));
+    GetParam(kPRDelayB)->InitDouble("PitchRackDelayB", 20.0, 0.0, 1500.0, 1.0, "ms", 0, "", IParam::ShapePowCurve(2.5));
+    GetParam(kPRFeedback)->InitDouble("PitchRackFeedback", 0.0, 0.0, 10.0, 0.1);
+    GetParam(kPRMix)->InitDouble("PitchRackMix", 50.0, 0.0, 100.0, 0.1, "%");
+    GetParam(kPRWidth)->InitDouble("PitchRackWidth", 100.0, 0.0, 100.0, 0.1, "%");
+    GetParam(kPRHiCut)->InitFrequency("PitchRackHiCut", 15000.0, 1000.0, 15000.0, 1.0);
+    GetParam(kPRHiCut)->SetDisplayText(15000.0, "Full");
+    GetParam(kPRSplice)->InitEnum("PitchRackSplice", 0, {"Smart", "Vintage"}); // 1.78.0
+  }
+
   // Tap tempo (1.71.0).
   GetParam(kTempoBPM)->InitDouble("TempoBPM", 120.0, 40.0, 300.0, 0.1, "BPM");
   {
@@ -741,10 +806,13 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
   // Signal-chain grid: not automatable (they're the routing, not sound settings). The defaults are
   // "unset"; _MigrateLegacyChain lays the Slot params' order out on the grid.
   GetParam(kChainGridV1)->InitBool("ChainGridV1", false, "", IParam::kFlagCannotAutomate);
+  GetParam(kGridLayoutV2)->InitBool("GridLayoutV2", false, "", IParam::kFlagCannotAutomate); // 1.81.0
   // The cable masks need more bits than an int param holds (32 since 1.28.0, more since 1.34.0), so
   // their params are stepped doubles (exact for whole numbers up to 2^53). States saved with the old
   // int params, or narrower masks, load the same: they're whole numbers either way.
-  constexpr double kMaxMask = (double)((1ll << chaingrid::kNumIds) - 1);
+  // 1.82.0: GridIn holds the mask's low kMaskLoBits bits (exact in a double), GridInHi the rest.
+  constexpr double kMaxMask = (double)chaingrid::kMaskLo;
+  constexpr double kMaxMaskHi = (double)((1ll << (chaingrid::kNumIds - chaingrid::kMaskLoBits)) - 1);
   constexpr int kMaskFlags = IParam::kFlagCannotAutomate | IParam::kFlagStepped;
   for (int b = 0; b < chaingrid::kNumIds; b++)
   {
@@ -756,8 +824,11 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       ->InitInt(("GridCell" + n).c_str(), -1, -1, chaingrid::kNumCells - 1, "", IParam::kFlagCannotAutomate);
     GetParam(GridInParam(b))
       ->InitDouble(("GridIn" + n).c_str(), 0.0, 0.0, kMaxMask, 1.0, "", (IParam::EFlags)kMaskFlags);
+    GetParam(GridInHiParam(b))
+      ->InitDouble(("GridInHi" + n).c_str(), 0.0, 0.0, kMaxMaskHi, 1.0, "", (IParam::EFlags)kMaskFlags);
   }
   GetParam(kGridOut)->InitDouble("GridOut", 0.0, 0.0, kMaxMask, 1.0, "", (IParam::EFlags)kMaskFlags);
+  GetParam(kGridOutHi)->InitDouble("GridOutHi", 0.0, 0.0, kMaxMaskHi, 1.0, "", (IParam::EFlags)kMaskFlags);
   GetParam(kAmpEngaged)->InitBool("AmpEngaged", true);
   // Off by default, so presets from before the tone stack sound as they did.
   GetParam(kTubeStack)->InitEnum("TubeStack", 0, {"Off", "Fender", "Marshall"});
@@ -882,6 +953,21 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     GetParam(LabParam(1, p))->Init(*GetParam(p), "Tube", "Lab2Tube");
   for (int p = kTubeModFirst; p <= kTubeModLast; p++) // 1.72.0: and of the MODULAR chassis's
     GetParam(LabParam(1, p))->Init(*GetParam(p), "Tube", "Lab2Tube");
+  // 1.82.0: the late pedals' copies: a copy of each of the original's params (range, default, display
+  // texts), named "<original's name> 2" / "... 3". Off (not in the chain) to start with.
+  for (int t = 0; t < chaingrid::kNumLateCopyTypes; t++)
+    for (int copy = 1; copy <= chaingrid::kLateCopiesPerType; copy++)
+    {
+      const int id = chaingrid::LateCopyId(t, copy);
+      for (const ParamSpan& sp : kLateCopySpans[t])
+        for (int p = sp.first; p <= sp.last; p++)
+        {
+          const IParam* src = GetParam(p);
+          const std::string name = std::string(src->GetName()) + " " + std::to_string(copy + 1);
+          GetParam(CopyParam(id, p))->Init(*src, src->GetName(), name.c_str());
+        }
+      GetParam(PedalOf(id).activeParam)->Set(0.0);
+    }
   _MigrateLegacyChain();
 
   mNoiseGateTrigger.AddListener(&mNoiseGateGain);
@@ -1028,9 +1114,12 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                                             : IRECT();
     const auto gridFitArea =
       rackOuterArea.GetHPadded(-12.f).GetReducedFromBottom(meterStripH + 12.f + specStripH + 10.f);
-    const float gridSlack =
-      std::max(0.f, gridFitArea.H() - NAMChainGridGeometry(gridFitArea, gridFitArea.H()).grid.H());
-    const NAMChainGridGeometry gridGeom(gridFitArea.GetReducedFromTop(gridSlack * 0.5f), gridFitArea.H());
+    // 1.81.0: the grid's size follows EXTENDED DSP (and grows to show any block placed outside it).
+    _GridAreaWanted(mGridRowsShown, mGridColsShown);
+    const float gridSlack = std::max(
+      0.f, gridFitArea.H() - NAMChainGridGeometry(gridFitArea, gridFitArea.H(), mGridRowsShown, mGridColsShown).grid.H());
+    const NAMChainGridGeometry gridGeom(gridFitArea.GetReducedFromTop(gridSlack * 0.5f), gridFitArea.H(), mGridRowsShown,
+                                        mGridColsShown);
     const auto chainArea = IRECT(rackOuterArea.L, gridGeom.grid.T, rackOuterArea.R, gridGeom.grid.B);
 
     // Pedal/CAB popup "window": a floating card over the rack, shown while a pedal chip (or CAB)
@@ -1846,6 +1935,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       auto* gridControl = new NAMChainGridControl(
         chainArea, gridGeom, [this]() { return _ReadChainGrid(); },
         [this](const chaingrid::Grid& g) { _WriteChainGrid(g); });
+      gridControl->SetLevelFuncs([this](int n, int c) { return _TakeNodePeak(n, c); },
+                                 [this](int n) { return _NodeChannels(n); });
       gridControl->SetOutClick([pGraphics]() {
         if (auto* page = pGraphics->GetControlWithTag(kCtrlTagOutputPage))
           page->Hide(false);
@@ -1935,13 +2026,15 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
         chip->SetSelectedFunc([this](int) { _SelectBlock(kLoopBlockId); });
       };
       auto* loopSendChip = makeFixedBlock(chaingrid::kLoopSend, "LOOP OUT", -4);
-      loopSendChip->SetTooltip("FX Loop Send -- taps the signal here out to the aux output bus");
+      loopSendChip->SetTooltip("FX Loop Send -- taps the signal here out to your pedals or rack: in the standalone, on the "
+                                "interface outputs picked in Settings > DSP; in a DAW, on the aux output bus");
       setUpLoopChip(loopSendChip);
       mLoopSendChip = loopSendChip;
       pGraphics->AttachControl(loopSendChip);
 
       auto* loopReturnChip = makeFixedBlock(chaingrid::kLoopReturn, "LOOP IN", -5);
-      loopReturnChip->SetTooltip("FX Loop Return -- blends in whatever comes back on the aux input bus (Mix)");
+      loopReturnChip->SetTooltip("FX Loop Return -- blends in what comes back from your pedals or rack (Mix): in the "
+                                  "standalone, on the interface inputs picked in Settings > DSP; in a DAW, on the aux input bus");
       setUpLoopChip(loopReturnChip);
       mLoopReturnChip = loopReturnChip;
       pGraphics->AttachControl(loopReturnChip);
@@ -2091,22 +2184,27 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
       {
         if (!chaingrid::IsPedal(p))
           continue;
-        if (p == chaingrid::kProEq)
+        if (chaingrid::PedalType(p) == chaingrid::kProEq) // 1.82.0: and its copies, on their own params
         {
+          const int lc = chaingrid::IsLateCopy(p) ? chaingrid::PedalCopy(p) : 0;
+          spectrum::Tap* tapIn = lc ? &mProEqCopyTapIn[lc - 1] : &mProEqTapIn;
+          spectrum::Tap* tapOut = lc ? &mProEqCopyTapOut[lc - 1] : &mProEqTapOut;
+          spectrum::EqViewState* view = lc ? &mProEqCopyView[lc - 1] : &mProEqView;
           // PRO EQ (1.46.0): On and Output across the top, the EQ graph below (EQControls.h).
           const IRECT body = _ComputeTubePopupCardArea(b).GetReducedFromTop(38.f).GetPadded(-10.f);
           const IRECT top = body.GetFromTop(64.f);
-          auto* onSwitch = new NAMSwitchControl(top.GetFromLeft(110.f).GetCentredInside(100.f, 60.f), kProEqEngaged, "On",
-                                                style, switchHandleBitmap);
-          auto* trimKnob = new NAMKnobControl(top.GetReducedFromLeft(120.f).GetFromLeft(190.f), kProEqTrim, "Trim",
-                                              style, knobBackgroundBitmap);
+          auto* onSwitch = new NAMSwitchControl(top.GetFromLeft(110.f).GetCentredInside(100.f, 60.f),
+                                                CopyParam(p, kProEqEngaged), "On", style, switchHandleBitmap);
+          auto* trimKnob = new NAMKnobControl(top.GetReducedFromLeft(120.f).GetFromLeft(190.f), CopyParam(p, kProEqTrim),
+                                              "Trim", style, knobBackgroundBitmap);
           trimKnob->SetSideText(true);
           trimKnob->SetTooltip("Trim: the level into the EQ (before the bands).");
-          auto* outKnob = new NAMKnobControl(top.GetReducedFromLeft(320.f).GetFromLeft(190.f), kProEqOutput, "Output",
-                                             style, knobBackgroundBitmap);
+          auto* outKnob = new NAMKnobControl(top.GetReducedFromLeft(320.f).GetFromLeft(190.f), CopyParam(p, kProEqOutput),
+                                             "Output", style, knobBackgroundBitmap);
           outKnob->SetSideText(true);
-          auto* graph = new NAMEqGraphControl(body.GetReducedFromTop(72.f), kProEqBandFirst, kProEqBandExtFirst, kProEqTrim,
-                                              kProEqOutput, &mProEqTapIn, &mProEqTapOut, "IN", "OUT", &mProEqView);
+          auto* graph = new NAMEqGraphControl(body.GetReducedFromTop(72.f), CopyParam(p, kProEqBandFirst),
+                                              CopyParam(p, kProEqBandExtFirst), CopyParam(p, kProEqTrim),
+                                              CopyParam(p, kProEqOutput), tapIn, tapOut, "IN", "OUT", view);
           for (IControl* c :
                {(IControl*)onSwitch, (IControl*)trimKnob, (IControl*)outKnob, (IControl*)graph})
           {
@@ -2631,6 +2729,65 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           continue;
         }
 
+        if (_IsRackPedal(p))
+        {
+          // PITCH RACK (1.76.0): the dynamics pedals' card, the On switch and a line about the pedal on
+          // top, then two rows: what it shifts by, then where the voices go.
+          struct Ctl
+          {
+            int param;
+            const char* label;
+          };
+          const Ctl ctls[] = {{kPRMode, "Mode"},     {kPRVoiceA, "Voice A"}, {kPRVoiceB, "Voice B"},
+                              {kPRDiaA, "Harm A"},   {kPRDiaB, "Harm B"},    {kPRKey, "Key"},
+                              {kPRScale, "Scale"},   {kPRFine, "Fine"},      {kPRDelayA, "Delay A"},
+                              {kPRDelayB, "Delay B"}, {kPRFeedback, "Feedback"}, {kPRWidth, "Width"},
+                              {kPRHiCut, "Hi Cut"},  {kPRSplice, "Splice"}, {kPRMix, "Mix"}};
+          auto attach = [&](IControl* c) {
+            pGraphics->AttachControl(c);
+            c->Hide(true);
+            mPedalDetailControls[p].push_back(c);
+            return c;
+          };
+          const IRECT body = _ComputeDynamicsPopupCardArea(b).GetReducedFromTop(38.f).GetPadded(-10.f);
+          const IRECT topRow = body.GetFromTop(std::min(48.f, body.H() * 0.2f));
+          attach(new NAMSwitchControl(topRow.GetFromLeft(110.f).GetCentredInside(100.f, topRow.H()), kPREngaged, "On",
+                                      style, switchHandleBitmap));
+          // 1.77.0: presets (PitchRack.h), a menu like the Tube Lab's.
+          attach(new IVButtonControl(
+                   IRECT(topRow.L + 120.f, topRow.T, topRow.L + 230.f, topRow.B).GetCentredInside(110.f, std::min(34.f, topRow.H())),
+                   [this](IControl* pCaller) {
+                     mPitchRackPresetMenu.Clear();
+                     for (int i = 0; i < pedals::kNumPitchRackPresets; i++)
+                       mPitchRackPresetMenu.AddItem(pedals::kPitchRackPresets[i].name);
+                     mPitchRackPresetMenu.SetFunction([this](IPopupMenu* pMenu) {
+                       if (pMenu)
+                         _ApplyPitchRackPreset(pMenu->GetChosenItemIdx());
+                     });
+                     pCaller->GetUI()->CreatePopupMenu(*pCaller, mPitchRackPresetMenu, pCaller->GetRECT());
+                   },
+                   "PRESETS", style))
+            ->SetTooltip("Load a PITCH RACK preset: doubling, detune, octaves, harmonies and crystal echoes, voiced for a "
+                         "distorted guitar (put PITCH RACK after the AMP and CAB). Sets every knob but On; the harmony "
+                         "presets are in E minor, so set Key and Scale to your song.");
+          attach(new IVLabelControl(
+            topRow.GetReducedFromLeft(240.f),
+            "A dual-voice studio pitch shifter: stereo detune, harmonies that stay in key, reversed crystal echoes.",
+            DEFAULT_STYLE.WithDrawFrame(false).WithValueText(
+              IText(13, PluginColors::NAM_THEMEFONTCOLOR.WithOpacity(0.7f), "Roboto-Regular"))));
+          const IRECT rows = body.GetReducedFromTop(topRow.H() + 8.f);
+          const int n = (int)(sizeof(ctls) / sizeof(ctls[0])), cols = (n + 1) / 2;
+          for (int k = 0; k < n; k++)
+          {
+            const IRECT cellArea = rows.GetGridCell(k / cols, k % cols, 2, cols);
+            attach(new NAMKnobControl(cellArea.GetCentredInside(std::min(cellArea.W() - 4.f, NAM_KNOB_HEIGHT + 10.f),
+                                                                std::min(cellArea.H(), NAM_KNOB_HEIGHT + 30.f)),
+                                      ctls[k].param, ctls[k].label, style, knobBackgroundBitmap))
+              ->SetTooltip(BaseParamHelp(ctls[k].param));
+          }
+          continue;
+        }
+
         if (_IsWidePedal(p))
         {
           // 1.44.0 pedals: a wider card (see _ComputeWidePopupCardArea), the On switch on top, then
@@ -2644,7 +2801,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
           };
           std::vector<Ctl> ctls;
           const char* about = "";
-          switch (p)
+          switch (chaingrid::PedalType(p)) // 1.82.0: a copy gets its original's layout
           {
             case chaingrid::kSkyVerb:
               about = "A multi-mode studio reverb.";
@@ -2750,6 +2907,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                       {kHGPreBright, "Bright", true, "More top end into the gain."}};
               break;
           }
+          for (Ctl& c : ctls) // 1.82.0: on the copy's own params
+            c.param = CopyParam(p, c.param);
           auto attach = [&](IControl* c) {
             pGraphics->AttachControl(c);
             c->Hide(true);
@@ -3114,6 +3273,11 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                           IRECT(),
                           NAMDisplaySettingsControl::Callbacks{
                             [this]() { return mUiFps; }, [this](int fps) { _SetFrameRate(fps); },
+                            []() { return namui::gLowGpu; },
+                            [this](bool on) {
+                              namui::gLowGpu = on;
+                              _SaveUiPrefs();
+                            },
                             [this]() { return _WindowResolutionShown(); },
                             [this](int i) { return _WindowResolutionFits(i); },
                             [this](int i) {
@@ -3126,7 +3290,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
                           false
 #endif
                           ),
-                        [this]() { return mSettingsTab; }, [this](int tab) { mSettingsTab = tab; }),
+                        [this]() { return mSettingsTab; }, [this](int tab) { mSettingsTab = tab; },
+                        _MakeDspSettings(pGraphics)),
                       kCtrlTagSettingsBox)
       ->Hide(true);
     // A theme change from Settings rebuilds the UI; put Settings back up so you can keep choosing.
@@ -3994,13 +4159,34 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
 
   _PrepareBuffers(numChannelsInternal, numFrames);
   _PrepareGridBuffers(numFrames);
-  // The FX Loop Return's aux input, copied now: the host may share input and output buffers, and
-  // the Loop Send writes the aux outputs mid-chain.
+  // Where the FX loop's return comes in and its send goes out (nullptr = that side isn't connected):
+  // the aux bus in a DAW (PLUG_CHANNEL_IO), or in the standalone (1.81.0) the interface channels picked
+  // in Settings > DSP, handed over by the app's host. A one-channel send has no right side.
+  const sample* loopReturnIn[2] = {nullptr, nullptr};
+  mLoopSendOut[0] = mLoopSendOut[1] = nullptr;
+#ifdef APP_API
+  for (int c = 0; c < 2; c++)
+  {
+    loopReturnIn[c] = mAppLoopIn[c];
+    mLoopSendOut[c] = mAppLoopOut[c];
+  }
+#else
   if (numChannelsExternalIn > (size_t)kLoopBusChannelOffset)
     for (size_t c = 0; c < 2; c++)
+      loopReturnIn[c] = inputs[std::min(kLoopBusChannelOffset + c, numChannelsExternalIn - 1)];
+  if (numChannelsExternalOut > (size_t)kLoopBusChannelOffset)
+    for (size_t c = 0; c < 2; c++)
+      mLoopSendOut[c] = kLoopBusChannelOffset + c < numChannelsExternalOut ? outputs[kLoopBusChannelOffset + c] : nullptr;
+#endif
+  const bool loopReturnConnected = loopReturnIn[0] != nullptr;
+  const bool loopSendConnected = mLoopSendOut[0] != nullptr;
+  // The FX Loop Return's input, copied now: the host may share input and output buffers, and
+  // the Loop Send writes its outputs mid-chain.
+  if (loopReturnConnected)
+    for (size_t c = 0; c < 2; c++)
     {
-      const size_t from = std::min(kLoopBusChannelOffset + c, numChannelsExternalIn - 1);
-      std::copy(inputs[from], inputs[from] + numFrames, mLoopReturnPtrs[c]);
+      const sample* from = loopReturnIn[c] ? loopReturnIn[c] : loopReturnIn[0];
+      std::copy(from, from + numFrames, mLoopReturnPtrs[c]);
     }
   // Only the main bus feeds the chain and gets its output; the aux bus is the FX loop's.
   const size_t numChannelsMainIn = std::min(numChannelsExternalIn, (size_t)kLoopBusChannelOffset);
@@ -4094,13 +4280,13 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
     processes[kNumBuiltInPedals + i] =
       mNamPedalModel[i] != nullptr && GetParam(kPedals[kNumBuiltInPedals + i].engagedParam)->Value() > 0.5;
   processes[kCabPedalIdx] = mIR != nullptr && GetParam(kIRToggle)->Value();
-  // Loop Send/Return only do anything when the host has the aux bus's channels connected (see
-  // PLUG_CHANNEL_IO) -- never in the standalone APP build, which doesn't declare the bus. An
-  // unconnected loop is a transparent pass-through rather than silence. Switched off (kLoopEngaged)
-  // it's a pass-through too, and the aux output carries silence.
+  // Loop Send/Return only do anything when their channels are connected (the DAW's aux bus, or the
+  // standalone's loop channels from Settings > DSP). An unconnected loop is a transparent
+  // pass-through rather than silence. Switched off (kLoopEngaged) it's a pass-through too, and the
+  // send carries silence.
   const bool loopOn = GetParam(kLoopEngaged)->Value() > 0.5;
-  processes[kLoopSendPedalIdx] = loopOn && numChannelsExternalOut > (size_t)kLoopBusChannelOffset;
-  processes[kLoopReturnPedalIdx] = loopOn && numChannelsExternalIn > (size_t)kLoopBusChannelOffset;
+  processes[kLoopSendPedalIdx] = loopOn && loopSendConnected;
+  processes[kLoopReturnPedalIdx] = loopOn && loopReturnConnected;
   const float loopMixTarget = (float)(GetParam(kLoopMix)->Value() / 100.0);
   processes[chaingrid::kAmp] = GetParam(kAmpEngaged)->Value() > 0.5 && !_TubeTakesCapture();
   // 1.42.0: which blocks can process at all (have their IR / capture), so one switched off can keep
@@ -4134,8 +4320,9 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
     const int type = chaingrid::IsPedal(id) ? chaingrid::PedalType(id) : -1;
     return type == 2 || type == 3 || type == 4 || id == chaingrid::kFlanger || id == chaingrid::kPhaser
            || id == kCabPedalIdx || id == kCabLabPedalIdx || id == chaingrid::kCab2 || id == chaingrid::kCab3
-           || id == chaingrid::kSkyVerb || id == chaingrid::kFlangerDoubler || id == chaingrid::kDigiDelay
-           || id == chaingrid::kAnalogDelay || id == chaingrid::kTapeEcho || id == chaingrid::kSpringVerb;
+           || id == chaingrid::kSkyVerb || id == chaingrid::kFlangerDoubler || type == chaingrid::kDigiDelay
+           || type == chaingrid::kAnalogDelay || type == chaingrid::kTapeEcho || id == chaingrid::kSpringVerb
+           || id == chaingrid::kPitchRack;
   };
   // A/B switch in progress: the gain for the AMP and CAB outputs this block (see _ABBeginBlock).
   const bool abFading = _ABBeginBlock(numFrames);
@@ -4200,7 +4387,10 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
                                                                                      size_t numChannels) -> sample** {
     if (chaingrid::IsPedal(pedalIdx) && chaingrid::PedalType(pedalIdx) < chaingrid::kNumMultiPedalTypes)
       return processEffect(pedalIdx, in, numChannels);
-    switch (pedalIdx)
+    // 1.82.0: a late pedal's copy runs its original's case, on its own params (P) and DSP object.
+    const int lateCopy = chaingrid::IsLateCopy(pedalIdx) ? chaingrid::PedalCopy(pedalIdx) : 0;
+    auto P = [pedalIdx](int p) { return CopyParam(pedalIdx, p); };
+    switch (chaingrid::IsLateCopy(pedalIdx) ? chaingrid::PedalType(pedalIdx) : pedalIdx)
     {
       case chaingrid::kFlanger:
         mFlanger.SetParams(GetParam(kFlangerRate)->Value(), GetParam(kFlangerDepth)->Value() / 10.0,
@@ -4221,9 +4411,13 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
                                   GetParam(kFDRegen)->Value() / 10.0, GetParam(kFDMix)->Value() / 10.0);
         return mFlangerDoubler.Process(in, (int)numChannels, (int)numFrames);
       case chaingrid::kWah:
-        mWah.SetParams(GetParam(kWahModel)->Int(), GetParam(kWahPosition)->Value() / 10.0, GetParam(kWahQ)->Value() / 10.0,
-                       GetParam(kWahSens)->Value() / 10.0, GetParam(kWahLevel)->Value());
-        return mWah.Process(in, (int)numChannels, (int)numFrames);
+      {
+        auto& o = lateCopy ? mWahCopy[lateCopy - 1] : mWah;
+        o.SetParams(GetParam(P(kWahModel))->Int(), GetParam(P(kWahPosition))->Value() / 10.0,
+                    GetParam(P(kWahQ))->Value() / 10.0, GetParam(P(kWahSens))->Value() / 10.0,
+                    GetParam(P(kWahLevel))->Value());
+        return o.Process(in, (int)numChannels, (int)numFrames);
+      }
       case chaingrid::kTightDrive:
         mTightDrive.SetParams(GetParam(kPDVolume)->Value(), GetParam(kPDDrive)->Value() / 10.0,
                               GetParam(kPDAttack)->Value() / 10.0, GetParam(kPDGate)->Value() / 10.0,
@@ -4232,11 +4426,14 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
       case chaingrid::kProEq:
       {
         // PRO EQ (1.46.0): in place, with the spectrum of its input and output for its popup.
-        mProEq.SetParams(_ReadEqParams(kProEqBandFirst, kProEqBandExtFirst, kProEqTrim, kProEqOutput, true));
-        mProEqTapIn.Push(in, (int)numChannels, (int)numFrames);
-        if (mProEq.Active())
-          mProEq.Process(in, (int)numChannels, (int)numFrames);
-        mProEqTapOut.Push(in, (int)numChannels, (int)numFrames);
+        auto& eq = lateCopy ? mProEqCopy[lateCopy - 1] : mProEq;
+        auto& tapIn = lateCopy ? mProEqCopyTapIn[lateCopy - 1] : mProEqTapIn;
+        auto& tapOut = lateCopy ? mProEqCopyTapOut[lateCopy - 1] : mProEqTapOut;
+        eq.SetParams(_ReadEqParams(P(kProEqBandFirst), P(kProEqBandExtFirst), P(kProEqTrim), P(kProEqOutput), true));
+        tapIn.Push(in, (int)numChannels, (int)numFrames);
+        if (eq.Active())
+          eq.Process(in, (int)numChannels, (int)numFrames);
+        tapOut.Push(in, (int)numChannels, (int)numFrames);
         return in;
       }
       case chaingrid::kGate:
@@ -4280,24 +4477,54 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
                                   GetParam(kTGKey)->Bool() && mGateKeyChannels > 0 ? mGateKeyPtrs : nullptr,
                                   GetParam(kTGKey)->Bool() ? mGateKeyChannels : 0);
       case chaingrid::kDigiDelay:
-        mDigiDelay.SetParams(GetParam(kDigiMode)->Int(), GetParam(kDigiTime)->Value(),
-                             GetParam(kDigiFeedback)->Value() / 10.0, GetParam(kDigiLevel)->Value() / 10.0);
-        return mDigiDelay.Process(in, (int)numChannels, (int)numFrames);
+      {
+        auto& o = lateCopy ? mDigiDelayCopy[lateCopy - 1] : mDigiDelay;
+        o.SetParams(GetParam(P(kDigiMode))->Int(), GetParam(P(kDigiTime))->Value(),
+                    GetParam(P(kDigiFeedback))->Value() / 10.0, GetParam(P(kDigiLevel))->Value() / 10.0);
+        return o.Process(in, (int)numChannels, (int)numFrames);
+      }
       case chaingrid::kAnalogDelay:
-        mAnalogDelay.SetParams(GetParam(kAnaTime)->Value(), GetParam(kAnaRegen)->Value() / 10.0,
-                               GetParam(kAnaMix)->Value() / 10.0, GetParam(kAnaMod)->Bool(), GetParam(kAnaRate)->Value(),
-                               GetParam(kAnaWidth)->Value() / 10.0);
-        return mAnalogDelay.Process(in, (int)numChannels, (int)numFrames);
+      {
+        auto& o = lateCopy ? mAnalogDelayCopy[lateCopy - 1] : mAnalogDelay;
+        o.SetParams(GetParam(P(kAnaTime))->Value(), GetParam(P(kAnaRegen))->Value() / 10.0,
+                    GetParam(P(kAnaMix))->Value() / 10.0, GetParam(P(kAnaMod))->Bool(), GetParam(P(kAnaRate))->Value(),
+                    GetParam(P(kAnaWidth))->Value() / 10.0);
+        return o.Process(in, (int)numChannels, (int)numFrames);
+      }
       case chaingrid::kTapeEcho:
-        mTapeEcho.SetParams(GetParam(kTapeHeads)->Int(), GetParam(kTapeRate)->Value() / 10.0,
-                            GetParam(kTapeIntensity)->Value() / 10.0, GetParam(kTapeEcho)->Value() / 10.0,
-                            GetParam(kTapeReverb)->Value() / 10.0, GetParam(kTapeWow)->Value() / 10.0,
-                            GetParam(kTapeDrive)->Value() / 10.0);
-        return mTapeEcho.Process(in, (int)numChannels, (int)numFrames);
+      {
+        auto& o = lateCopy ? mTapeEchoCopy[lateCopy - 1] : mTapeEcho;
+        o.SetParams(GetParam(P(kTapeHeads))->Int(), GetParam(P(kTapeRate))->Value() / 10.0,
+                    GetParam(P(kTapeIntensity))->Value() / 10.0, GetParam(P(kTapeEcho))->Value() / 10.0,
+                    GetParam(P(kTapeReverb))->Value() / 10.0, GetParam(P(kTapeWow))->Value() / 10.0,
+                    GetParam(P(kTapeDrive))->Value() / 10.0);
+        return o.Process(in, (int)numChannels, (int)numFrames);
+      }
       case chaingrid::kSpringVerb:
         mSpringVerb.SetParams(GetParam(kSprDwell)->Value() / 10.0, GetParam(kSprTone)->Value() / 10.0,
                               GetParam(kSprMix)->Value() / 10.0, GetParam(kSprDecay)->Value() / 10.0);
         return mSpringVerb.Process(in, (int)numChannels, (int)numFrames);
+      case chaingrid::kPitchRack: // 1.76.0
+      {
+        pedals::PitchRackParams pr;
+        pr.mode = GetParam(kPRMode)->Int();
+        pr.semiA = GetParam(kPRVoiceA)->Value();
+        pr.semiB = GetParam(kPRVoiceB)->Value();
+        pr.diaA = GetParam(kPRDiaA)->Int();
+        pr.diaB = GetParam(kPRDiaB)->Int();
+        pr.key = GetParam(kPRKey)->Int();
+        pr.scale = GetParam(kPRScale)->Int();
+        pr.fineCents = GetParam(kPRFine)->Value();
+        pr.delayAms = GetParam(kPRDelayA)->Value();
+        pr.delayBms = GetParam(kPRDelayB)->Value();
+        pr.feedback01 = GetParam(kPRFeedback)->Value() / 10.0;
+        pr.mix01 = GetParam(kPRMix)->Value() / 100.0;
+        pr.width01 = GetParam(kPRWidth)->Value() / 100.0;
+        pr.hiCutHz = GetParam(kPRHiCut)->Value();
+        pr.splice = GetParam(kPRSplice)->Int();
+        mPitchRack.SetParams(pr);
+        return mPitchRack.Process(in, (int)numChannels, (int)numFrames);
+      }
       case chaingrid::kHiGainPreamp:
         mHiGainPreamp.SetParams(GetParam(kHGPreGain)->Value() / 10.0, GetParam(kHGPreBass)->Value() / 10.0,
                                 GetParam(kHGPreMid)->Value() / 10.0, GetParam(kHGPreTreble)->Value() / 10.0,
@@ -4359,6 +4586,11 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         // 1.67.0: TUBE LAB 2 is the same, with its own params (LabParam), stages and capture. The
         // probe and the chassis page's readings come from the lab whose popup was opened last.
         const int lab = pedalIdx == kTubePedalIdx ? 0 : 1;
+        // 1.81.0: each lab its own capture / module buffers, so EXTENDED DSP can run the two at once.
+        std::vector<sample>& capIn = mCapIn[lab];
+        std::vector<sample>& capOut = mCapOut[lab];
+        sample** capInPtr = mCapInPtr[lab];
+        sample** capOutPtr = mCapOutPtr[lab];
         tube::TubeStage* stages = lab == 0 ? mTubeStage : mTubeStage2;
         sample** labChannels = lab == 0 ? mTubeChannels : mTubeChannels2;
         const bool shown = mUiLabAudio.load(std::memory_order_relaxed) == lab;
@@ -4393,31 +4625,31 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
           // 1.64.0: the AMP block's capture is the preamp. It's mono (as in the AMP block): the
           // channels' average, through Drive (12 dB = unity, ramped across the block), into the
           // capture, and its output into the Tube Lab's power amp. One stage; both channels get it.
-          if (mCapIn.size() < numFrames)
+          if (capIn.size() < numFrames)
           {
-            mCapIn.resize(numFrames);
-            mCapOut.resize(numFrames);
+            capIn.resize(numFrames);
+            capOut.resize(numFrames);
           }
           double& capGain = lab == 0 ? mCapGain : mCapGain2;
           const double gainTo = std::pow(10.0, (GetParam(LabParam(lab, kTubeDrive))->Value() - 12.0) / 20.0);
           for (size_t s = 0; s < numFrames; s++)
           {
             const double g = capGain + (gainTo - capGain) * (double)(s + 1) / (double)numFrames;
-            mCapIn[s] = (numChannels > 1 ? 0.5 * (in[0][s] + in[1][s]) : in[0][s]) * g;
+            capIn[s] = (numChannels > 1 ? 0.5 * (in[0][s] + in[1][s]) : in[0][s]) * g;
           }
           capGain = gainTo;
-          mCapInPtr[0] = mCapIn.data();
-          mCapOutPtr[0] = mCapOut.data();
+          capInPtr[0] = capIn.data();
+          capOutPtr[0] = capOut.data();
           // TUBE LAB runs the AMP block's capture; TUBE LAB 2 its own.
           ResamplingNAM* capture = lab == 0 ? mModel.get() : mLab2Model.get();
           if (capture != nullptr)
-            capture->process(mCapInPtr, mCapOutPtr, (int)numFrames);
+            capture->process(capInPtr, capOutPtr, (int)numFrames);
           else
-            std::copy(mCapIn.begin(), mCapIn.begin() + numFrames, mCapOut.begin());
+            std::copy(capIn.begin(), capIn.begin() + numFrames, capOut.begin());
           // All of the AMP block, as it would be: its noise gate and its Bass / Mid / Treble after the
           // capture (the gate's trigger already read the chain's input this block). TUBE LAB 2's capture
           // isn't the AMP block's, so it has neither.
-          sample** ampOut = mCapOutPtr;
+          sample** ampOut = capOutPtr;
           if (lab == 0 && noiseGateActive)
             ampOut = mNoiseGateGain.Process(ampOut, 1, numFrames);
           if (lab == 0 && toneStackActive && mToneStack != nullptr)
@@ -4435,14 +4667,14 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
           // 1.72.0: a preamp module is mono, as an amp (and the AMP block) is: the channels' average into
           // one stage, its output to both. (Two would double the cost of its six stages for the same sound
           // from a guitar.)
-          if (mCapIn.size() < numFrames)
+          if (capIn.size() < numFrames)
           {
-            mCapIn.resize(numFrames);
-            mCapOut.resize(numFrames);
+            capIn.resize(numFrames);
+            capOut.resize(numFrames);
           }
           for (size_t s = 0; s < numFrames; s++)
-            mCapIn[s] = 0.5 * (in[0][s] + in[1][s]);
-          sample* mono[1] = {mCapIn.data()};
+            capIn[s] = 0.5 * (in[0][s] + in[1][s]);
+          sample* mono[1] = {capIn.data()};
           stages[0].SetParams(params);
           stages[0].SetWearMaster(true);
           stages[0].SetUiWanted(chassis);
@@ -4585,13 +4817,21 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
       }
       case kLoopSendPedalIdx:
       {
-        // Taps the chain's current signal out to the aux output bus (channels
-        // kLoopBusChannelOffset.. -- see PLUG_CHANNEL_IO) for the DAW to route to external
-        // hardware or another plugin. Doesn't alter what continues through the chain itself.
+        // Taps the chain's current signal out to the send (mLoopSendOut: the DAW's aux output bus,
+        // or the standalone's loop outputs) for external hardware or another plugin. Doesn't alter
+        // what continues through the chain itself. A one-channel send gets both sides summed.
+        sample* sendL = mLoopSendOut[0];
+        sample* sendR = mLoopSendOut[1];
         for (size_t s = 0; s < numFrames; s++)
         {
-          outputs[kLoopBusChannelOffset][s] = in[0][s];
-          outputs[kLoopBusChannelOffset + 1][s] = numChannels > 1 ? in[1][s] : in[0][s];
+          const sample l = in[0][s], r = numChannels > 1 ? in[1][s] : in[0][s];
+          if (sendR)
+          {
+            sendL[s] = l;
+            sendR[s] = r;
+          }
+          else
+            sendL[s] = 0.5 * (l + r);
         }
         return in;
       }
@@ -4647,6 +4887,21 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   node[chaingrid::kInput].ch = 1;
   node[chaingrid::kInput].live = true;
   ringWrite(chaingrid::kInput);
+  // 1.80.0: each source's peak per side and channel count, for the live cables on the grid.
+  auto publishLevel = [&](int n) {
+    const NodeOut& o = node[n];
+    mNodeCh[n].store(o.ch, std::memory_order_relaxed);
+    for (int c = 0; c < 2; c++)
+    {
+      const sample* p = o.ptr[std::min(c, o.ch - 1)];
+      float peak = 0.f;
+      for (size_t s = 0; s < numFrames; s++)
+        peak = std::max(peak, (float)std::fabs(p[s]));
+      if (peak > mNodePeak[n][c].load(std::memory_order_relaxed))
+        mNodePeak[n][c].store(peak, std::memory_order_relaxed);
+    }
+  };
+  publishLevel(chaingrid::kInput);
 
   // The live sources cabled into dst (a block id, or kOutput), and what their mix needs.
   auto gatherSources = [&](int dst, int* srcs, int& maxLat, bool& anyStereo, bool& postAmp) -> int {
@@ -4717,15 +4972,17 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         order[numOrdered++] = b;
 
   bool loopSendRan = false;
-  int srcs[chaingrid::kNumIds];
-  for (int i = 0; i < numOrdered; i++)
-  {
-    const int b = order[i];
+  // 1.81.0: one block's processing, as a task: on the audio thread or (EXTENDED DSP) on a worker,
+  // alongside the other blocks of its column. `slot` picks the scratch buffers for its fade.
+  auto runBlock = [&](int b, int slot) {
+    double* const fadeGain = slot == 0 ? mBlockFadeGain.data() : mBlockFadeGainW[slot - 1].data();
+    std::vector<sample>* const fadeDry = slot == 0 ? mBlockFadeDry : mBlockFadeDryW[slot - 1];
+    int srcs[chaingrid::kNumIds];
     int maxLat = 0;
     bool anyStereo = false, postAmp = false;
     const int n = gatherSources(b, srcs, maxLat, anyStereo, postAmp);
     if (n == 0)
-      continue;
+      return;
     // The amp model and NAM pedals are mono-only (a hard constraint of the NAM engine). Everything
     // else runs in stereo after the amp (so Chorus/Delay width and a stereo cab can be heard) or
     // once a stereo block feeds it, and in mono before that (as cheap as the old pre-amp side).
@@ -4759,14 +5016,14 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
       for (size_t s = 0; s < numFrames; s++)
       {
         f = fadeTarget > f ? std::min(fadeTarget, f + blockFadeStep) : std::max(fadeTarget, f - blockFadeStep);
-        mBlockFadeGain[s] = f * f * (3.0 - 2.0 * f);
+        fadeGain[s] = f * f * (3.0 - 2.0 * f);
       }
       mBlockFade[b] = f;
       for (int c = 0; c < ch; c++)
       {
-        std::copy(in[c], in[c] + numFrames, mBlockFadeDry[c].data());
+        std::copy(in[c], in[c] + numFrames, fadeDry[c].data());
         for (size_t s = 0; s < numFrames; s++)
-          in[c][s] *= mBlockFadeGain[s];
+          in[c][s] *= fadeGain[s];
       }
       if (fading && f == 0.0)
       {
@@ -4817,7 +5074,8 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         out.ptr = applyPedal(b, in, (size_t)ch);
         // Stereo out whatever comes in: the cabs and the loop return (and CAB LAB's mics and room
         // since 1.42.0; it used to fold them to mono unless AMP or a stereo block came first).
-        if (b == kCabPedalIdx || b == kLoopReturnPedalIdx || ExtraCabIndex(b) >= 0 || b == kCabLabPedalIdx)
+        if (b == kCabPedalIdx || b == kLoopReturnPedalIdx || ExtraCabIndex(b) >= 0 || b == kCabLabPedalIdx
+            || b == chaingrid::kPitchRack) // 1.76.0: its voices are panned
           out.ch = 2;
         if (b == kTubePedalIdx)
           out.latency += mTubeStage[0].GetLatency() + (_TubeTakesCapture() && mModel != nullptr ? mModel->GetLatency() : 0);
@@ -4835,12 +5093,12 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
         double peak = 0.0;
         for (int c = 0; c < outCh; c++)
         {
-          const sample* dry = mBlockFadeDry[std::min(c, ch - 1)].data();
+          const sample* dry = fadeDry[std::min(c, ch - 1)].data();
           const sample* wet = out.ptr[std::min(c, out.ch - 1)];
           sample* dst = mBlockFadeOutPtrs[b][c];
           for (size_t s = 0; s < numFrames; s++)
           {
-            dst[s] = dry[s] * (1.0 - mBlockFadeGain[s]) + wet[s];
+            dst[s] = dry[s] * (1.0 - fadeGain[s]) + wet[s];
             peak = std::max(peak, std::fabs((double)wet[s]));
           }
         }
@@ -4857,10 +5115,57 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
           out.ptr[c][s] *= mABGainBuf[s];
     node[b] = out;
     ringWrite(b);
+    publishLevel(b);
+  };
+
+  // Column by column. With EXTENDED DSP's cores, a column with two or more heavy blocks runs its blocks
+  // at the same time (DspThreadPool.h); they only read earlier columns, and each writes its own buffers.
+  // Blocks that share state with another block (or touch the interface's outputs) keep the column serial.
+  const int parallelCores = mDspParallelCores.load(std::memory_order_relaxed);
+  const bool parallel = parallelCores > 1 && mDspPool.ActiveWorkers() > 0;
+  auto heavy = [](int id) {
+    const int type = chaingrid::IsPedal(id) ? chaingrid::PedalType(id) : -1;
+    return id == chaingrid::kAmp || id == kTubePedalIdx || id == chaingrid::kTubeLab2
+           || (id >= kNumBuiltInPedals && id < kNumPedals) || id == kCabPedalIdx || id == kCabLabPedalIdx
+           || id == chaingrid::kCab2 || id == chaingrid::kCab3 || type == 4 || id == chaingrid::kSkyVerb
+           || id == chaingrid::kSpringVerb || id == chaingrid::kPitchRack || type == chaingrid::kTapeEcho
+           || id == chaingrid::kHiGainPreamp;
+  };
+  auto serialOnly = [](int id) {
+    // The loop touches the interface's channels; REAL FEEL's sag is read by AMP and the Tube Lab.
+    return id == kLoopSendPedalIdx || id == kLoopReturnPedalIdx || id == chaingrid::kRealFeel;
+  };
+  for (int i = 0; i < numOrdered;)
+  {
+    const int col = chaingrid::CellCol(grid.cell[order[i]]);
+    int j = i;
+    int numHeavy = 0;
+    bool safe = true, hasAmp = false, hasLab1 = false;
+    for (; j < numOrdered && chaingrid::CellCol(grid.cell[order[j]]) == col; j++)
+    {
+      const int id = order[j];
+      numHeavy += heavy(id) ? 1 : 0;
+      safe &= !serialOnly(id);
+      hasAmp |= id == chaingrid::kAmp;
+      hasLab1 |= id == kTubePedalIdx;
+    }
+    // TUBE LAB runs the AMP block's capture, gate and tone stack (its Capture mode): never both at once.
+    safe &= !(hasAmp && hasLab1);
+    if (parallel && safe && numHeavy >= 2)
+    {
+      const int* colBlocks = order + i;
+      auto task = [&](int t, int slot) { runBlock(colBlocks[t], slot); };
+      mDspPool.Run(j - i, task);
+    }
+    else
+      for (int k = i; k < j; k++)
+        runBlock(order[k], 0);
+    i = j;
   }
 
   // Output: stereo, the average of what's cabled into it.
   {
+    int srcs[chaingrid::kNumIds];
     int maxLat = 0;
     bool anyStereo = false, postAmp = false;
     const int n = gatherSources(chaingrid::kOutput, srcs, maxLat, anyStereo, postAmp);
@@ -4870,10 +5175,11 @@ void NeuralAmpModeler::ProcessBlock(iplug::sample** inputs, iplug::sample** outp
   mGridRingPos = (mGridRingPos + (int)numFrames) & kRingMask;
   if (GetLatency() != _TotalLatency())
     _UpdateLatency();
-  // A connected aux output with the Send off the chain carries silence, not stale buffer contents.
-  if (!loopSendRan && numChannelsExternalOut > (size_t)kLoopBusChannelOffset)
-    for (size_t c = kLoopBusChannelOffset; c < numChannelsExternalOut; c++)
-      std::fill(outputs[c], outputs[c] + numFrames, 0.0);
+  // A connected send with the Send block off the chain carries silence, not stale buffer contents.
+  if (!loopSendRan)
+    for (sample* send : mLoopSendOut)
+      if (send)
+        std::fill(send, send + numFrames, 0.0);
 
   const size_t kNumChannelsStereo = 2;
   sample** irPointers = mGridMixPtrs[chaingrid::kNumIds];
@@ -4991,7 +5297,16 @@ void NeuralAmpModeler::OnReset()
   mDigiDelay.SetSampleRate(sampleRate);
   mAnalogDelay.SetSampleRate(sampleRate);
   mTapeEcho.SetSampleRate(sampleRate);
+  for (int k = 0; k < chaingrid::kLateCopiesPerType; k++) // 1.82.0
+  {
+    mWahCopy[k].SetSampleRate(sampleRate);
+    mProEqCopy[k].Reset(sampleRate);
+    mDigiDelayCopy[k].SetSampleRate(sampleRate);
+    mAnalogDelayCopy[k].SetSampleRate(sampleRate);
+    mTapeEchoCopy[k].SetSampleRate(sampleRate);
+  }
   mSpringVerb.SetSampleRate(sampleRate);
+  mPitchRack.SetSampleRate(sampleRate); // 1.76.0
   for (auto& k : mGateKeyBuf)
     k.resize(std::max(maxBlockSize, 1));
   mProEq.Reset(sampleRate);
@@ -5369,17 +5684,26 @@ void NeuralAmpModeler::_PushTempoToDelays()
     const IParam* p = GetParam(timeParam);
     set(timeParam, fit(timeFor(divParam), p->GetMin(), p->GetMax()));
   }
-  static const int kOtherDelays[2][2] = {{kDigiTapDiv, kDigiTime}, {kAnaTapDiv, kAnaTime}};
-  for (const auto& d : kOtherDelays)
-    if (GetParam(d[0])->Int() != 0)
-      set(d[1], fit(timeFor(d[0]), GetParam(d[1])->GetMin(), GetParam(d[1])->GetMax()));
-  if (GetParam(kTapeTapDiv)->Int() != 0)
+  // 1.82.0: each copy of DIGI DELAY, ANALOG DLY and TAPE ECHO too, by its own Tap division.
+  for (int copy = 0; copy <= chaingrid::kLateCopiesPerType; copy++)
   {
-    // The tape's longest head on the beat (head 1 = 300 - 230 x Rate/10 ms; heads 2 and 3 at 2x and 3x).
-    static const int kLongestHead[7] = {1, 2, 3, 2, 3, 3, 3}; // 1, 2, 3, 1+2, 2+3, 1+2+3, 1+3
-    const int heads = kLongestHead[std::clamp(GetParam(kTapeHeads)->Int(), 0, 6)];
-    const double head1Ms = fit(timeFor(kTapeTapDiv) / heads, 70.0, 300.0);
-    set(kTapeRate, (300.0 - head1Ms) / 230.0 * 10.0);
+    const int digi = chaingrid::PedalCopyId(chaingrid::kDigiDelay, copy);
+    const int ana = chaingrid::PedalCopyId(chaingrid::kAnalogDelay, copy);
+    const int tape = chaingrid::PedalCopyId(chaingrid::kTapeEcho, copy);
+    const int otherDelays[2][2] = {{CopyParam(digi, kDigiTapDiv), CopyParam(digi, kDigiTime)},
+                                   {CopyParam(ana, kAnaTapDiv), CopyParam(ana, kAnaTime)}};
+    for (const auto& d : otherDelays)
+      if (GetParam(d[0])->Int() != 0)
+        set(d[1], fit(timeFor(d[0]), GetParam(d[1])->GetMin(), GetParam(d[1])->GetMax()));
+    const int tapeDiv = CopyParam(tape, kTapeTapDiv);
+    if (GetParam(tapeDiv)->Int() != 0)
+    {
+      // The tape's longest head on the beat (head 1 = 300 - 230 x Rate/10 ms; heads 2 and 3 at 2x and 3x).
+      static const int kLongestHead[7] = {1, 2, 3, 2, 3, 3, 3}; // 1, 2, 3, 1+2, 2+3, 1+2+3, 1+3
+      const int heads = kLongestHead[std::clamp(GetParam(CopyParam(tape, kTapeHeads))->Int(), 0, 6)];
+      const double head1Ms = fit(timeFor(tapeDiv) / heads, 70.0, 300.0);
+      set(CopyParam(tape, kTapeRate), (300.0 - head1Ms) / 230.0 * 10.0);
+    }
   }
   if (auto* pGraphics = GetUI())
     pGraphics->SetAllControlsDirty();
@@ -5512,6 +5836,18 @@ void NeuralAmpModeler::OnIdle()
       if (auto* pUI = GetUI()) { if (auto* pPage = pUI->GetControlWithTag(kCtrlTagSettingsBox)) pPage->SetDirty(false); }
     }
   }
+  // FX loop channels picked in Settings > DSP (1.81.0): restart the app's audio with them (saved to the INI).
+  if (mPendingLoopReturn >= 0 || mPendingLoopSend >= 0)
+  {
+    if (auto* pHost = IPlugAPPHost::sInstance.get())
+    {
+      const uint32_t ret = mPendingLoopReturn >= 0 ? (uint32_t)mPendingLoopReturn : pHost->GetLoopReturnChannel();
+      const uint32_t send = mPendingLoopSend >= 0 ? (uint32_t)mPendingLoopSend : pHost->GetLoopSendChannel();
+      pHost->SetLoopChannels(ret, send);
+    }
+    mPendingLoopReturn = mPendingLoopSend = -1;
+    if (auto* pUI = GetUI()) { if (auto* pPage = pUI->GetControlWithTag(kCtrlTagSettingsBox)) pPage->SetDirty(false); }
+  }
   // DRIVER PANEL / DEVICE on the Settings page (1.51.0).
   if (mPendingDriverPanel || mPendingDevicePrefs)
   {
@@ -5588,6 +5924,14 @@ void NeuralAmpModeler::OnIdle()
         chip->As<NAMPedalChipControl>()->RefreshPosition();
   }
 
+  // 1.81.0: a preset that places a block outside the grid shown (made with EXTENDED DSP on) grows it.
+  if (GetUI() && !mLibraryPanelRelayoutPending)
+  {
+    int rows, cols;
+    _GridAreaWanted(rows, cols);
+    if (rows != mGridRowsShown || cols != mGridColsShown)
+      mLibraryPanelRelayoutPending = true;
+  }
   if (mLibraryPanelRelayoutPending)
   {
     mLibraryPanelRelayoutPending = false;
@@ -5708,6 +6052,12 @@ void NeuralAmpModeler::_LoadUiPrefs()
       mTubeProbesAlways = value != 0;
     else if (key == "fps")
       mUiFps = value == 60 ? 60 : 30;
+    else if (key == "low_gpu")
+      namui::gLowGpu = value != 0;
+    else if (key == "extended_dsp") // 1.81.0
+      mExtendedDsp = value != 0;
+    else if (key == "dsp_cores")
+      mDspCores = std::clamp(value, 1, kMaxDspCores);
     else if (key == "window_resolution")
       mPendingWindowResolution = mWindowResolution =
         value >= 0 && value < NAMDisplaySettingsControl::kNumResolutions ? value : -1;
@@ -5736,7 +6086,183 @@ void NeuralAmpModeler::_SaveUiPrefs() const
     << "\nfloat_w=" << (int)mSpecFloatRect.W() << "\nfloat_h=" << (int)mSpecFloatRect.H()
     << "\npro_eq_analyzer=" << (mProEqView.analyzer ? 1 : 0) << "\nout_eq_analyzer=" << (mOutEqView.analyzer ? 1 : 0)
     << "\ntube_probes_always=" << (mTubeProbesAlways ? 1 : 0) << "\nfps=" << mUiFps
-    << "\nwindow_resolution=" << mWindowResolution << "\n";
+    << "\nlow_gpu=" << (namui::gLowGpu ? 1 : 0) << "\nwindow_resolution=" << mWindowResolution
+    << "\nextended_dsp=" << (mExtendedDsp ? 1 : 0) << "\ndsp_cores=" << mDspCores << "\n";
+}
+
+// Settings > DSP (1.81.0).
+void NeuralAmpModeler::_SetExtendedDsp(bool on)
+{
+  if (on == mExtendedDsp)
+    return;
+  mExtendedDsp = on;
+  _SaveUiPrefs();
+  _ApplyDspThreads();
+  // The grid changes size: rebuild the UI, and keep Settings open.
+  mReopenSettingsAfterRelayout = true;
+  mLibraryPanelRelayoutPending = true;
+}
+
+void NeuralAmpModeler::_SetDspCores(int cores)
+{
+  mDspCores = std::clamp(cores, 1, kMaxDspCores);
+  _SaveUiPrefs();
+  _ApplyDspThreads();
+}
+
+void NeuralAmpModeler::_ApplyDspThreads()
+{
+  const int hw = std::max(1, (int)std::thread::hardware_concurrency());
+  const int cores = mExtendedDsp ? std::clamp(mDspCores, 1, std::min(kMaxDspCores, hw)) : 1;
+  if (cores > 1)
+    mDspPool.Start(cores - 1); // Started once; switched off, they just sleep
+  mDspPool.SetActiveWorkers(cores - 1);
+  mDspParallelCores.store(cores, std::memory_order_relaxed);
+}
+
+void NeuralAmpModeler::_GridAreaWanted(int& rows, int& cols) const
+{
+  rows = mExtendedDsp ? chaingrid::kExtendedRows : chaingrid::kStandardRows;
+  cols = mExtendedDsp ? chaingrid::kExtendedCols : chaingrid::kStandardCols;
+  // Never hide a block: one placed outside (a preset made with EXTENDED DSP on) grows the grid to show it.
+  for (int b = 0; b < chaingrid::kNumIds; b++)
+  {
+    if (b == chaingrid::kInput)
+      continue;
+    const int c = (int)std::round(GetParam(GridCellParam(b))->Value());
+    const bool inChain = !chaingrid::IsPedal(b) || GetParam(PedalOf(b).activeParam)->Value() > 0.5;
+    if (!inChain || c < 0 || c >= chaingrid::kNumCells)
+      continue;
+    rows = std::max(rows, chaingrid::CellRow(c) + 1);
+    cols = std::max(cols, chaingrid::CellCol(c) + 1);
+  }
+}
+
+IControl* NeuralAmpModeler::_MakeDspSettings(IGraphics* pGraphics)
+{
+  std::vector<NAMDspSettingsControl::Row> rows;
+  {
+    NAMDspSettingsControl::Row r;
+    r.label = "EXTENDED DSP";
+    r.options = []() { return std::vector<std::string>{"OFF", "ON"}; };
+    r.selected = [this]() { return mExtendedDsp ? 1 : 0; };
+    r.choose = [this, pGraphics](int i) {
+      if (i == 1 && !mExtendedDsp)
+      {
+        const EMsgBoxResult answer = _ShowMessageBox(
+          pGraphics,
+          "EXTENDED DSP gives you more to build with:\n\n"
+          "  - a bigger signal-chain grid: 6 rows x 20 columns (instead of 4 x 14)\n"
+          "  - parallel blocks (stacked in one column) processed at the same time on several CPU cores\n\n"
+          "WARNING: everything you add costs processing power. If your computer doesn't have enough compute, "
+          "this increases the chance of audio dropouts (crackles, gaps) and crashes. Raise the audio buffer "
+          "in Settings > Audio if you hear dropouts.\n\nTurn EXTENDED DSP on?",
+          "Extended DSP", kMB_YESNO);
+        if (answer == kYES)
+          _SetExtendedDsp(true);
+      }
+      else if (i == 0)
+        _SetExtendedDsp(false);
+    };
+    r.note = []() {
+      return std::string("Bigger grid and multi-core processing. Warning: if your computer doesn't have enough "
+                         "compute, dropouts and crashes become more likely.");
+    };
+    r.warn = true;
+    rows.push_back(std::move(r));
+  }
+  {
+    NAMDspSettingsControl::Row r;
+    r.label = "CPU CORES";
+    r.options = []() {
+      const int hw = std::max(1, (int)std::thread::hardware_concurrency());
+      std::vector<std::string> o;
+      for (int n = 1; n <= std::min(kMaxDspCores, hw); n++)
+        o.push_back(std::to_string(n));
+      return o;
+    };
+    r.selected = [this]() { return mDspCores - 1; };
+    r.choose = [this](int i) { _SetDspCores(i + 1); };
+    r.enabled = [this]() { return mExtendedDsp; };
+    r.note = [this]() {
+      if (!mExtendedDsp)
+        return std::string("With EXTENDED DSP on: blocks stacked in the same grid column run at the same time, "
+                           "one per core.");
+      return mDspCores == 1 ? std::string("1 = everything on the audio thread, as with EXTENDED DSP off.")
+                            : std::string("Blocks stacked in the same grid column run at the same time, one per "
+                                          "core. Helps dual amps and wide parallel rigs.");
+    };
+    rows.push_back(std::move(r));
+  }
+#if defined(APP_API) && defined(OS_WIN)
+  // The FX loop's interface channels (stereo pairs). The DAW plug-in uses its aux bus instead.
+  auto pairOptions = [](uint32_t numChannels) {
+    std::vector<std::string> o{"OFF"};
+    for (uint32_t ch = 1; ch + 1 <= std::min<uint32_t>(numChannels, 16); ch += 2)
+      o.push_back(std::to_string(ch) + "-" + std::to_string(ch + 1));
+    return o;
+  };
+  auto pairIndex = [](uint32_t firstChannel) { return firstChannel == 0 ? 0 : (int)(firstChannel - 1) / 2 + 1; };
+  {
+    NAMDspSettingsControl::Row r;
+    r.label = "LOOP SEND";
+    r.options = [pairOptions]() {
+      auto* pHost = IPlugAPPHost::sInstance.get();
+      return pairOptions(pHost ? std::max<uint32_t>(pHost->GetDeviceOutputChannels(), 2) : 2);
+    };
+    r.selected = [this, pairIndex]() {
+      if (mPendingLoopSend >= 0)
+        return pairIndex((uint32_t)mPendingLoopSend);
+      auto* pHost = IPlugAPPHost::sInstance.get();
+      return pHost ? pairIndex(pHost->GetLoopSendChannel()) : 0;
+    };
+    r.choose = [this](int i) { mPendingLoopSend = i == 0 ? 0 : 2 * i - 1; };
+    r.note = []() {
+      auto* pHost = IPlugAPPHost::sInstance.get();
+      if (!pHost || pHost->GetLoopSendChannel() == 0)
+        return std::string("Interface outputs for the LOOP OUT block: cable them to your pedals or rack.");
+      const uint32_t ch = pHost->GetLoopSendChannel();
+      if (!pHost->LoopSendOpen())
+        return std::string("Your interface doesn't have these outputs: pick another pair.");
+      const uint32_t main = pHost->GetMainOutputChannel();
+      if (ch <= main + 1 && main <= ch + 1)
+        return std::string("These are also your main outputs: the main mix covers the send. Pick another pair.");
+      return "LOOP OUT plays on outputs " + std::to_string(ch) + "-" + std::to_string(ch + 1) + ".";
+    };
+    rows.push_back(std::move(r));
+  }
+  {
+    NAMDspSettingsControl::Row r;
+    r.label = "LOOP RETURN";
+    r.options = [pairOptions]() {
+      auto* pHost = IPlugAPPHost::sInstance.get();
+      return pairOptions(pHost ? std::max<uint32_t>(pHost->GetDeviceInputChannels(), 2) : 2);
+    };
+    r.selected = [this, pairIndex]() {
+      if (mPendingLoopReturn >= 0)
+        return pairIndex((uint32_t)mPendingLoopReturn);
+      auto* pHost = IPlugAPPHost::sInstance.get();
+      return pHost ? pairIndex(pHost->GetLoopReturnChannel()) : 0;
+    };
+    r.choose = [this](int i) { mPendingLoopReturn = i == 0 ? 0 : 2 * i - 1; };
+    r.note = []() {
+      auto* pHost = IPlugAPPHost::sInstance.get();
+      if (!pHost || pHost->GetLoopReturnChannel() == 0)
+        return std::string("Interface inputs for the LOOP IN block: what comes back from your pedals or rack.");
+      const uint32_t ch = pHost->GetLoopReturnChannel();
+      if (!pHost->LoopReturnOpen())
+        return std::string("Your interface doesn't have these inputs: pick another pair.");
+      const uint32_t main = pHost->GetMainInputChannel();
+      if (main >= ch && main <= ch + 1)
+        return std::string("Your guitar input is in this pair: the return would feed your guitar back in. Pick "
+                           "another pair.");
+      return "LOOP IN hears inputs " + std::to_string(ch) + "-" + std::to_string(ch + 1)
+             + ". The hardware round trip adds your interface's in + out delay to this path.";
+    };
+    rows.push_back(std::move(r));
+  }
+#endif
+  return new NAMDspSettingsControl(IRECT(), std::move(rows));
 }
 
 // Settings > Display (1.74.0).
@@ -6288,6 +6814,23 @@ int NeuralAmpModeler::UnserializeState(const IByteChunk& chunk, int startPos)
     _MigrateLegacyChain();
     LEAVE_PARAMS_MUTEX
   }
+  else if (GetParam(kGridLayoutV2)->Value() < 0.5)
+  {
+    // 1.81.0: a grid saved on 4 x 14 cell numbers, renumbered for the 8 x 20 grid (same rows and columns).
+    ENTER_PARAMS_MUTEX
+    for (int b = 0; b < chaingrid::kNumIds; b++)
+    {
+      if (b == chaingrid::kInput)
+        continue;
+      const int c = (int)std::round(GetParam(GridCellParam(b))->Value());
+      if (c >= 0 && c < chaingrid::kStandardRows * chaingrid::kLegacyCols)
+        GetParam(GridCellParam(b))->Set(chaingrid::FromLegacyCell(c));
+      else
+        GetParam(GridCellParam(b))->Set(-1.0);
+    }
+    GetParam(kGridLayoutV2)->Set(1.0);
+    LEAVE_PARAMS_MUTEX
+  }
   return pos;
 }
 
@@ -6395,6 +6938,10 @@ void NeuralAmpModeler::OnParamChangeUI(int paramIdx, EParamSource source)
     int which = paramIdx;
     if (const int base = Lab2Base(paramIdx); base >= 0)
       which = mUiLab == 1 ? base : -1000;
+    // 1.82.0: a WAH copy's Sens, like the original's, only acts in Auto (its params are in the original's order).
+    if (CopyParamBase(paramIdx) == kWahModel)
+      if (auto* c = pGraphics->GetControlWithParamIdx(paramIdx + (kWahSens - kWahModel)))
+        c->SetDisabled(GetParam(paramIdx)->Int() != pedals::Wah::kAuto);
     // 1.68.0: a chassis socket given another tube takes that tube's usual bias (a 12AU7 at a 12AX7's
     // -1.5 V would sit nearly saturated).
     {
@@ -7634,9 +8181,13 @@ chaingrid::Grid NeuralAmpModeler::_ReadChainGrid() const
     const int c = (int)std::round(GetParam(GridCellParam(b))->Value());
     const bool inChain = !chaingrid::IsPedal(b) || GetParam(PedalOf(b).activeParam)->Value() > 0.5;
     g.cell[b] = (inChain && c >= 0 && c < chaingrid::kNumCells) ? c : -1;
-    g.in[b] = (chaingrid::Mask)std::llround(GetParam(GridInParam(b))->Value());
+    g.in[b] = (chaingrid::Mask)std::llround(GetParam(GridInParam(b))->Value())
+              | ((chaingrid::Mask)std::llround(GetParam(GridInHiParam(b))->Value()) << chaingrid::kMaskLoBits);
   }
-  g.out = (chaingrid::Mask)std::llround(GetParam(kGridOut)->Value());
+  g.out = (chaingrid::Mask)std::llround(GetParam(kGridOut)->Value())
+          | ((chaingrid::Mask)std::llround(GetParam(kGridOutHi)->Value()) << chaingrid::kMaskLoBits);
+  g.rows = mGridRowsShown; // 1.81.0
+  g.cols = mGridColsShown;
   return g;
 }
 
@@ -7652,15 +8203,19 @@ void NeuralAmpModeler::_WriteChainGrid(const chaingrid::Grid& grid)
     if (b == chaingrid::kInput)
       continue;
     send(GridCellParam(b), grid.cell[b]);
-    send(GridInParam(b), grid.in[b]);
+    send(GridInParam(b), (double)(grid.in[b] & chaingrid::kMaskLo));
+    send(GridInHiParam(b), (double)(grid.in[b] >> chaingrid::kMaskLoBits));
   }
-  send(kGridOut, grid.out);
+  send(kGridOut, (double)(grid.out & chaingrid::kMaskLo));
+  send(kGridOutHi, (double)(grid.out >> chaingrid::kMaskLoBits));
   send(kChainGridV1, 1.0);
+  send(kGridLayoutV2, 1.0);
 }
 
 void NeuralAmpModeler::_ResetChainGridParams()
 {
   GetParam(kChainGridV1)->Set(0.0);
+  GetParam(kGridLayoutV2)->Set(0.0); // 1.81.0: a state without it numbers its cells on 4 x 14
   // Not grid params, but a state saved before they existed must load with their defaults (amp on,
   // no Tube Lab tone stack), not with whatever the previous state left.
   GetParam(kAmpEngaged)->Set(1.0);
@@ -7721,6 +8276,8 @@ void NeuralAmpModeler::_ResetChainGridParams()
     GetParam(p)->Set(GetParam(p)->GetDefault());
   for (int p = kTubeModFirst; p <= kLab2ModLast; p++) // 1.72.0: nor the MODULAR chassis (the Tube Lab's own)
     GetParam(p)->Set(GetParam(p)->GetDefault());
+  for (int p = kPitchRackParamsFirst; p <= kPitchRackParamsLast; p++) // 1.76.0: nor PITCH RACK
+    GetParam(p)->Set(GetParam(p)->GetDefault());
   GetParam(kCabLab3D)->Set(0.0);
   for (int b = 0; b < chaingrid::kNumIds; b++)
   {
@@ -7728,8 +8285,14 @@ void NeuralAmpModeler::_ResetChainGridParams()
       continue;
     GetParam(GridCellParam(b))->Set(-1.0);
     GetParam(GridInParam(b))->Set(0.0);
+    GetParam(GridInHiParam(b))->Set(0.0);
   }
   GetParam(kGridOut)->Set(0.0);
+  GetParam(kGridOutHi)->Set(0.0);
+  for (int p = kLateCopyParams0; p <= kLateCopyParamsLast; p++) // 1.82.0: nor the late pedals' copies
+    GetParam(p)->Set(GetParam(p)->GetDefault());
+  for (int id = chaingrid::kFirstLateCopy; id < chaingrid::kNumIds; id++)
+    GetParam(PedalOf(id).activeParam)->Set(0.0);
 }
 
 void NeuralAmpModeler::_MigrateLegacyChain()
@@ -7770,10 +8333,13 @@ void NeuralAmpModeler::_MigrateLegacyChain()
     if (b == chaingrid::kInput)
       continue;
     GetParam(GridCellParam(b))->Set(g.cell[b]);
-    GetParam(GridInParam(b))->Set(g.in[b]);
+    GetParam(GridInParam(b))->Set((double)(g.in[b] & chaingrid::kMaskLo));
+    GetParam(GridInHiParam(b))->Set((double)(g.in[b] >> chaingrid::kMaskLoBits));
   }
-  GetParam(kGridOut)->Set(g.out);
+  GetParam(kGridOut)->Set((double)(g.out & chaingrid::kMaskLo));
+  GetParam(kGridOutHi)->Set((double)(g.out >> chaingrid::kMaskLoBits));
   GetParam(kChainGridV1)->Set(1.0);
+  GetParam(kGridLayoutV2)->Set(1.0); // FromSerialOrder numbers cells on the current grid
 }
 
 void NeuralAmpModeler::_PrepareGridBuffers(const size_t numFrames)
@@ -7796,6 +8362,14 @@ void NeuralAmpModeler::_PrepareGridBuffers(const size_t numFrames)
     }
   if (mBlockFadeGain.size() < numFrames)
     mBlockFadeGain.resize(numFrames);
+  for (int w = 0; w < kMaxDspCores - 1; w++)
+  {
+    if (mBlockFadeGainW[w].size() < numFrames)
+      mBlockFadeGainW[w].resize(numFrames);
+    for (int c = 0; c < 2; c++)
+      if (mBlockFadeDryW[w][c].size() < numFrames)
+        mBlockFadeDryW[w][c].resize(numFrames);
+  }
   for (int c = 0; c < 2; c++)
   {
     if (mBlockFadeDry[c].size() < numFrames)
@@ -7867,6 +8441,43 @@ void NeuralAmpModeler::_ApplyModuleToBay(int lab, int bay, bool full)
     _RefreshTubeLabControls(pGraphics);
     pGraphics->SetAllControlsDirty();
   }
+}
+
+void NeuralAmpModeler::_ApplyPitchRackPreset(int index)
+{
+  if (index < 0 || index >= pedals::kNumPitchRackPresets)
+    return;
+  IGraphics* pGraphics = GetUI();
+  auto send = [this, pGraphics](int param, double value) {
+    const double normalized = GetParam(param)->ToNormalized(value);
+    BeginInformHostOfParamChangeFromUI(param);
+    SendParameterValueFromUI(param, normalized);
+    EndInformHostOfParamChangeFromUI(param);
+    if (pGraphics)
+      pGraphics->ForControlWithParam(param, [normalized](IControl* c) { c->SetValueFromDelegate(normalized); });
+  };
+  const pedals::PitchRackPreset& pr = pedals::kPitchRackPresets[index];
+  const pedals::PitchRackParams& v = pr.p;
+  send(kPRMode, v.mode);
+  send(kPRVoiceA, v.semiA);
+  send(kPRVoiceB, v.semiB);
+  send(kPRDiaA, v.diaA);
+  send(kPRDiaB, v.diaB);
+  if (pr.setsKey)
+  {
+    send(kPRKey, v.key);
+    send(kPRScale, v.scale);
+  }
+  send(kPRFine, v.fineCents);
+  send(kPRDelayA, v.delayAms);
+  send(kPRDelayB, v.delayBms);
+  send(kPRFeedback, v.feedback01 * 10.0);
+  send(kPRMix, v.mix01 * 100.0);
+  send(kPRWidth, v.width01 * 100.0);
+  send(kPRHiCut, v.hiCutHz);
+  send(kPRSplice, v.splice);
+  if (pGraphics)
+    pGraphics->SetAllControlsDirty();
 }
 
 void NeuralAmpModeler::_ApplyTubePreset(int index)
@@ -8318,15 +8929,16 @@ void NeuralAmpModeler::_SelectBlock(int blockId)
   {
     const IRECT winBounds = pGraphics->GetBounds();
     const IRECT cardArea = isAmp                      ? _ComputeAmpPopupCardArea(winBounds)
-                           : (shownId == kTubePedalIdx || blockId == kCabLabPedalIdx || blockId == chaingrid::kProEq)
+                           : (shownId == kTubePedalIdx || blockId == kCabLabPedalIdx
+                              || (chaingrid::IsPedal(blockId) && chaingrid::PedalType(blockId) == chaingrid::kProEq))
                              ? _ComputeTubePopupCardArea(winBounds)
-                           : _IsDynamicsPedal(blockId) ? _ComputeDynamicsPopupCardArea(winBounds)
+                           : (_IsDynamicsPedal(blockId) || _IsRackPedal(blockId)) ? _ComputeDynamicsPopupCardArea(winBounds)
                            : _IsWidePedal(blockId) ? _ComputeWidePopupCardArea(winBounds)
                                                       : _ComputePedalPopupCardArea(winBounds);
     // Every card now ends above the strip, which stays live on top. With a big card open (Amp, Tube
     // Lab, CAB LAB, PRO EQ) an expanded strip drops to its small size to leave them room.
     const bool bigCard = popupOpen && (isAmp || shownId == kTubePedalIdx || blockId == kCabLabPedalIdx
-                                       || blockId == chaingrid::kProEq);
+                                       || (chaingrid::IsPedal(blockId) && chaingrid::PedalType(blockId) == chaingrid::kProEq));
     for (auto& s : mSpecStripCtls)
       s.control->SetTargetAndDrawRECTs(bigCard ? s.shrunk : s.full);
     pGraphics->SetAllControlsDirty();

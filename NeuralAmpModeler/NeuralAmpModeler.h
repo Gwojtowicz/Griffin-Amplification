@@ -21,6 +21,7 @@
 #include "TubeDebug.h"
 #include "CabLab.h"
 #include "ChainGrid.h"
+#include "DspThreadPool.h"
 
 #include "IPlug_include_in_plug_hdr.h"
 #include <future>
@@ -35,6 +36,7 @@ inline void NAMDragLog(const char* fmt, ...);
 #include "ProEQ.h"
 #include "Dynamics.h"
 #include "MorePedals.h"
+#include "PitchRack.h"
 #include "Spectrum.h"
 #include "RealFeel.h"
 #include "MainsHum.h"
@@ -544,6 +546,62 @@ enum EParams
   kTubeModLast = kTubeModKnobLast,
   kLab2ModFirst,
   kLab2ModLast = kLab2ModFirst + (kTubeModLast - kTubeModFirst),
+  // 1.76.0: PITCH RACK (PitchRack.h; grid id chaingrid::kPitchRack), then its grid params.
+  kPRActive,
+  kPREngaged,
+  kPRMode, // Micro / Dual / Diatonic / Reverse
+  kPRVoiceA, // Dual / Reverse: semitones
+  kPRVoiceB,
+  kPRDiaA, // Diatonic: scale interval
+  kPRDiaB,
+  kPRKey,
+  kPRScale,
+  kPRFine, // cents
+  kPRDelayA, // ms
+  kPRDelayB,
+  kPRFeedback,
+  kPRMix, // %
+  kPRWidth, // %
+  kPRHiCut, // Hz
+  kPRSplice, // 1.78.0: Smart / Vintage
+  kGridCell49,
+  kGridIn49,
+  // 1.81.0: set once the GridCell params number cells on the 8 x 20 grid (chaingrid::kCols); states
+  // saved before (4 x 14) are converted on load (chaingrid::FromLegacyCell).
+  kGridLayoutV2,
+  // 1.82.0: the late pedals' copies' grid params (ids 50..59: WAH 2, WAH 3, PRO EQ 2...)...
+  kGridCell50,
+  kGridIn50,
+  kGridCell51,
+  kGridIn51,
+  kGridCell52,
+  kGridIn52,
+  kGridCell53,
+  kGridIn53,
+  kGridCell54,
+  kGridIn54,
+  kGridCell55,
+  kGridIn55,
+  kGridCell56,
+  kGridIn56,
+  kGridCell57,
+  kGridIn57,
+  kGridCell58,
+  kGridIn58,
+  kGridCell59,
+  kGridIn59,
+  // ...every mask's bits from chaingrid::kMaskLoBits up (by param slot, then Output's)...
+  kGridInHi0,
+  kGridOutHi = kGridInHi0 + chaingrid::kNumParamSlots,
+  // ...and the copies' own params: for each copyable type, copy 2 then copy 3, each a copy of the
+  // original's params in kLateCopySpans (see CopyParam).
+  kLateCopyParams0,
+  kLateCopyParamsLast = kLateCopyParams0
+                        + chaingrid::kLateCopiesPerType
+                            * ((kWahLevel - kWahActive + 1) + (kProEqBandLast - kProEqActive + 1) + 1
+                               + (kProEqBandExtLast - kProEqBandExtFirst + 1) + (kDigiLevel - kDigiActive + 1) + 1
+                               + (kAnaWidth - kAnaActive + 1) + 1 + (kTapeDrive - kTapeActive + 1) + 1)
+                        - 1,
   kNumParams
 };
 
@@ -583,10 +641,14 @@ constexpr int EqBandExtParam(int first, int band, int field) { return first + ba
 constexpr int kLateGridCell[] = {kGridCell32, kGridCell33, kGridCell34, kGridCell35,
                                  kGridCell36, kGridCell37, kGridCell38, kGridCell39, kGridCell40,
                                  kGridCell41, kGridCell42, kGridCell43, kGridCell44, kGridCell45,
-                                 kGridCell46, kGridCell47, kGridCell48};
+                                 kGridCell46, kGridCell47, kGridCell48, kGridCell49, kGridCell50,
+                                 kGridCell51, kGridCell52, kGridCell53, kGridCell54, kGridCell55,
+                                 kGridCell56, kGridCell57, kGridCell58, kGridCell59};
 constexpr int kLateGridIn[] = {kGridIn32, kGridIn33, kGridIn34, kGridIn35, kGridIn36,
                                kGridIn37, kGridIn38, kGridIn39, kGridIn40, kGridIn41, kGridIn42,
-                               kGridIn43, kGridIn44, kGridIn45, kGridIn46, kGridIn47, kGridIn48};
+                               kGridIn43, kGridIn44, kGridIn45, kGridIn46, kGridIn47, kGridIn48, kGridIn49,
+                               kGridIn50, kGridIn51, kGridIn52, kGridIn53, kGridIn54, kGridIn55, kGridIn56,
+                               kGridIn57, kGridIn58, kGridIn59};
 // The 1.44.0 pedals' params, first to last (older states load them at their defaults).
 constexpr int kNewPedalParamsFirst = kSkyActive, kNewPedalParamsLast = kHGPreBright;
 // The 1.52.0 GATE and PRO COMP params, first to last (older states load them at their defaults).
@@ -595,6 +657,8 @@ constexpr int kDynamicsParamsFirst = kGateActive, kDynamicsParamsLast = kSCompSc
 constexpr int kMorePedalParamsFirst = kTGActive, kMorePedalParamsLast = kSprDecay;
 // The 1.71.0 tap tempo params, first to last (older states load them at their defaults).
 constexpr int kTempoParamsFirst = kTempoBPM, kTempoParamsLast = kTapeTapDiv;
+// The 1.76.0 PITCH RACK's params, first to last (older states load them at their defaults).
+constexpr int kPitchRackParamsFirst = kPRActive, kPitchRackParamsLast = kPRSplice;
 // 1.67.0: every Tube Lab param TUBE LAB 2 has its own copy of (all but Active and the old Slot). LAB 2's
 // copy of kTubeLabParams[i] is kLab2First + i.
 constexpr int kTubeLabParams[] = {kTubeEngaged, kTubeDrive, kTubeBias, kTubeBloom, kTubeBright,
@@ -644,6 +708,77 @@ constexpr int GridInParam(int id)
 {
   const int slot = chaingrid::ParamSlot(id);
   return slot < kNumGridSlots32 ? kGridIn0 + slot : kLateGridIn[slot - kNumGridSlots32];
+}
+// 1.82.0: a mask's high bits (chaingrid::kMaskLoBits and up).
+constexpr int GridInHiParam(int id) { return kGridInHi0 + chaingrid::ParamSlot(id); }
+
+// 1.82.0: the late pedals' copies. Each copy has its own copy of the original's params in these spans
+// (On, Engaged, knobs, and its tap division); CopyParam(id, p) is copy id's version of the original's
+// param p (p itself for the original, or a param the copies share).
+struct ParamSpan
+{
+  int first, last;
+};
+constexpr int kMaxCopySpans = 3;
+constexpr ParamSpan kLateCopySpans[chaingrid::kNumLateCopyTypes][kMaxCopySpans] = {
+  {{kWahActive, kWahLevel}, {0, -1}, {0, -1}},
+  {{kProEqActive, kProEqBandLast}, {kProEqTrim, kProEqTrim}, {kProEqBandExtFirst, kProEqBandExtLast}},
+  {{kDigiActive, kDigiLevel}, {kDigiTapDiv, kDigiTapDiv}, {0, -1}},
+  {{kAnaActive, kAnaWidth}, {kAnaTapDiv, kAnaTapDiv}, {0, -1}},
+  {{kTapeActive, kTapeDrive}, {kTapeTapDiv, kTapeTapDiv}, {0, -1}}};
+constexpr int LateCopyTypeParams(int t)
+{
+  int n = 0;
+  for (const ParamSpan& sp : kLateCopySpans[t])
+    n += sp.last - sp.first + 1;
+  return n;
+}
+// The first param of copy `copy` (1..) of type index t.
+constexpr int LateCopyParamBase(int t, int copy)
+{
+  int offset = 0;
+  for (int u = 0; u < t; u++)
+    offset += chaingrid::kLateCopiesPerType * LateCopyTypeParams(u);
+  return kLateCopyParams0 + offset + (copy - 1) * LateCopyTypeParams(t);
+}
+static_assert(LateCopyParamBase(chaingrid::kNumLateCopyTypes - 1, chaingrid::kLateCopiesPerType)
+                  + LateCopyTypeParams(chaingrid::kNumLateCopyTypes - 1) - 1
+                == kLateCopyParamsLast,
+              "every copy's params have room");
+constexpr int CopyParam(int id, int p)
+{
+  if (!chaingrid::IsLateCopy(id))
+    return p;
+  const int t = (id - chaingrid::kFirstLateCopy) / chaingrid::kLateCopiesPerType;
+  const int base = LateCopyParamBase(t, chaingrid::PedalCopy(id));
+  int idx = 0;
+  for (const ParamSpan& sp : kLateCopySpans[t])
+  {
+    if (p >= sp.first && p <= sp.last)
+      return base + idx + (p - sp.first);
+    idx += sp.last - sp.first + 1;
+  }
+  return p;
+}
+// The reverse: the original's param that copy param p copies (-1 if p isn't a copy's).
+constexpr int CopyParamBase(int p)
+{
+  if (p < kLateCopyParams0 || p > kLateCopyParamsLast)
+    return -1;
+  for (int t = 0; t < chaingrid::kNumLateCopyTypes; t++)
+    for (int copy = 1; copy <= chaingrid::kLateCopiesPerType; copy++)
+    {
+      int idx = p - LateCopyParamBase(t, copy);
+      if (idx < 0 || idx >= LateCopyTypeParams(t))
+        continue;
+      for (const ParamSpan& sp : kLateCopySpans[t])
+      {
+        if (idx <= sp.last - sp.first)
+          return sp.first + idx;
+        idx -= sp.last - sp.first + 1;
+      }
+    }
+  return -1;
 }
 // The extra cab blocks, as indices 0, 1 into mExtraCabIR etc.
 constexpr int kNumExtraCabs = 2;
@@ -755,6 +890,9 @@ static_assert(chaingrid::kCab == kCabPedalIdx && chaingrid::kLoopSend == kLoopSe
 // Loop Send/Return read/write the aux I/O bus (see PLUG_CHANNEL_IO) at whatever index the main
 // bus's channel count ends at -- i.e. right after the main stereo pair.
 constexpr int kLoopBusChannelOffset = 2;
+// Settings > DSP (1.81.0): the most cores EXTENDED DSP spreads parallel blocks over (the audio thread
+// plus kMaxDspCores - 1 workers).
+constexpr int kMaxDspCores = 4;
 
 const int numKnobs = 6;
 
@@ -1156,9 +1294,9 @@ private:
   std::unique_ptr<ResamplingNAM> mModel;
   // 1.64.0: the capture run inside the Tube Lab (kTubeCapture): its mono input and output, and the
   // input gain's ramp (Drive, re 12 dB).
-  std::vector<iplug::sample> mCapIn, mCapOut;
-  iplug::sample* mCapInPtr[1] = {nullptr};
-  iplug::sample* mCapOutPtr[1] = {nullptr};
+  std::vector<iplug::sample> mCapIn[2], mCapOut[2]; // per lab (1.81.0)
+  iplug::sample* mCapInPtr[2][1] = {};
+  iplug::sample* mCapOutPtr[2][1] = {};
   double mCapGain = 1.0;
   bool _TubeTakesCapture() const; // The Tube Lab is running the AMP block's capture (so the AMP block doesn't)
   // And the IR (left channel, or the only channel if no R-channel IR is loaded)
@@ -1302,10 +1440,13 @@ private:
   int mGateKeyChannels = 0;
   // Their popups: two rows of controls and a meter.
   static bool _IsDynamicsPedal(int id) { return id == chaingrid::kGate || id == chaingrid::kStudioComp; }
+  // 1.76.0: PITCH RACK uses the dynamics pedals' bigger card, with two rows of controls.
+  static bool _IsRackPedal(int id) { return id == chaingrid::kPitchRack; }
   iplug::igraphics::IRECT _ComputeDynamicsPopupCardArea(const iplug::igraphics::IRECT& winBounds) const;
   // Their popups are wider than a plain pedal's (more controls).
   static bool _IsWidePedal(int id)
   {
+    id = chaingrid::PedalType(id); // 1.82.0: a copy is laid out as its original
     return (id >= chaingrid::kSkyVerb && id <= chaingrid::kHiGainPreamp)
            || (id >= chaingrid::kTrackGate && id <= chaingrid::kSpringVerb);
   }
@@ -1314,7 +1455,17 @@ private:
   pedals::DigitalDelay mDigiDelay;
   pedals::AnalogDelay mAnalogDelay;
   pedals::TapeEcho mTapeEcho;
+  // 1.82.0: the late pedals' copies (copy 2 at [0], copy 3 at [1]); PRO EQ's with their own spectrum
+  // taps and graph view.
+  pedals::Wah mWahCopy[chaingrid::kLateCopiesPerType];
+  proeq::EQ mProEqCopy[chaingrid::kLateCopiesPerType];
+  spectrum::Tap mProEqCopyTapIn[chaingrid::kLateCopiesPerType], mProEqCopyTapOut[chaingrid::kLateCopiesPerType];
+  spectrum::EqViewState mProEqCopyView[chaingrid::kLateCopiesPerType];
+  pedals::DigitalDelay mDigiDelayCopy[chaingrid::kLateCopiesPerType];
+  pedals::AnalogDelay mAnalogDelayCopy[chaingrid::kLateCopiesPerType];
+  pedals::TapeEcho mTapeEchoCopy[chaingrid::kLateCopiesPerType];
   pedals::SpringVerb mSpringVerb;
+  pedals::PitchRack mPitchRack; // 1.76.0
   iplug::igraphics::IRECT _ComputeWidePopupCardArea(const iplug::igraphics::IRECT& winBounds) const;
   pedals::Phaser mPhaser;
   // REAL FEEL pedal (chaingrid::kRealFeel): its DSP and output buffers, and the Shared B+ gain last
@@ -1470,6 +1621,20 @@ private:
   // Per block (and Output, at index kNumIds): the mixed input it processes.
   std::vector<iplug::sample> mGridMix[chaingrid::kNumIds + 1][2];
   iplug::sample* mGridMixPtrs[chaingrid::kNumIds + 1][2] = {};
+  // 1.80.0: live cables. Per source (blocks and Input): the loudest sample on each side since the UI
+  // last took it (the audio thread raises it, the UI swaps in 0), and how many channels it ran with.
+  std::atomic<float> mNodePeak[chaingrid::kNumIds][2];
+  std::atomic<int> mNodeCh[chaingrid::kNumIds];
+  float _TakeNodePeak(int node, int c)
+  {
+    return (node >= 0 && node < chaingrid::kNumIds && c >= 0 && c < 2)
+             ? mNodePeak[node][c].exchange(0.f, std::memory_order_relaxed)
+             : 0.f;
+  }
+  int _NodeChannels(int node) const
+  {
+    return (node >= 0 && node < chaingrid::kNumIds) ? mNodeCh[node].load(std::memory_order_relaxed) : 1;
+  }
   // 1.42.0: a block's On switch crossfades (kBlockFadeS, smoothstep) between its input and its
   // output instead of switching it in or out between two samples, which clicked. mBlockFade is
   // where each block is in its fade (0 = out of the path, 1 = in it); mBlockFadeOut holds a
@@ -1481,6 +1646,14 @@ private:
   iplug::sample* mBlockFadeOutPtrs[chaingrid::kNumIds][2] = {};
   std::vector<iplug::sample> mBlockFadeDry[2];
   std::vector<double> mBlockFadeGain;
+  // 1.81.0: the same scratch for each EXTENDED DSP worker (slot 1.. in DspThreadPool::Run).
+  std::vector<iplug::sample> mBlockFadeDryW[kMaxDspCores - 1][2];
+  std::vector<double> mBlockFadeGainW[kMaxDspCores - 1];
+  // EXTENDED DSP's workers, and how many cores the grid may use (1 = the audio thread alone), set from
+  // the UI thread (see _ApplyDspThreads).
+  dsppool::ThreadPool mDspPool;
+  std::atomic<int> mDspParallelCores{1};
+  void _ApplyDspThreads();
   // Switched off but still ringing out (a delay's repeats, a reverb's or cab's tail): keeps
   // processing on silence until its output is, or for at most kMaxTailS.
   bool mBlockTail[chaingrid::kNumIds] = {};
@@ -1501,6 +1674,9 @@ private:
   // The FX Loop Return's input, copied before anything writes the (possibly shared) output buffers.
   std::vector<iplug::sample> mLoopReturnBuf[2];
   iplug::sample* mLoopReturnPtrs[2] = {};
+  // The FX Loop Send's outputs for the block in progress (nullptr = not connected; set at the top of
+  // ProcessBlock from the DAW's aux bus or, 1.81.0, the standalone's loop channels).
+  iplug::sample* mLoopSendOut[2] = {};
   // kLoopMix (0..1) as last applied, for ramping it across a block.
   float mLoopMixSmoothed = 1.f;
   // The FX loop's popup (On switch + Mix knob), opened from either LOOP chip.
@@ -1572,6 +1748,21 @@ private:
   void _ApplyWindowResolution(); // OnIdle, standalone only
   int _WindowResolutionShown(); // The preset the window is at now, or -1
   bool _WindowResolutionFits(int index);
+  // Settings > DSP (1.81.0), in ui.ini. EXTENDED DSP: the 6 x 20 grid, more pedal copies, and parallel
+  // blocks spread over mDspCores cores (1 = the audio thread alone).
+  bool mExtendedDsp = false;
+  int mDspCores = 2;
+  void _SetExtendedDsp(bool on);
+  void _SetDspCores(int cores);
+  // The part of the grid in use, from the last layout (chaingrid::Grid::rows / cols), and what it
+  // should be now: EXTENDED DSP's size or the standard one, grown to cover any block placed outside it.
+  int mGridRowsShown = chaingrid::kStandardRows;
+  int mGridColsShown = chaingrid::kStandardCols;
+  void _GridAreaWanted(int& rows, int& cols) const;
+  iplug::igraphics::IControl* _MakeDspSettings(iplug::igraphics::IGraphics* pGraphics);
+  // The FX loop's channels picked in Settings > DSP, applied to the standalone's audio on the next
+  // OnIdle tick (-1 = nothing pending; 0 = off, else the first channel of the pair).
+  int mPendingLoopReturn = -1, mPendingLoopSend = -1;
   iplug::igraphics::IRECT mSpecStripRect; // where the strip is, from the last layout
   // The strip's controls, with their rects at its current and small size (the big cards shrink it).
   struct SpecStripCtl
@@ -1672,6 +1863,8 @@ private:
   // Tube Lab presets (TubePresets.h): sets every Tube Lab sound param, as if turned in the UI.
   void _ApplyTubePreset(int index);
   iplug::igraphics::IPopupMenu mTubePresetMenu;
+  void _ApplyPitchRackPreset(int index); // 1.77.0 (PitchRack.h kPitchRackPresets)
+  iplug::igraphics::IPopupMenu mPitchRackPresetMenu;
   // 1.70.0 PACK PICKER (PackScanner.h, PackPickerControl.h): switch between the captures of one
   // unzipped pack folder from the AMP block. Everything here is UI-thread state except the atomics,
   // which the audio thread reads in _SetOutputGain / _ApplyDSPStaging.

@@ -8,6 +8,114 @@ that gets used, and add an entry here.
 - **Minor** (1.8.0): new features.
 - **Patch** (1.8.1): fixes only.
 
+## 1.82.0 (2026-11-14)
+
+- **More pedal copies:** WAH, PRO EQ, DIGI DELAY, ANALOG DLY and TAPE ECHO now come in three copies each
+  (WAH 2, WAH 3, PRO EQ 2...), handed out by the AMP NEST like the other pedals' copies. Each has its own
+  knobs, popup and (PRO EQ) spectrum; the delays' copies follow tap tempo by their own Tap division.
+  Checked: each copy's output is bit-identical to its original's with the same settings.
+  - 60 grid blocks now, more than one param can hold as a cable mask, so each mask is two params:
+    `GridIn<id>` (bits 0-51, everything older presets have) and the new `GridInHi<id>` / `GridOutHi`.
+    The copies' params are named after the original's with " 2" / " 3" (e.g. `Wah Position 2`). Older
+    presets load with the copies off and sound exactly as before (checked on the autosave: bit-identical).
+- **Cables are one line again.** A live stereo cable no longer splits into two lines; it's one line that
+  brightens and thickens with the louder side.
+- Fix (iPlug2): `IParam::Init(const IParam&, search, replace)` inserted the replacement at a negative
+  position unless the search text was at the start of the name.
+
+## 1.81.0 (2026-11-14)
+
+- **AVX2 builds.** The 64-bit app and plug-in are now compiled for AVX2 + FMA instead of the x64 default
+  (SSE2). Standard WaveNet captures run about 1.7x faster (350 -> 205 ms for the NAM benchmark); the
+  8-channel A2 layers already had their own AVX2 kernel and stay the same. Needs a CPU from 2013 or later.
+  Every block gives the same output as before to rounding (-130 dB or less), except PITCH RACK in Smart
+  splice: it picks its splice points by matching the waveform, so a rounding-sized change moves them and
+  its output waveform differs while sounding the same.
+- **Settings > DSP**, a new tab:
+  - **EXTENDED DSP** (off by default; asks first, with a warning that without enough compute dropouts
+    and crashes become more likely):
+    - a bigger grid, 6 rows x 20 columns instead of 4 x 14. Cells are now numbered on an 8 x 20 grid; older
+      presets and the autosave are converted when they load (new param `GridLayoutV2`), and play exactly
+      as before. A preset with blocks outside the grid shown (made with EXTENDED DSP on) still plays in
+      full, and the grid grows to show them.
+    - **CPU CORES** (1-4, default 2): blocks stacked in one grid column run at the same time on separate
+      cores when the column has two or more heavy blocks (amps, Tube Labs, captures, cabs, reverbs, PITCH
+      RACK...). The output is bit-identical to running them one after another. Measured offline at
+      64-sample blocks: two Tube Labs in parallel 14.4% -> about 10% of real time with 2 cores, the
+      autosave rig (two reverbs in parallel) 11.8% -> 9.2%. More than 2 cores didn't help in these tests.
+      Columns with REAL FEEL or the FX loop, or with both AMP and TUBE LAB, stay serial (they share state).
+  - **LOOP SEND / LOOP RETURN** (standalone): the FX loop now works in the standalone. Pick a stereo pair
+    of interface outputs for LOOP OUT and inputs for LOOP IN; the app opens those channels alongside the
+    main ones (saved in settings.ini as `loop_out` / `loop_in`). The notes under them say if the interface
+    lacks the pair or it clashes with the main input/output. The plug-in still uses its aux bus.
+- TUBE LAB and TUBE LAB 2 no longer share their capture/module scratch buffers.
+
+## 1.80.0 (2026-11-13)
+
+- **Live cables.** A cable on the live path now shows what it carries: one line for mono, two side by side
+  (left and right) for stereo. Each line brightens and thickens with the signal on its side as you play
+  (0 dBFS full, -60 dBFS and below at rest) and falls back over about 0.6 s, so you can watch the stereo
+  image move through the chain: a ping-pong delay's strands alternate. Everything up to and including the
+  AMP is mono, so those stay single lines. It repaints only while a level is moving (nothing in silence),
+  and with LOW GPU on, on its 12 fps clock.
+
+## 1.79.0 (2026-11-13)
+
+- **LOW GPU** in Settings > Display. Every repaint redraws the whole window, so the parts that animate on
+  their own (the live spectrum strip and EQ analyzers, and the IN/OUT meters) kept the graphics chip busy
+  even in silence: at 2160 x 1200 with the spectrum strip open, about 10% average and 24% peak on the
+  integrated graphics. With LOW GPU on, they update at 12 frames a second on one shared clock, so they
+  repaint together, and the analyzers stop once the signal has been quiet for 1.5 s. Knobs, clicks and
+  popups still move at the full frame rate. Off by default.
+
+## 1.78.0 (2026-11-13)
+
+- **Five more PITCH RACK presets:** Chorus Slap (a detuned slapback at 110/130 ms), Cool Presence (a quiet
+  octave up for air), Crystal Echoes 2 (both sides an octave up, reversed in long windows), Guitar Room (a
+  small-room ambience from short, detuned reflections; add SKY VERB on Room for a real room) and Dual Vintage
+  Shifters (two of the earliest shifters, 12 cents apart).
+- **Splice: Smart or Vintage.** Smart is PITCH RACK's aligned splicing. Vintage is the earliest shifters'
+  delay-line form: each tap sweeps through a fixed window and wraps around. On small detunes the two taps'
+  comb filter sweeps slowly, which gives those units their warble: 1.1 dB of level movement on a held note,
+  against 0.14 dB with Smart. Changing it crossfades like Mode does. Older sessions and the first 13 presets
+  use Smart.
+
+## 1.77.0 (2026-11-13)
+
+- **PITCH RACK presets.** A PRESETS button in the pedal's popup opens 13 classic studio-rack sounds, voiced
+  for a distorted guitar. Put PITCH RACK after the AMP and CAB, where the rack unit sat. A preset sets every
+  knob except On.
+  - **Doubling and detune:** Nashville Double (session-style double-tracking), Tight Thickener, 80s Wall Of
+    Rhythm, Detuned Lead Echo, Chorus Detune.
+  - **Intervals:** Octave Up Lead, Octave Down Thick, Fifths And Octaves.
+  - **Harmonies:** Twin Harmony 3rds and Harmony 3rds And 5ths. These are in E minor; set Key and Scale to
+    your song. The other presets leave Key and Scale alone.
+  - **Feedback and reverse:** Pitch Staircase, Crystal Echoes, Reverse Lead.
+- Measured on a distorted riff: every preset is 1.4 to 2.9 dB louder than the dry signal (about what a
+  real double adds) and stays wider than it.
+
+## 1.76.0 (2026-11-13)
+
+- **PITCH RACK**, a new pedal: a dual-voice studio pitch shifter in the style of the late-80s rack
+  harmonizers. Two voices, A panned left and B right, each with its own pitch shift, delay and feedback.
+  Feedback sends each repeat back through its shifter, so the repeats keep climbing (or falling) by the
+  same interval. Four modes:
+  - **Micro:** voice A a few cents up and B the same amount down, after short delays. This is the classic
+    wide stereo detune. The default is 9 cents at 12 ms and 20 ms, half wet.
+  - **Dual:** each voice gets its own interval, up to two octaves either way. Fine spreads the two voices
+    apart by a few cents.
+  - **Diatonic:** each voice plays a scale interval (a 3rd, a 5th, an octave...) above or below the note
+    you play, in the Key and Scale you set (seven scales). It tracks your pitch, so a 3rd becomes major or
+    minor as the key needs.
+  - **Reverse:** each voice plays its last Delay-long window backwards, pitch-shifted. With Feedback, the
+    repeats cascade into "crystal" echoes.
+- How it works: the shifter splices like the rack units did. Two read taps sweep through a short memory and
+  crossfade. Each new splice is placed where the waveform lines up best with what is already playing, so
+  the voices barely warble. The wet path has a rack converter's 15 kHz bandwidth, plus a Hi Cut knob.
+- Measured: intervals within 2 cents across +-2 octaves; level changes within 0.8 dB on a held note;
+  Diatonic picked the right in-key 3rd and 5th on every test note in C major (six of the seven degrees). Changing Mode crossfades without a
+  click. The pedal costs 1-3% of one core, depending on the mode. It always outputs stereo.
+
 ## 1.75.1 (2026-11-05)
 
 - **Newer capture files play correctly.** Four fixes from the core library: a model's last modulation stage
