@@ -8,6 +8,26 @@ that gets used, and add an entry here.
 - **Minor** (1.8.0): new features.
 - **Patch** (1.8.1): fixes only.
 
+## 1.82.2 (2026-11-16)
+
+- Fix (VST3): on a mono track the plug-in could run mono in / mono out, so only the left side of the
+  chain came out and anything stereo (Widen, a stereo or right-channel IR, PITCH RACK, stereo reverbs and
+  delays) was lost. The mono-out layout is gone: a mono input now always gets a stereo output, as an amp
+  sim should. Saved presets and sessions are unchanged. If a DAW still shows the old layout, rescan
+  plug-ins or re-insert it on the track.
+
+## 1.82.1 (2026-11-15)
+
+- Fix (standalone): device buffer sizes that aren't a multiple of 64 (32, 48, 96) crashed the app, and
+  because the buffer size is saved and audio starts on launch, it then crashed on every start. The app
+  processed audio in fixed 64-sample vectors in place in the device's buffers, so a 48-sample buffer was
+  read and written 16 samples past its end. It now processes each device buffer in pieces of up to 64
+  samples, so every buffer size in Settings works, and 32 and 48 give their real latency. The VST3 wasn't
+  affected (the DAW sets the block size).
+  - Checked: the same rig rendered in 48-, 32- and 17-sample blocks matches the 64-sample render to
+    within rounding (-295 dB).
+  - Low buffers need more CPU headroom; heavy rigs (e.g. Tube Lab) may still drop out at 32 or 48.
+
 ## 1.82.0 (2026-11-14)
 
 - **More pedal copies:** WAH, PRO EQ, DIGI DELAY, ANALOG DLY and TAPE ECHO now come in three copies each

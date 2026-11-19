@@ -471,6 +471,29 @@ index 458bb57b5..9e3218908 100644
    
    const IParam* mEditParam = nullptr;
    IText mEditText;
+diff --git a/IPlug/APP/IPlugAPP.cpp b/IPlug/APP/IPlugAPP.cpp
+index 7d0cae651..b10ac9278 100644
+--- a/IPlug/APP/IPlugAPP.cpp
++++ b/IPlug/APP/IPlugAPP.cpp
+@@ -123,8 +123,8 @@ void IPlugAPP::AppProcess(double** inputs, double** outputs, int nFrames)
+ {
+   SetChannelConnections(ERoute::kInput, 0, MaxNChannels(ERoute::kInput), !IsInstrument()); //TODO: go elsewhere - enable inputs
+   SetChannelConnections(ERoute::kOutput, 0, MaxNChannels(ERoute::kOutput), true); //TODO: go elsewhere
+-  AttachBuffers(ERoute::kInput, 0, NChannelsConnected(ERoute::kInput), inputs, GetBlockSize());
+-  AttachBuffers(ERoute::kOutput, 0, NChannelsConnected(ERoute::kOutput), outputs, GetBlockSize());
++  AttachBuffers(ERoute::kInput, 0, NChannelsConnected(ERoute::kInput), inputs, nFrames);
++  AttachBuffers(ERoute::kOutput, 0, NChannelsConnected(ERoute::kOutput), outputs, nFrames);
+   
+   if(mMidiMsgsFromCallback.ElementsAvailable())
+   {
+@@ -162,6 +162,6 @@ void IPlugAPP::AppProcess(double** inputs, double** outputs, int nFrames)
+   //Do not handle Sysex messages here - SendSysexMsgFromUI overridden
+ 
+   ENTER_PARAMS_MUTEX
+-  ProcessBuffers(0.0, GetBlockSize());
++  ProcessBuffers(0.0, nFrames); // 1.82.1: the host may pass a short vector (any device buffer size)
+   LEAVE_PARAMS_MUTEX
+ }
 diff --git a/IPlug/APP/IPlugAPP.h b/IPlug/APP/IPlugAPP.h
 index c1e7a9c00..ad85293e4 100644
 --- a/IPlug/APP/IPlugAPP.h
@@ -559,7 +582,7 @@ index a6c0c0b14..d4df011ff 100644
        mmi->ptMinTrackSize.y = static_cast<LONG>(static_cast<float>(mmi->ptMinTrackSize.y) * scale);
        mmi->ptMaxTrackSize.x = static_cast<LONG>(static_cast<float>(mmi->ptMaxTrackSize.x) * scale);
 diff --git a/IPlug/APP/IPlugAPP_host.cpp b/IPlug/APP/IPlugAPP_host.cpp
-index fa6238861..6a4f7a804 100644
+index fa6238861..3c26c973d 100644
 --- a/IPlug/APP/IPlugAPP_host.cpp
 +++ b/IPlug/APP/IPlugAPP_host.cpp
 @@ -130,6 +130,8 @@ bool IPlugAPPHost::InitState()
@@ -680,7 +703,7 @@ index fa6238861..6a4f7a804 100644
      {
        mOutputBufPtrs.Add(nullptr); //will be set in callback
      }
-@@ -831,36 +878,55 @@ int IPlugAPPHost::AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_
+@@ -831,49 +878,70 @@ int IPlugAPPHost::AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_
  {
    IPlugAPPHost* _this = (IPlugAPPHost*) pUserData;
  
@@ -706,47 +729,77 @@ index fa6238861..6a4f7a804 100644
      if (doFade)
        ApplyFades(pInputBufferD, nins, nFrames, _this->mAudioEnding);
 -    
+-    for (int i = 0; i < nFrames; i++)
 +    // Channels in the open run that are neither main nor loop must be silent (the plug-in only writes its own).
 +    if (nouts > nMainOuts)
 +      memset(pOutputBufferD, 0, nFrames * nouts * sizeof(double));
 +
-     for (int i = 0; i < nFrames; i++)
++    // Griffin Amplification (1.82.1): process the device buffer in chunks of up to
++    // APP_SIGNAL_VECTOR_SIZE frames, the last one shorter when the buffer isn't a multiple of it.
++    // The stock loop always processed full APP_SIGNAL_VECTOR_SIZE vectors in place, so a buffer
++    // like 32, 48 or 96 read and wrote past the end of the device's buffers and crashed the app.
++    for (uint32_t i = 0; i < nFrames; )
      {
-       _this->mBufIndex %= APP_SIGNAL_VECTOR_SIZE;
+-      _this->mBufIndex %= APP_SIGNAL_VECTOR_SIZE;
++      const int n = (int) std::min<uint32_t>(APP_SIGNAL_VECTOR_SIZE, nFrames - i);
  
-       if (_this->mBufIndex == 0)
+-      if (_this->mBufIndex == 0)
++      for (int c = 0; c < nMainIns; c++)
        {
 -        for (int c = 0; c < nins; c++)
-+        for (int c = 0; c < nMainIns; c++)
-         {
+-        {
 -          _this->mInputBufPtrs.Set(c, (pInputBufferD + (c * nFrames)) + i);
-+          _this->mInputBufPtrs.Set(c, (pInputBufferD + ((_this->mMainInOffset + c) * nFrames)) + i);
-         }
+-        }
 -        
 -        for (int c = 0; c < nouts; c++)
-+
-+        for (int c = 0; c < nMainOuts; c++)
-         {
+-        {
 -          _this->mOutputBufPtrs.Set(c, (pOutputBufferD + (c * nFrames)) + i);
-+          _this->mOutputBufPtrs.Set(c, (pOutputBufferD + ((_this->mMainOutOffset + c) * nFrames)) + i);
-         }
+-        }
 -        
+-        _this->mIPlug->AppProcess(_this->mInputBufPtrs.GetList(), _this->mOutputBufPtrs.GetList(), APP_SIGNAL_VECTOR_SIZE);
+-
+-        _this->mSamplesElapsed += APP_SIGNAL_VECTOR_SIZE;
++        _this->mInputBufPtrs.Set(c, (pInputBufferD + ((_this->mMainInOffset + c) * nFrames)) + i);
+       }
+-      
+-      for (int c = 0; c < nouts; c++)
 +
-+        IPlugAPP* pPlug = _this->mIPlug.get();
-+        for (int c = 0; c < 2; c++)
-+        {
-+          pPlug->mAppLoopIn[c] = (_this->mLoopInOffset >= 0 && pInputBufferD)
-+                                   ? pInputBufferD + (_this->mLoopInOffset + std::min(c, _this->mLoopInWidth - 1)) * nFrames + i
-+                                   : nullptr;
-+          // A one-channel send (the last output) gets the left; the plug-in sums to it.
-+          pPlug->mAppLoopOut[c] = (_this->mLoopOutOffset >= 0 && c < _this->mLoopOutWidth)
-+                                    ? pOutputBufferD + (_this->mLoopOutOffset + c) * nFrames + i
-+                                    : nullptr;
-+        }
++      for (int c = 0; c < nMainOuts; c++)
++      {
++        _this->mOutputBufPtrs.Set(c, (pOutputBufferD + ((_this->mMainOutOffset + c) * nFrames)) + i);
++      }
 +
-         _this->mIPlug->AppProcess(_this->mInputBufPtrs.GetList(), _this->mOutputBufPtrs.GetList(), APP_SIGNAL_VECTOR_SIZE);
++      IPlugAPP* pPlug = _this->mIPlug.get();
++      for (int c = 0; c < 2; c++)
+       {
+-        pOutputBufferD[c * nFrames + i] *= APP_MULT;
++        pPlug->mAppLoopIn[c] = (_this->mLoopInOffset >= 0 && pInputBufferD)
++                                 ? pInputBufferD + (_this->mLoopInOffset + std::min(c, _this->mLoopInWidth - 1)) * nFrames + i
++                                 : nullptr;
++        // A one-channel send (the last output) gets the left; the plug-in sums to it.
++        pPlug->mAppLoopOut[c] = (_this->mLoopOutOffset >= 0 && c < _this->mLoopOutWidth)
++                                  ? pOutputBufferD + (_this->mLoopOutOffset + c) * nFrames + i
++                                  : nullptr;
+       }
  
-         _this->mSamplesElapsed += APP_SIGNAL_VECTOR_SIZE;
+-      _this->mBufIndex++;
++      _this->mIPlug->AppProcess(_this->mInputBufPtrs.GetList(), _this->mOutputBufPtrs.GetList(), n);
++
++      _this->mSamplesElapsed += n;
++      i += (uint32_t) n;
+     }
+-    
++
++    if (APP_MULT != 1.0)
++    {
++      for (int c = 0; c < nouts; c++)
++        for (uint32_t i = 0; i < nFrames; i++)
++          pOutputBufferD[c * nFrames + i] *= APP_MULT;
++    }
++
+     if (doFade)
+       ApplyFades(pOutputBufferD, nouts, nFrames, _this->mAudioEnding);
+     
 diff --git a/IPlug/APP/IPlugAPP_host.h b/IPlug/APP/IPlugAPP_host.h
 index 1503c6c49..477bfff37 100644
 --- a/IPlug/APP/IPlugAPP_host.h
@@ -885,3 +938,61 @@ index 7397131f0..c929d5496 100644
        str.DeleteSub(insertionPos, static_cast<int>(strlen(searchStr)));
        str.Insert(replaceStr, insertionPos);
      }
+diff --git a/IPlug/VST3/IPlugVST3_ProcessorBase.cpp b/IPlug/VST3/IPlugVST3_ProcessorBase.cpp
+index b02539a87..d3bfac5b2 100644
+--- a/IPlug/VST3/IPlugVST3_ProcessorBase.cpp
++++ b/IPlug/VST3/IPlugVST3_ProcessorBase.cpp
+@@ -129,7 +129,23 @@ void IPlugVST3ProcessorBase::ProcessMidiOut(IPlugQueue<SysExData>& sysExQueue, S
+     {
+       IMidiMsg& msg = mMidiOutputQueue.Peek();
+ 
+-      if (msg.StatusMsg() == IMidiMsg::kNoteOn)
++      // start every event clean: noteOn/noteOff share a union with different layouts, so reusing
++      // one Event left the previous note-on's velocity bits in the next note-off's noteId (and
++      // every note-on had noteId 0). Hosts that match note-offs by noteId then never
++      // ended those notes. noteId -1 = "no id": match by channel + pitch.
++      toAdd = {};
++      if (msg.StatusMsg() == IMidiMsg::kNoteOn && msg.Velocity() == 0)
++      {
++        // running-status style note-off (note-on, velocity 0)
++        Helpers::init(toAdd, Event::kNoteOffEvent, 0 /*bus id*/, msg.mOffset);
++        toAdd.noteOff.channel = msg.Channel();
++        toAdd.noteOff.pitch = msg.NoteNumber();
++        toAdd.noteOff.velocity = 0.f;
++        toAdd.noteOff.noteId = -1;
++        toAdd.noteOff.tuning = 0.f;
++        pOutputEvents->addEvent(toAdd);
++      }
++      else if (msg.StatusMsg() == IMidiMsg::kNoteOn)
+       {
+         Helpers::init(toAdd, Event::kNoteOnEvent, 0 /*bus id*/, msg.mOffset);
+ 
+@@ -137,6 +153,8 @@ void IPlugVST3ProcessorBase::ProcessMidiOut(IPlugQueue<SysExData>& sysExQueue, S
+         toAdd.noteOn.pitch = msg.NoteNumber();
+         toAdd.noteOn.tuning = 0.;
+         toAdd.noteOn.velocity = (float) msg.Velocity() * (1.f / 127.f);
++        toAdd.noteOn.length = 0;
++        toAdd.noteOn.noteId = -1;
+         pOutputEvents->addEvent(toAdd);
+       }
+       else if (msg.StatusMsg() == IMidiMsg::kNoteOff)
+@@ -146,6 +164,8 @@ void IPlugVST3ProcessorBase::ProcessMidiOut(IPlugQueue<SysExData>& sysExQueue, S
+         toAdd.noteOff.channel = msg.Channel();
+         toAdd.noteOff.pitch = msg.NoteNumber();
+         toAdd.noteOff.velocity = (float) msg.Velocity() * (1.f / 127.f);
++        toAdd.noteOff.noteId = -1;
++        toAdd.noteOff.tuning = 0.f;
+         pOutputEvents->addEvent(toAdd);
+       }
+       else if (msg.StatusMsg() == IMidiMsg::kPolyAftertouch)
+@@ -178,7 +198,9 @@ void IPlugVST3ProcessorBase::ProcessMidiOut(IPlugQueue<SysExData>& sysExQueue, S
+         toAdd.midiCCOut.channel = msg.Channel();
+         toAdd.sampleOffset = msg.mOffset;
+         toAdd.midiCCOut.controlNumber = ControllerNumbers::kPitchBend;
+-        int16 tmp = static_cast<int16> (msg.PitchWheel() * 0x3FFF);
++        // send the raw 14-bit value (0..16383, centre 8192). PitchWheel() is -1..+1, so scaling it
++        // by 0x3FFF sent "no bend" as full bend down and negative bends as garbage.
++        const int tmp = (msg.mData2 << 7) | msg.mData1;
+         toAdd.midiCCOut.value = (tmp & 0x7F);
+         toAdd.midiCCOut.value2 = ((tmp >> 7) & 0x7F);
+         pOutputEvents->addEvent(toAdd);

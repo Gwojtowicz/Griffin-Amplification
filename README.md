@@ -16,7 +16,7 @@
 <p align="center">
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-f2a541">
   <img alt="Platform: Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-5cc8ff">
-  <img alt="Version 1.82.0" src="https://img.shields.io/badge/version-1.82.0-c49bff">
+  <img alt="Version 1.82.2" src="https://img.shields.io/badge/version-1.82.2-c49bff">
   <a href="https://www.neuralampmodeler.com"><img alt="Plays NAM captures" src="https://img.shields.io/badge/plays-NAM%20captures-7ee081"></a>
   <a href="https://www.tone3000.com"><img alt="Tones from TONE3000" src="https://img.shields.io/badge/tones-TONE3000-ff6b6b"></a>
 </p>

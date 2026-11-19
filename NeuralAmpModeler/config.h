@@ -1,7 +1,7 @@
 #define PLUG_NAME "Griffin Amplification"
 #define PLUG_MFR "Griffin Wojtowicz"
-#define PLUG_VERSION_HEX 0x00015200
-#define PLUG_VERSION_STR "1.82.0"
+#define PLUG_VERSION_HEX 0x00015202
+#define PLUG_VERSION_STR "1.82.2"
 // 1.57.0: Griffin Amplification's own IDs, so a DAW can tell it apart from the plug-in it was forked
 // from (the VST3 class IDs are made from these two).
 #define PLUG_UNIQUE_ID 'GrAm'
@@ -24,7 +24,9 @@
   // "2.2-2.2": stereo main in/out plus a stereo aux bus each way -- the FX Loop Send/Return
   // blocks' hardware/DAW send-return pair. A host that doesn't care can still just use the plain
   // "2-2" config; one that wants the loop activates/routes the extra bus.
-  #define PLUG_CHANNEL_IO "1-1 1-2 2-2 2.2-2.2"
+  // 1.82.2: no "1-1". With it, a DAW put the plug-in on a mono track as mono in / mono out and only
+  // the left side of the (stereo) chain was heard. Mono in now always gets a stereo out ("1-2").
+  #define PLUG_CHANNEL_IO "1-2 2-2 2.2-2.2"
 #endif
 
 #define PLUG_LATENCY 0
